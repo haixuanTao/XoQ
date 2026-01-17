@@ -5,8 +5,8 @@
 
 use anyhow::Result;
 use bytes::Bytes;
-use moq_native::moq_lite;
 use moq_lite::Session;
+use moq_native::moq_lite;
 use url::Url;
 
 /// Builder for MoQ connections
@@ -122,7 +122,8 @@ impl MoqConnection {
             name: name.to_string(),
             priority: 0,
         });
-        self.publish_origin.publish_broadcast("", broadcast.consumer);
+        self.publish_origin
+            .publish_broadcast("", broadcast.consumer);
         MoqTrackWriter { track }
     }
 

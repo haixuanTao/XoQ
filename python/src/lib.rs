@@ -3,8 +3,11 @@
 //! Provides Python access to MoQ and iroh P2P communication.
 //! All functions are blocking (synchronous).
 
-use pyo3::prelude::*;
+// PyO3 macros generate code that triggers this lint incorrectly
+#![allow(clippy::useless_conversion)]
+
 use pyo3::exceptions::PyRuntimeError;
+use pyo3::prelude::*;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -15,9 +18,7 @@ use ::wser as wser_lib;
 fn runtime() -> &'static tokio::runtime::Runtime {
     use std::sync::OnceLock;
     static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    RUNTIME.get_or_init(|| {
-        tokio::runtime::Runtime::new().expect("Failed to create tokio runtime")
-    })
+    RUNTIME.get_or_init(|| tokio::runtime::Runtime::new().expect("Failed to create tokio runtime"))
 }
 
 // ============================================================================
@@ -40,11 +41,7 @@ impl MoqConnection {
     ///     relay: Relay URL (default: "https://cdn.moq.dev")
     #[new]
     #[pyo3(signature = (path=None, token=None, relay=None))]
-    fn new(
-        path: Option<&str>,
-        token: Option<&str>,
-        relay: Option<&str>,
-    ) -> PyResult<Self> {
+    fn new(path: Option<&str>, token: Option<&str>, relay: Option<&str>) -> PyResult<Self> {
         let relay_url = relay.unwrap_or("https://cdn.moq.dev");
         let path = path.unwrap_or("anon/wser");
 
@@ -108,11 +105,7 @@ impl MoqPublisher {
     ///     relay: Relay URL (default: "https://cdn.moq.dev")
     #[new]
     #[pyo3(signature = (path=None, token=None, relay=None))]
-    fn new(
-        path: Option<&str>,
-        token: Option<&str>,
-        relay: Option<&str>,
-    ) -> PyResult<Self> {
+    fn new(path: Option<&str>, token: Option<&str>, relay: Option<&str>) -> PyResult<Self> {
         let relay_url = relay.unwrap_or("https://cdn.moq.dev");
         let path = path.unwrap_or("anon/wser");
 
@@ -161,11 +154,7 @@ impl MoqSubscriber {
     ///     relay: Relay URL (default: "https://cdn.moq.dev")
     #[new]
     #[pyo3(signature = (path=None, token=None, relay=None))]
-    fn new(
-        path: Option<&str>,
-        token: Option<&str>,
-        relay: Option<&str>,
-    ) -> PyResult<Self> {
+    fn new(path: Option<&str>, token: Option<&str>, relay: Option<&str>) -> PyResult<Self> {
         let relay_url = relay.unwrap_or("https://cdn.moq.dev");
         let path = path.unwrap_or("anon/wser");
 
@@ -285,10 +274,7 @@ mod iroh_bindings {
         ///     alpn: Custom ALPN protocol bytes (default: b"wser/p2p/0")
         #[new]
         #[pyo3(signature = (identity_path=None, alpn=None))]
-        fn new(
-            identity_path: Option<&str>,
-            alpn: Option<Vec<u8>>,
-        ) -> PyResult<Self> {
+        fn new(identity_path: Option<&str>, alpn: Option<Vec<u8>>) -> PyResult<Self> {
             let alpn = alpn.unwrap_or_else(|| b"wser/p2p/0".to_vec());
 
             runtime().block_on(async {
@@ -316,14 +302,13 @@ mod iroh_bindings {
         /// Accept an incoming connection
         fn accept(&self) -> PyResult<Option<IrohConnection>> {
             runtime().block_on(async {
-                let conn = self.inner
+                let conn = self
+                    .inner
                     .accept()
                     .await
                     .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
-                Ok(conn.map(|c| IrohConnection {
-                    inner: Arc::new(c),
-                }))
+                Ok(conn.map(|c| IrohConnection { inner: Arc::new(c) }))
             })
         }
     }
@@ -343,10 +328,7 @@ mod iroh_bindings {
         ///     alpn: Custom ALPN protocol bytes (default: b"wser/p2p/0")
         #[new]
         #[pyo3(signature = (server_id, alpn=None))]
-        fn new(
-            server_id: &str,
-            alpn: Option<Vec<u8>>,
-        ) -> PyResult<Self> {
+        fn new(server_id: &str, alpn: Option<Vec<u8>>) -> PyResult<Self> {
             let alpn = alpn.unwrap_or_else(|| b"wser/p2p/0".to_vec());
 
             runtime().block_on(async {
@@ -370,7 +352,8 @@ mod iroh_bindings {
         /// Open a bidirectional stream
         fn open_stream(&self) -> PyResult<IrohStream> {
             runtime().block_on(async {
-                let stream = self.inner
+                let stream = self
+                    .inner
                     .open_stream()
                     .await
                     .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -384,7 +367,8 @@ mod iroh_bindings {
         /// Accept a bidirectional stream from the remote peer
         fn accept_stream(&self) -> PyResult<IrohStream> {
             runtime().block_on(async {
-                let stream = self.inner
+                let stream = self
+                    .inner
                     .accept_stream()
                     .await
                     .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -467,8 +451,7 @@ mod serial_bindings {
     /// List available serial ports
     #[pyfunction]
     pub fn list_ports() -> PyResult<Vec<SerialPortInfo>> {
-        let ports = wser_lib::list_ports()
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let ports = wser_lib::list_ports().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
         Ok(ports
             .into_iter()
@@ -670,7 +653,8 @@ mod bridge_bindings {
         fn read(&self, size: usize) -> PyResult<Option<Vec<u8>>> {
             runtime().block_on(async {
                 let mut buf = vec![0u8; size];
-                let n = self.inner
+                let n = self
+                    .inner
                     .read(&mut buf)
                     .await
                     .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -777,7 +761,8 @@ mod bridge_bindings {
             // Read from network
             runtime().block_on(async {
                 let mut data = vec![0u8; size];
-                let n = self.inner
+                let n = self
+                    .inner
                     .read(&mut data)
                     .await
                     .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -812,7 +797,8 @@ mod bridge_bindings {
             runtime().block_on(async {
                 let mut temp = vec![0u8; 256];
                 loop {
-                    let n = self.inner
+                    let n = self
+                        .inner
                         .read(&mut temp)
                         .await
                         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -904,7 +890,8 @@ mod bridge_bindings {
             runtime().block_on(async {
                 let mut temp = vec![0u8; 256];
                 loop {
-                    let n = self.inner
+                    let n = self
+                        .inner
                         .read(&mut temp)
                         .await
                         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -937,7 +924,8 @@ mod bridge_bindings {
 
         /// Close the connection.
         fn close(&self) -> PyResult<()> {
-            self.is_open.store(false, std::sync::atomic::Ordering::Relaxed);
+            self.is_open
+                .store(false, std::sync::atomic::Ordering::Relaxed);
             Ok(())
         }
 

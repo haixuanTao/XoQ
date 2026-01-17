@@ -60,16 +60,21 @@ pub mod serial;
 pub mod serial_bridge;
 
 // Re-export commonly used types
-pub use moq::{MoqBuilder, MoqConnection, MoqPublisher, MoqSubscriber, MoqTrackReader, MoqTrackWriter};
+pub use moq::{
+    MoqBuilder, MoqConnection, MoqPublisher, MoqSubscriber, MoqTrackReader, MoqTrackWriter,
+};
 
 #[cfg(feature = "iroh")]
 pub use iroh::{IrohClientBuilder, IrohConnection, IrohServer, IrohServerBuilder, IrohStream};
 
 #[cfg(feature = "serial")]
-pub use serial::{SerialConfig, SerialPort, SerialPortInfo, SerialReader, SerialWriter, list_ports, baud, DataBits, Parity, StopBits, PortType};
+pub use serial::{
+    baud, list_ports, DataBits, Parity, PortType, SerialConfig, SerialPort, SerialPortInfo,
+    SerialReader, SerialWriter, StopBits,
+};
 
 #[cfg(all(feature = "serial", feature = "iroh"))]
-pub use serial_bridge::{Server, Client, RemoteSerialPort};
+pub use serial_bridge::{Client, RemoteSerialPort, Server};
 
 /// `serialport`-compatible module for remote serial ports.
 ///
@@ -87,7 +92,7 @@ pub use serial_bridge::{Server, Client, RemoteSerialPort};
 /// ```
 #[cfg(all(feature = "serial", feature = "iroh"))]
 pub mod serialport {
-    pub use crate::serial_bridge::{new, SerialPortBuilder, RemoteSerialPort, Transport};
+    pub use crate::serial_bridge::{new, RemoteSerialPort, SerialPortBuilder, Transport};
 }
 
 // Re-export token generation

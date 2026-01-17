@@ -11,8 +11,7 @@ use wser::Server;
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("info".parse()?),
+            tracing_subscriber::EnvFilter::from_default_env().add_directive("info".parse()?),
         )
         .init();
 
@@ -31,12 +30,7 @@ async fn main() -> Result<()> {
     let baud_rate: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(115200);
 
     // Create bridge server - opens serial port and starts iroh
-    let bridge = Server::new(
-        port_name,
-        baud_rate,
-        Some(".wser_serial_bridge_key"),
-    )
-    .await?;
+    let bridge = Server::new(port_name, baud_rate, Some(".wser_serial_bridge_key")).await?;
 
     tracing::info!("Serial bridge server started");
     tracing::info!("Port: {} @ {} baud", port_name, baud_rate);

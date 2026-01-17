@@ -16,7 +16,12 @@ fn main() -> Result<()> {
     for port in ports {
         println!("  {}", port.name);
         match port.port_type {
-            wser::PortType::Usb { vid, pid, manufacturer, product } => {
+            wser::PortType::Usb {
+                vid,
+                pid,
+                manufacturer,
+                product,
+            } => {
                 println!("    Type: USB");
                 println!("    VID:PID: {:04x}:{:04x}", vid, pid);
                 if let Some(m) = manufacturer {

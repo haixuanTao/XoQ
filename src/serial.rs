@@ -300,7 +300,10 @@ impl SerialPort {
     /// Split into read and write halves
     pub fn split(self) -> (SerialReader, SerialWriter) {
         let (reader, writer) = tokio::io::split(self.inner);
-        (SerialReader { inner: reader }, SerialWriter { inner: writer })
+        (
+            SerialReader { inner: reader },
+            SerialWriter { inner: writer },
+        )
     }
 }
 
@@ -384,14 +387,12 @@ pub fn list_ports() -> Result<Vec<SerialPortInfo>> {
         .map(|p| SerialPortInfo {
             name: p.port_name,
             port_type: match p.port_type {
-                tokio_serial::SerialPortType::UsbPort(info) => {
-                    PortType::Usb {
-                        vid: info.vid,
-                        pid: info.pid,
-                        manufacturer: info.manufacturer,
-                        product: info.product,
-                    }
-                }
+                tokio_serial::SerialPortType::UsbPort(info) => PortType::Usb {
+                    vid: info.vid,
+                    pid: info.pid,
+                    manufacturer: info.manufacturer,
+                    product: info.product,
+                },
                 tokio_serial::SerialPortType::PciPort => PortType::Pci,
                 tokio_serial::SerialPortType::BluetoothPort => PortType::Bluetooth,
                 tokio_serial::SerialPortType::Unknown => PortType::Unknown,

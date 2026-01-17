@@ -21,7 +21,9 @@ async fn test_local_pubsub() {
     });
 
     // Publish the broadcast to the origin
-    origin.producer.publish_broadcast("test", broadcast.consumer.clone());
+    origin
+        .producer
+        .publish_broadcast("test", broadcast.consumer.clone());
 
     // Subscriber side: consume the origin and subscribe to the track
     let mut consumer = origin.producer.consume();
@@ -77,7 +79,9 @@ async fn test_multiple_groups() {
         priority: 0,
     });
 
-    origin.producer.publish_broadcast("", broadcast.consumer.clone());
+    origin
+        .producer
+        .publish_broadcast("", broadcast.consumer.clone());
 
     let mut consumer = origin.producer.consume();
     let (_, bc) = consumer.announced().await.unwrap();
@@ -114,7 +118,9 @@ async fn test_group_with_multiple_frames() {
         priority: 0,
     });
 
-    origin.producer.publish_broadcast("", broadcast.consumer.clone());
+    origin
+        .producer
+        .publish_broadcast("", broadcast.consumer.clone());
 
     let mut consumer = origin.producer.consume();
     let (_, bc) = consumer.announced().await.unwrap();
@@ -158,7 +164,9 @@ async fn test_broadcast_unannounce() {
     let origin = Origin::produce();
     let broadcast = Broadcast::produce();
 
-    origin.producer.publish_broadcast("temp", broadcast.consumer.clone());
+    origin
+        .producer
+        .publish_broadcast("temp", broadcast.consumer.clone());
 
     let mut consumer = origin.producer.consume();
 

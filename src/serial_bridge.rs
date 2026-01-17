@@ -17,6 +17,7 @@
 //! port.write_all(b"AT\r\n")?;
 //! let mut buf = [0u8; 100];
 //! let n = port.read(&mut buf)?;
+//! # Ok::<(), anyhow::Error>(())
 //! ```
 
 use anyhow::Result;
@@ -24,7 +25,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
-use crate::iroh::{IrohClientBuilder, IrohServerBuilder, IrohConnection};
+use crate::iroh::{IrohClientBuilder, IrohConnection, IrohServerBuilder};
 use crate::serial::{SerialPort, SerialReader, SerialWriter};
 
 /// A server that bridges a local serial port to remote clients over iroh P2P
@@ -42,11 +43,7 @@ impl Server {
     ///     port: Serial port name (e.g., "/dev/ttyUSB0" or "COM3")
     ///     baud_rate: Baud rate (e.g., 115200)
     ///     identity_path: Optional path to save/load server identity
-    pub async fn new(
-        port: &str,
-        baud_rate: u32,
-        identity_path: Option<&str>,
-    ) -> Result<Self> {
+    pub async fn new(port: &str, baud_rate: u32, identity_path: Option<&str>) -> Result<Self> {
         // Open serial port
         let serial = SerialPort::open_simple(port, baud_rate)?;
         let (reader, writer) = serial.split();
@@ -96,7 +93,10 @@ impl Server {
 
     /// Run the bridge server for a single connection, then return
     pub async fn run_once(&self) -> Result<()> {
-        tracing::info!("Serial bridge server waiting for connection. ID: {}", self.server_id);
+        tracing::info!(
+            "Serial bridge server waiting for connection. ID: {}",
+            self.server_id
+        );
 
         loop {
             let conn = match self.endpoint.accept().await? {
@@ -355,7 +355,10 @@ impl SerialPortBuilder {
 
     /// Set authentication token (for MoQ).
     pub fn token(mut self, token: &str) -> Self {
-        if let Transport::Moq { token: ref mut t, .. } = self.transport {
+        if let Transport::Moq {
+            token: ref mut t, ..
+        } = self.transport
+        {
             *t = Some(token.to_string());
         }
         self
@@ -366,34 +369,30 @@ impl SerialPortBuilder {
         let runtime = tokio::runtime::Runtime::new()?;
 
         let client = match self.transport {
-            Transport::Iroh { alpn } => {
-                runtime.block_on(async {
-                    let mut builder = IrohClientBuilder::new();
-                    if let Some(alpn) = alpn {
-                        builder = builder.alpn(&alpn);
-                    }
-                    let conn = builder.connect_str(&self.port_name).await?;
-                    let stream = conn.open_stream().await?;
-                    Ok::<_, anyhow::Error>(ClientInner::Iroh {
-                        stream: Arc::new(Mutex::new(stream)),
-                        _conn: conn,
-                    })
-                })?
-            }
-            Transport::Moq { relay, token } => {
-                runtime.block_on(async {
-                    let mut builder = crate::moq::MoqBuilder::new()
-                        .relay(&relay)
-                        .path(&self.port_name);
-                    if let Some(t) = token {
-                        builder = builder.token(&t);
-                    }
-                    let conn = builder.connect_duplex().await?;
-                    Ok::<_, anyhow::Error>(ClientInner::Moq {
-                        conn: Arc::new(tokio::sync::Mutex::new(conn)),
-                    })
-                })?
-            }
+            Transport::Iroh { alpn } => runtime.block_on(async {
+                let mut builder = IrohClientBuilder::new();
+                if let Some(alpn) = alpn {
+                    builder = builder.alpn(&alpn);
+                }
+                let conn = builder.connect_str(&self.port_name).await?;
+                let stream = conn.open_stream().await?;
+                Ok::<_, anyhow::Error>(ClientInner::Iroh {
+                    stream: Arc::new(Mutex::new(stream)),
+                    _conn: conn,
+                })
+            })?,
+            Transport::Moq { relay, token } => runtime.block_on(async {
+                let mut builder = crate::moq::MoqBuilder::new()
+                    .relay(&relay)
+                    .path(&self.port_name);
+                if let Some(t) = token {
+                    builder = builder.token(&t);
+                }
+                let conn = builder.connect_duplex().await?;
+                Ok::<_, anyhow::Error>(ClientInner::Moq {
+                    conn: Arc::new(tokio::sync::Mutex::new(conn)),
+                })
+            })?,
         };
 
         Ok(RemoteSerialPort {
@@ -573,7 +572,8 @@ impl RemoteSerialPort {
                         }
                     }
                 }
-            }).await
+            })
+            .await
         });
 
         match result {
@@ -622,15 +622,13 @@ impl RemoteSerialPort {
 
 impl std::io::Read for RemoteSerialPort {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.read_bytes(buf)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        self.read_bytes(buf).map_err(std::io::Error::other)
     }
 }
 
 impl std::io::Write for RemoteSerialPort {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.write_bytes(buf)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        self.write_bytes(buf).map_err(std::io::Error::other)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
