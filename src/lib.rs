@@ -53,11 +53,42 @@ pub mod moq;
 #[cfg(feature = "iroh")]
 pub mod iroh;
 
+#[cfg(feature = "serial")]
+pub mod serial;
+
+#[cfg(all(feature = "serial", feature = "iroh"))]
+pub mod serial_bridge;
+
 // Re-export commonly used types
 pub use moq::{MoqBuilder, MoqConnection, MoqPublisher, MoqSubscriber, MoqTrackReader, MoqTrackWriter};
 
 #[cfg(feature = "iroh")]
 pub use iroh::{IrohClientBuilder, IrohConnection, IrohServer, IrohServerBuilder, IrohStream};
+
+#[cfg(feature = "serial")]
+pub use serial::{SerialConfig, SerialPort, SerialPortInfo, SerialReader, SerialWriter, list_ports, baud, DataBits, Parity, StopBits, PortType};
+
+#[cfg(all(feature = "serial", feature = "iroh"))]
+pub use serial_bridge::{Server, Client, RemoteSerialPort};
+
+/// `serialport`-compatible module for remote serial ports.
+///
+/// This module provides a drop-in compatible API with the `serialport` crate.
+///
+/// # Example
+///
+/// ```no_run
+/// // Instead of: use serialport;
+/// use wser::serialport;
+///
+/// // Same API as serialport crate
+/// let mut port = serialport::new("server-endpoint-id").open()?;
+/// # Ok::<(), anyhow::Error>(())
+/// ```
+#[cfg(all(feature = "serial", feature = "iroh"))]
+pub mod serialport {
+    pub use crate::serial_bridge::{new, SerialPortBuilder, RemoteSerialPort, Transport};
+}
 
 // Re-export token generation
 pub use moq_token;

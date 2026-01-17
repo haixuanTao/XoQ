@@ -1,1 +1,37 @@
+# Rust
 /target
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.venv/
+venv/
+ENV/
+.python-version
+
+# Secrets
+serial_bridge_key
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo

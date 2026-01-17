@@ -7,6 +7,12 @@ edition = "2021"
 name = "wser"
 crate-type = ["cdylib"]
 
+[features]
+default = []
+iroh = ["wser/iroh"]
+serial = ["wser/serial"]
+
 [dependencies]
 wser = { path = ".." }
 pyo3 = { version = "0.22", features = ["extension-module"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }

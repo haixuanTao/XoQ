@@ -9,11 +9,13 @@ edition = "2021"
 [features]
 default = []
 iroh = ["dep:iroh"]
+serial = ["dep:tokio-serial"]
 
 [dependencies]
 moq-transport = "0.12"
 moq-token = "0.5"
 iroh = { version = "0.95", optional = true }
+tokio-serial = { version = "5.4", optional = true }
 moq-native = "0.11"
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
@@ -24,31 +26,21 @@ bytes = "1"
 rand = "0.9"
 
 [[example]]
-name = "server_iroh"
-path = "examples/server_iroh.rs"
-required-features = ["iroh"]
+name = "serial_server"
+path = "examples/serial_server.rs"
+required-features = ["iroh", "serial"]
 
 [[example]]
-name = "client_iroh"
-path = "examples/client_iroh.rs"
-required-features = ["iroh"]
+name = "serial_client"
+path = "examples/serial_client.rs"
+required-features = ["iroh", "serial"]
 
 [[example]]
-name = "server"
-path = "examples/server.rs"
+name = "serial_port_compat"
+path = "examples/serial_port_compat.rs"
+required-features = ["iroh", "serial"]
 
 [[example]]
-name = "client"
-path = "examples/client.rs"
-
-[[example]]
-name = "gen_token"
-path = "examples/gen_token.rs"
-
-[[example]]
-name = "server_auth"
-path = "examples/server_auth.rs"
-
-[[example]]
-name = "client_auth"
-path = "examples/client_auth.rs"
+name = "list_ports"
+path = "examples/list_ports.rs"
+required-features = ["serial"]

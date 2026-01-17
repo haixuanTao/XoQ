@@ -1,0 +1,187 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Check formatting
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  # Clippy linting
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy (no features)
+        run: cargo clippy -- -D warnings
+      - name: Clippy (all features)
+        run: cargo clippy --features "iroh,serial" -- -D warnings
+
+  # Build and test on multiple platforms
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+
+      # Install libudev on Linux (required for serial port enumeration)
+      - name: Install libudev (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+
+      # Build with no features
+      - name: Build (no features)
+        run: cargo build --verbose
+
+      # Build with iroh feature
+      - name: Build (iroh)
+        run: cargo build --features iroh --verbose
+
+      # Build with serial feature
+      - name: Build (serial)
+        run: cargo build --features serial --verbose
+
+      # Build with all features
+      - name: Build (all features)
+        run: cargo build --features "iroh,serial" --verbose
+
+      # Build examples
+      - name: Build examples
+        run: cargo build --examples --features "iroh,serial" --verbose
+
+      # Run tests
+      - name: Run tests
+        run: cargo test --features "iroh,serial" --verbose
+
+  # Build Python bindings
+  python:
+    name: Python Bindings (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: python-${{ matrix.os }}
+          workspaces: python
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Install libudev on Linux
+      - name: Install libudev (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+
+      - name: Install maturin
+        run: pip install maturin
+
+      # Build Python package with all features
+      - name: Build Python package
+        working-directory: python
+        run: maturin build --features "iroh,serial"
+
+      # Build wheel for release
+      - name: Build wheel (release)
+        working-directory: python
+        run: maturin build --release --features "iroh,serial"
+
+      # Upload wheels as artifacts
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: target/wheels/*.whl
+
+  # Documentation build
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install libudev
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+
+      - name: Build documentation
+        run: cargo doc --features "iroh,serial" --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  # Release build (optimized)
+  release:
+    name: Release Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.os }}
+
+      - name: Install libudev (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+
+      - name: Build release
+        run: cargo build --release --features "iroh,serial"
+
+      - name: Build release examples
+        run: cargo build --release --examples --features "iroh,serial"
