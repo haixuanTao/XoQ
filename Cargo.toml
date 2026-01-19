@@ -48,8 +48,3 @@ required-features = ["iroh", "serial"]
 name = "so100_teleop"
 path = "examples/so100_teleop.rs"
 required-features = ["iroh", "serial"]
-
-[[example]]
-name = "so100_reboot"
-path = "examples/so100_reboot.rs"
-required-features = ["iroh", "serial"]
