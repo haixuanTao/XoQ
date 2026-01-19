@@ -69,7 +69,10 @@ fn main() -> Result<()> {
     println!("Disabling torque on leader arm...");
     for id in SERVO_IDS {
         if let Err(e) = leader.write_torque_enable(id, false) {
-            println!("Warning: Failed to disable torque on leader servo {}: {}", id, e);
+            println!(
+                "Warning: Failed to disable torque on leader servo {}: {}",
+                id, e
+            );
         }
         thread::sleep(Duration::from_millis(10)); // Small delay between commands
     }
@@ -78,7 +81,10 @@ fn main() -> Result<()> {
     println!("Enabling torque on follower arm...");
     for id in SERVO_IDS {
         if let Err(e) = follower.write_torque_enable(id, true) {
-            println!("Warning: Failed to enable torque on follower servo {}: {}", id, e);
+            println!(
+                "Warning: Failed to enable torque on follower servo {}: {}",
+                id, e
+            );
         }
         thread::sleep(Duration::from_millis(10)); // Small delay between commands
     }

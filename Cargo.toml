@@ -40,21 +40,6 @@ path = "examples/serial_client.rs"
 required-features = ["iroh", "serial"]
 
 [[example]]
-name = "serial_port_compat"
-path = "examples/serial_port_compat.rs"
-required-features = ["iroh", "serial"]
-
-[[example]]
-name = "list_ports"
-path = "examples/list_ports.rs"
-required-features = ["serial"]
-
-[[example]]
-name = "serial_test"
-path = "examples/serial_test.rs"
-required-features = ["serial"]
-
-[[example]]
 name = "rustypot_remote"
 path = "examples/rustypot_remote.rs"
 required-features = ["iroh", "serial"]

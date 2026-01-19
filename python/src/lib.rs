@@ -475,7 +475,8 @@ mod serial_bindings {
     /// A serial port connection
     #[pyclass]
     pub struct SerialPort {
-        inner: Arc<Mutex<xoq_lib::SerialPort>>,
+        reader: Arc<Mutex<xoq_lib::SerialReader>>,
+        writer: Arc<Mutex<xoq_lib::SerialWriter>>,
     }
 
     #[pymethods]
@@ -491,16 +492,19 @@ mod serial_bindings {
             let serial = xoq_lib::SerialPort::open_simple(port, baud_rate)
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
+            let (reader, writer) = serial.split();
+
             Ok(SerialPort {
-                inner: Arc::new(Mutex::new(serial)),
+                reader: Arc::new(Mutex::new(reader)),
+                writer: Arc::new(Mutex::new(writer)),
             })
         }
 
         /// Write bytes to the serial port
         fn write(&self, data: Vec<u8>) -> PyResult<usize> {
             runtime().block_on(async {
-                let mut serial = self.inner.lock().await;
-                serial
+                let mut writer = self.writer.lock().await;
+                writer
                     .write(&data)
                     .await
                     .map_err(|e| PyRuntimeError::new_err(e.to_string()))
@@ -510,8 +514,8 @@ mod serial_bindings {
         /// Write a string to the serial port
         fn write_str(&self, data: &str) -> PyResult<()> {
             runtime().block_on(async {
-                let mut serial = self.inner.lock().await;
-                serial
+                let mut writer = self.writer.lock().await;
+                writer
                     .write_str(data)
                     .await
                     .map_err(|e| PyRuntimeError::new_err(e.to_string()))
@@ -522,9 +526,9 @@ mod serial_bindings {
         #[pyo3(signature = (size=1024))]
         fn read(&self, size: usize) -> PyResult<Vec<u8>> {
             runtime().block_on(async {
-                let mut serial = self.inner.lock().await;
+                let mut reader = self.reader.lock().await;
                 let mut buf = vec![0u8; size];
-                let n = serial
+                let n = reader
                     .read(&mut buf)
                     .await
                     .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;

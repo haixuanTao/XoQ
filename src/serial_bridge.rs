@@ -171,7 +171,9 @@ impl Server {
 
     async fn handle_connection(&self, conn: IrohConnection) -> Result<()> {
         tracing::debug!("Waiting for client to open stream...");
-        let stream = conn.accept_stream().await
+        let stream = conn
+            .accept_stream()
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to accept stream: {}", e))?;
         tracing::debug!("Stream accepted, starting bridge");
         // Split the stream so reads and writes don't block each other
@@ -199,7 +201,11 @@ impl Server {
         loop {
             match recv.read(&mut buf).await {
                 Ok(Some(n)) if n > 0 => {
-                    tracing::debug!("Network -> Serial: {} bytes: {:?}", n, String::from_utf8_lossy(&buf[..n]));
+                    tracing::debug!(
+                        "Network -> Serial: {} bytes: {:?}",
+                        n,
+                        String::from_utf8_lossy(&buf[..n])
+                    );
                     if serial_write_tx.send(buf[..n].to_vec()).is_err() {
                         tracing::error!("Serial writer thread died");
                         break;
@@ -236,10 +242,14 @@ impl Client {
     /// Connect to a remote serial bridge server
     pub async fn connect(server_id: &str) -> Result<Self> {
         tracing::debug!("Connecting to server: {}", server_id);
-        let conn = IrohClientBuilder::new().connect_str(server_id).await
+        let conn = IrohClientBuilder::new()
+            .connect_str(server_id)
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to connect to server: {}", e))?;
         tracing::debug!("Connected to server, opening stream...");
-        let stream = conn.open_stream().await
+        let stream = conn
+            .open_stream()
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to open stream: {}", e))?;
         tracing::debug!("Stream opened successfully");
         // Split stream so reads and writes don't block each other
@@ -329,7 +339,11 @@ impl Client {
 
             match result {
                 Some(data) => {
-                    tracing::debug!("Sending {} bytes to network: {:?}", data.len(), String::from_utf8_lossy(&data));
+                    tracing::debug!(
+                        "Sending {} bytes to network: {:?}",
+                        data.len(),
+                        String::from_utf8_lossy(&data)
+                    );
                     let mut s = send.lock().await;
                     if let Err(e) = s.write_all(&data).await {
                         tracing::debug!("Network write error: {}", e);

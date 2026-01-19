@@ -417,9 +417,7 @@ impl SerialWriter {
             .map_err(|_| anyhow::anyhow!("Serial writer thread died"))?;
 
         // Wait for result
-        let rx = unsafe {
-            std::ptr::read(&self.write_result_rx)
-        };
+        let rx = unsafe { std::ptr::read(&self.write_result_rx) };
 
         let (result, rx) = tokio::task::spawn_blocking(move || {
             let result = rx.recv();

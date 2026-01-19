@@ -32,6 +32,8 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Install libudev
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
       - name: Clippy (no features)
         run: cargo clippy -- -D warnings
       - name: Clippy (all features)
