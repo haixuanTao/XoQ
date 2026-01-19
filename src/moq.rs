@@ -124,7 +124,10 @@ impl MoqConnection {
         });
         self.publish_origin
             .publish_broadcast("", broadcast.consumer);
-        MoqTrackWriter { track }
+        MoqTrackWriter {
+            track,
+            _broadcast: broadcast.producer,
+        }
     }
 
     /// Wait for an announced broadcast and subscribe to a track
@@ -166,7 +169,10 @@ impl MoqPublisher {
             priority: 0,
         });
         self.origin.publish_broadcast("", broadcast.consumer);
-        MoqTrackWriter { track }
+        MoqTrackWriter {
+            track,
+            _broadcast: broadcast.producer,
+        }
     }
 }
 
@@ -199,6 +205,8 @@ impl MoqSubscriber {
 /// A track writer for publishing data
 pub struct MoqTrackWriter {
     track: moq_lite::TrackProducer,
+    // Keep the broadcast producer alive
+    _broadcast: moq_lite::BroadcastProducer,
 }
 
 impl MoqTrackWriter {

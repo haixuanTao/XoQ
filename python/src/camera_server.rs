@@ -41,11 +41,11 @@ impl CameraServer {
 
     /// Get the server's endpoint ID
     fn id(&self) -> String {
-        self.inner.id().to_string()
+        self.inner.id()
     }
 
     /// Run the camera server (blocks forever, handling connections)
-    fn run(&self) -> PyResult<()> {
+    fn run(&mut self) -> PyResult<()> {
         runtime().block_on(async {
             self.inner
                 .run()
@@ -55,7 +55,7 @@ impl CameraServer {
     }
 
     /// Handle a single client connection
-    fn run_once(&self) -> PyResult<()> {
+    fn run_once(&mut self) -> PyResult<()> {
         runtime().block_on(async {
             self.inner
                 .run_once()

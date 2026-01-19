@@ -106,10 +106,22 @@ impl Camera {
     /// * `fps` - Requested frames per second
     pub fn open(index: u32, width: u32, height: u32, fps: u32) -> Result<Self> {
         let camera_index = CameraIndex::Index(index);
+
+        // Try with specific format first, then fall back to any available format
         let format = CameraFormat::new(Resolution::new(width, height), FrameFormat::MJPEG, fps);
         let requested = RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(format));
 
-        let mut camera = NokhwaCamera::new(camera_index, requested)?;
+        let camera_result = NokhwaCamera::new(camera_index.clone(), requested);
+
+        let mut camera = match camera_result {
+            Ok(cam) => cam,
+            Err(_) => {
+                // Fallback: try with highest framerate (lets nokhwa pick the format)
+                let fallback = RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
+                NokhwaCamera::new(camera_index, fallback)?
+            }
+        };
+
         camera.open_stream()?;
 
         Ok(Camera {

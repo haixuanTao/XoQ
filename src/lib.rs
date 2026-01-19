@@ -114,10 +114,10 @@ pub use serialport::{Client, RemoteSerialPort};
 pub use camera::{list_cameras, Camera, CameraInfo, Frame};
 
 #[cfg(all(feature = "camera", feature = "iroh"))]
-pub use camera_server::CameraServer;
+pub use camera_server::{CameraServer, CameraServerBuilder};
 
 #[cfg(all(feature = "camera", feature = "iroh"))]
-pub use opencv::{remote_camera, CameraClient};
+pub use opencv::{remote_camera, CameraClient, CameraClientBuilder};
 
 // Re-export token generation
 pub use moq_token;
