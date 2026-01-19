@@ -14,5 +14,5 @@ serial = ["xoq/serial"]
 
 [dependencies]
 xoq = { path = ".." }
-pyo3 = { version = "0.22", features = ["extension-module"] }
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py38"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
