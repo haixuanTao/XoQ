@@ -1,4 +1,4 @@
-//! OpenCV-compatible VideoCapture for remote cameras over iroh P2P.
+//! OpenCV-compatible VideoCapture for remote cameras over iroh P2P or MoQ relay.
 
 use crate::{runtime, xoq_lib};
 use numpy::{PyArray1, PyArrayMethods};
@@ -7,13 +7,25 @@ use pyo3::prelude::*;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-/// OpenCV-compatible VideoCapture for remote cameras over iroh P2P.
+/// OpenCV-compatible VideoCapture for remote cameras over iroh P2P or MoQ relay.
 ///
 /// Drop-in replacement for cv2.VideoCapture that connects to a remote
 /// camera server instead of a local device.
 ///
+/// Supports both transport types with auto-detection:
+/// - MoQ (relay): source contains "/" (e.g., "anon/my-camera")
+/// - iroh (P2P): source is an endpoint ID (no "/" character)
+///
 /// Example:
+///     # Using iroh P2P
 ///     cap = xoq.VideoCapture("server-endpoint-id")
+///
+///     # Using MoQ relay
+///     cap = xoq.VideoCapture("anon/my-camera")
+///
+///     # Explicit transport selection
+///     cap = xoq.VideoCapture("anon/my-camera", transport="moq")
+///     cap = xoq.VideoCapture("server-id", transport="iroh")
 ///
 ///     while True:
 ///         ret, frame = cap.read()
@@ -35,13 +47,35 @@ impl VideoCapture {
     /// Open a connection to a remote camera server.
     ///
     /// Args:
-    ///     source: The server's endpoint ID
+    ///     source: The server's endpoint ID (iroh) or MoQ path (e.g., "anon/my-camera")
+    ///     transport: Optional transport type ("iroh" or "moq"). If not specified,
+    ///                auto-detects based on source format (contains "/" = moq)
     #[new]
-    fn new(source: &str) -> PyResult<Self> {
+    #[pyo3(signature = (source, transport=None))]
+    fn new(source: &str, transport: Option<&str>) -> PyResult<Self> {
         let client = runtime().block_on(async {
-            xoq_lib::CameraClient::connect(source)
-                .await
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+            let use_moq = match transport {
+                Some("moq") => true,
+                Some("iroh") => false,
+                Some(t) => return Err(PyRuntimeError::new_err(format!(
+                    "Unknown transport '{}'. Use 'iroh' or 'moq'", t
+                ))),
+                None => source.contains('/'), // Auto-detect: "/" means MoQ path
+            };
+
+            let client = if use_moq {
+                xoq_lib::CameraClientBuilder::new()
+                    .moq(source)
+                    .connect()
+                    .await
+            } else {
+                xoq_lib::CameraClientBuilder::new()
+                    .iroh(source)
+                    .connect()
+                    .await
+            };
+
+            client.map_err(|e| PyRuntimeError::new_err(e.to_string()))
         })?;
 
         Ok(VideoCapture {

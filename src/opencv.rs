@@ -120,10 +120,7 @@ impl CameraClientBuilder {
                     .await?
                     .ok_or_else(|| anyhow::anyhow!("Camera track not found"))?;
 
-                CameraClientInner::Moq {
-                    track,
-                    _conn: conn,
-                }
+                CameraClientInner::Moq { track, _conn: conn }
             }
         };
 
@@ -170,13 +167,11 @@ impl CameraClient {
                     let mut header = [0u8; 20];
                     recv.read_exact(&mut header).await?;
 
-                    let width =
-                        u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
-                    let height =
-                        u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
+                    let width = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
+                    let height = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
                     let timestamp = u64::from_le_bytes([
-                        header[8], header[9], header[10], header[11],
-                        header[12], header[13], header[14], header[15],
+                        header[8], header[9], header[10], header[11], header[12], header[13],
+                        header[14], header[15],
                     ]);
                     let length =
                         u32::from_le_bytes([header[16], header[17], header[18], header[19]]);
@@ -205,11 +200,20 @@ impl CameraClient {
                 Ok(frame)
             }
             CameraClientInner::Moq { track, .. } => {
-                // Read frame from MoQ track
-                let data = track
-                    .read()
-                    .await?
-                    .ok_or_else(|| anyhow::anyhow!("No frame available"))?;
+                // Read frame from MoQ track with retry logic
+                let mut retries = 0;
+                let data = loop {
+                    match track.read().await? {
+                        Some(data) => break data,
+                        None => {
+                            retries += 1;
+                            if retries > 200 {
+                                anyhow::bail!("No frame available after retries");
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                        }
+                    }
+                };
 
                 if data.len() < 12 {
                     anyhow::bail!("Invalid frame data");
