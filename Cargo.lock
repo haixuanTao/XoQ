@@ -6602,6 +6602,7 @@ dependencies = [
  "rustypot",
  "serialport",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
  "url",

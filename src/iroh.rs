@@ -7,6 +7,7 @@ use iroh::endpoint::Connection;
 use iroh::{Endpoint, EndpointAddr, PublicKey, SecretKey};
 use std::path::PathBuf;
 use tokio::fs;
+use tokio_util::sync::CancellationToken;
 
 const DEFAULT_ALPN: &[u8] = b"xoq/p2p/0";
 
@@ -100,6 +101,7 @@ impl IrohClientBuilder {
         Ok(IrohConnection {
             conn,
             _endpoint: endpoint,
+            cancel_token: CancellationToken::new(),
         })
     }
 
@@ -139,6 +141,7 @@ impl IrohServer {
             return Ok(Some(IrohConnection {
                 conn,
                 _endpoint: self.endpoint.clone(),
+                cancel_token: CancellationToken::new(),
             }));
         }
         Ok(None)
@@ -154,6 +157,7 @@ impl IrohServer {
 pub struct IrohConnection {
     conn: Connection,
     _endpoint: Endpoint,
+    cancel_token: CancellationToken,
 }
 
 impl IrohConnection {
@@ -177,6 +181,19 @@ impl IrohConnection {
     /// Get the underlying connection for advanced usage
     pub fn connection(&self) -> &Connection {
         &self.conn
+    }
+
+    /// Get a cancellation token that is cancelled when this connection is dropped.
+    ///
+    /// Use this to gracefully shut down spawned tasks when the connection ends.
+    pub fn cancellation_token(&self) -> CancellationToken {
+        self.cancel_token.clone()
+    }
+}
+
+impl Drop for IrohConnection {
+    fn drop(&mut self) {
+        self.cancel_token.cancel();
     }
 }
 

@@ -11,6 +11,7 @@
 //!    `cargo run --example rustypot_remote --features "iroh,serial" -- <server-endpoint-id>`
 
 use anyhow::Result;
+use rustypot::servo::dynamixel::xl320::Xl320Controller;
 use rustypot::servo::feetech::sts3215::Sts3215Controller;
 use std::env;
 use std::thread;
@@ -35,10 +36,11 @@ fn main() -> Result<()> {
     let port = xoq::serialport::new(server_id)
         .timeout(Duration::from_millis(1000))
         .open()?;
+    println!("Remote serial port opened.");
 
     // Create rustypot controller
-    let mut controller = Sts3215Controller::new()
-        .with_protocol_v1()
+    let mut controller = Xl320Controller::new()
+        .with_protocol_v2()
         .with_serial_port(Box::new(port));
 
     println!("Connected to remote serial port!");
@@ -46,7 +48,7 @@ fn main() -> Result<()> {
 
     // Continuous read loop using rustypot
     loop {
-        match controller.sync_read_present_position(&[1, 2]) {
+        match controller.sync_read_present_position(&[10]) {
             Ok(positions) => {
                 println!("Positions: {:?}", positions);
             }

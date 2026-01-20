@@ -47,14 +47,15 @@ impl Server {
                 let mut buf = [0u8; 1024];
                 loop {
                     match reader.read(&mut buf).await {
-                        Ok(n) if n > 0 => {
+                        Ok(0) => {
+                            // 0 bytes - timeout, yield to prevent busy spin
+                            tokio::task::yield_now().await;
+                        }
+                        Ok(n) => {
                             tracing::debug!("Serial read {} bytes", n);
                             if read_tx.send(buf[..n].to_vec()).await.is_err() {
                                 break; // Channel closed
                             }
-                        }
-                        Ok(_) => {
-                            // 0 bytes - timeout, keep polling
                         }
                         Err(e) => {
                             tracing::error!("Serial read error: {}", e);
@@ -162,22 +163,40 @@ impl Server {
         let serial_read_rx = self.serial_read_rx.clone();
         let serial_write_tx = self.serial_write_tx.clone();
 
+        // Use connection's cancellation token for graceful shutdown (ensures lock is released)
+        let cancel_token = conn.cancellation_token();
+
         // Spawn task: serial -> network (event-driven via channel)
+        let cancel_clone = cancel_token.clone();
         let serial_to_net = tokio::spawn(async move {
             tracing::debug!("Serial->Network bridge task started");
             let mut rx = serial_read_rx.lock().await;
-            while let Some(data) = rx.recv().await {
-                tracing::debug!("Serial -> Network: {} bytes", data.len());
-                if let Err(e) = send.write_all(&data).await {
-                    tracing::debug!("Network write error: {}", e);
-                    break;
-                }
-                if let Err(e) = send.flush().await {
-                    tracing::debug!("Network flush error: {}", e);
-                    break;
+            loop {
+                tokio::select! {
+                    _ = cancel_clone.cancelled() => {
+                        tracing::debug!("Serial->Network task cancelled");
+                        break;
+                    }
+                    data = rx.recv() => {
+                        match data {
+                            Some(data) => {
+                                tracing::debug!("Serial -> Network: {} bytes", data.len());
+                                if let Err(e) = send.write_all(&data).await {
+                                    tracing::debug!("Network write error: {}", e);
+                                    break;
+                                }
+                                if let Err(e) = send.flush().await {
+                                    tracing::debug!("Network flush error: {}", e);
+                                    break;
+                                }
+                            }
+                            None => break,
+                        }
+                    }
                 }
             }
             tracing::debug!("Serial->Network bridge task ended");
+            // Lock is automatically released here when rx guard is dropped
         });
 
         // Main task: network -> serial
@@ -210,7 +229,10 @@ impl Server {
             }
         }
 
-        serial_to_net.abort();
+        // Signal graceful shutdown instead of abort (allows lock to be released)
+        cancel_token.cancel();
+        // Wait for task to finish and release the lock
+        let _ = serial_to_net.await;
         Ok(())
     }
 }
