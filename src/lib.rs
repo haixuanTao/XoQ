@@ -90,6 +90,45 @@ pub mod camera_server;
 #[cfg(all(feature = "camera", feature = "iroh"))]
 pub mod opencv;
 
+#[cfg(feature = "can")]
+pub mod can;
+
+#[cfg(all(feature = "can", feature = "iroh"))]
+pub mod can_server;
+
+#[cfg(all(feature = "can", feature = "iroh"))]
+pub mod socketcan_impl;
+
+/// `socketcan`-compatible module for remote CAN sockets.
+///
+/// This module provides a drop-in compatible API similar to the `socketcan` crate.
+///
+/// # Example
+///
+/// ```no_run
+/// use xoq::socketcan;
+///
+/// // Connect to remote CAN interface
+/// let mut socket = socketcan::new("server-endpoint-id").open()?;
+///
+/// // Write a frame
+/// let frame = socketcan::CanFrame::new(0x123, &[1, 2, 3])?;
+/// socket.write_frame(&frame)?;
+///
+/// // Read frames
+/// if let Some(frame) = socket.read_frame()? {
+///     println!("Received: ID={:x}", frame.id());
+/// }
+/// # Ok::<(), anyhow::Error>(())
+/// ```
+#[cfg(all(feature = "can", feature = "iroh"))]
+pub mod socketcan {
+    pub use crate::socketcan_impl::{
+        new, AnyCanFrame, CanBusSocket, CanClient, CanFdFlags, CanFdFrame, CanFrame,
+        CanInterfaceInfo, CanSocketBuilder, RemoteCanSocket, Transport,
+    };
+}
+
 // Re-export commonly used types
 pub use moq::{
     MoqBuilder, MoqConnection, MoqPublisher, MoqSubscriber, MoqTrackReader, MoqTrackWriter,
@@ -118,6 +157,18 @@ pub use camera_server::{CameraServer, CameraServerBuilder};
 
 #[cfg(all(feature = "camera", feature = "iroh"))]
 pub use opencv::{remote_camera, CameraClient, CameraClientBuilder};
+
+#[cfg(feature = "can")]
+pub use can::{
+    list_interfaces, AnyCanFrame, CanBusSocket, CanConfig, CanFdFlags, CanFdFrame, CanFrame,
+    CanInterfaceInfo, CanReader, CanSocket, CanWriter,
+};
+
+#[cfg(all(feature = "can", feature = "iroh"))]
+pub use can_server::CanServer;
+
+#[cfg(all(feature = "can", feature = "iroh"))]
+pub use socketcan::{CanClient, RemoteCanSocket};
 
 // Re-export token generation
 pub use moq_token;

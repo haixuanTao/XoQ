@@ -14,6 +14,7 @@ default = []
 iroh = ["dep:iroh"]
 serial = ["dep:serialport"]
 camera = ["dep:nokhwa", "dep:image"]
+can = ["dep:socketcan", "dep:libc"]
 
 [dependencies]
 moq-transport = "0.12"
@@ -22,6 +23,8 @@ iroh = { version = "0.95", optional = true }
 serialport = { version = "4", optional = true }
 nokhwa = { version = "0.10", features = ["input-native"], optional = true }
 image = { version = "0.25", optional = true }
+socketcan = { version = "3.5", optional = true }
+libc = { version = "0.2", optional = true }
 moq-native = "0.11"
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
@@ -55,3 +58,13 @@ required-features = ["iroh", "serial"]
 name = "so100_teleop"
 path = "examples/so100_teleop.rs"
 required-features = ["iroh", "serial"]
+
+[[example]]
+name = "can_server"
+path = "examples/can_server.rs"
+required-features = ["iroh", "can"]
+
+[[example]]
+name = "can_client"
+path = "examples/can_client.rs"
+required-features = ["iroh", "can"]

@@ -16,7 +16,7 @@ async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
     let mut builder = CameraServerBuilder::new()
-        .camera_index(0)
+        .camera_index(2)
         .resolution(640, 480)
         .fps(30);
 
