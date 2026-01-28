@@ -235,8 +235,11 @@ impl CanSocketBuilder {
                 }
                 let conn = builder.connect_str(&self.server_id).await?;
                 let stream = conn.open_stream().await?;
+                // Split for true full-duplex: reads and writes don't block each other
+                let (send, recv) = stream.split();
                 Ok::<_, anyhow::Error>(ClientInner::Iroh {
-                    stream: Arc::new(Mutex::new(stream)),
+                    send: Arc::new(Mutex::new(send)),
+                    recv: Arc::new(Mutex::new(recv)),
                     _conn: conn,
                 })
             })?,
@@ -260,7 +263,7 @@ impl CanSocketBuilder {
             server_id: self.server_id,
             timeout: self.timeout,
             fd_enabled: self.fd_enabled,
-            read_buffer: Vec::new(),
+            read_buffer: std::sync::Mutex::new(Vec::new()),
         })
     }
 }
@@ -268,7 +271,9 @@ impl CanSocketBuilder {
 /// Internal client representation supporting multiple transports.
 enum ClientInner {
     Iroh {
-        stream: Arc<Mutex<crate::iroh::IrohStream>>,
+        // Split stream for true full-duplex: reads and writes don't block each other
+        send: Arc<Mutex<iroh::endpoint::SendStream>>,
+        recv: Arc<Mutex<iroh::endpoint::RecvStream>>,
         _conn: IrohConnection,
     },
     Moq {
@@ -321,7 +326,8 @@ pub struct RemoteCanSocket {
     server_id: String,
     timeout: Duration,
     fd_enabled: bool,
-    read_buffer: Vec<u8>,
+    // Use Mutex for interior mutability so trait methods with &self can update buffer
+    read_buffer: std::sync::Mutex<Vec<u8>>,
 }
 
 impl RemoteCanSocket {
@@ -374,9 +380,9 @@ impl RemoteCanSocket {
     fn write_raw(&mut self, data: &[u8]) -> Result<()> {
         self.runtime.block_on(async {
             match &self.client {
-                ClientInner::Iroh { stream, .. } => {
-                    let mut s = stream.lock().await;
-                    s.write(data).await?;
+                ClientInner::Iroh { send, .. } => {
+                    let mut s = send.lock().await;
+                    s.write_all(data).await?;
                     s.flush().await?; // Flush immediately to avoid buffering delays
                 }
                 ClientInner::Moq { conn } => {
@@ -401,7 +407,10 @@ impl RemoteCanSocket {
         // Read more data with timeout
         let data = self.read_raw_with_timeout()?;
         if let Some(data) = data {
-            self.read_buffer.extend_from_slice(&data);
+            {
+                let mut buffer = self.read_buffer.lock().unwrap();
+                buffer.extend_from_slice(&data);
+            }
             self.try_decode_buffered()
         } else {
             Ok(None)
@@ -414,9 +423,9 @@ impl RemoteCanSocket {
             tokio::time::timeout(timeout, async {
                 let mut temp_buf = vec![0u8; 128];
                 match &self.client {
-                    ClientInner::Iroh { stream, .. } => {
-                        let mut s = stream.lock().await;
-                        match s.read(&mut temp_buf).await? {
+                    ClientInner::Iroh { recv, .. } => {
+                        let mut r = recv.lock().await;
+                        match r.read(&mut temp_buf).await? {
                             Some(n) => {
                                 temp_buf.truncate(n);
                                 Ok(Some(temp_buf))
@@ -449,20 +458,45 @@ impl RemoteCanSocket {
         }
     }
 
-    fn try_decode_buffered(&mut self) -> Result<Option<AnyCanFrame>> {
-        if self.read_buffer.len() < 6 {
+    fn try_decode_buffered(&self) -> Result<Option<AnyCanFrame>> {
+        let mut buffer = self.read_buffer.lock().unwrap();
+
+        if buffer.len() < 6 {
             return Ok(None);
         }
 
-        match wire::encoded_size(&self.read_buffer) {
-            Ok(frame_size) if self.read_buffer.len() >= frame_size => {
-                let (frame, consumed) = wire::decode(&self.read_buffer)?;
-                self.read_buffer.drain(..consumed);
-                Ok(Some(frame))
+        // Validate data_len before proceeding - prevents buffer corruption from bad data
+        let data_len = buffer[5] as usize;
+        if data_len > 64 {
+            // Invalid data length - corrupted packet, skip this byte and try to resync
+            tracing::warn!(
+                "Invalid CAN frame data_len={}, skipping byte to resync",
+                data_len
+            );
+            buffer.drain(..1);
+            return Ok(None);
+        }
+
+        match wire::encoded_size(&buffer) {
+            Ok(frame_size) if buffer.len() >= frame_size => {
+                match wire::decode(&buffer) {
+                    Ok((frame, consumed)) => {
+                        buffer.drain(..consumed);
+                        Ok(Some(frame))
+                    }
+                    Err(e) => {
+                        // Decode failed - likely corrupted data, skip one byte to try to resync
+                        tracing::warn!("CAN frame decode error: {}, skipping byte to resync", e);
+                        buffer.drain(..1);
+                        Ok(None)
+                    }
+                }
             }
             Ok(_) => Ok(None), // Need more data
             Err(e) => {
-                self.read_buffer.clear();
+                // Should not happen since we check len >= 6 above, but handle it safely
+                tracing::warn!("CAN frame size error: {}, clearing buffer", e);
+                buffer.clear();
                 Err(e)
             }
         }
@@ -506,9 +540,10 @@ impl CanBusSocket for RemoteCanSocket {
         let encoded = wire::encode(&AnyCanFrame::Can(frame));
         self.runtime.block_on(async {
             match &self.client {
-                ClientInner::Iroh { stream, .. } => {
-                    let mut s = stream.lock().await;
-                    s.write(&encoded).await?;
+                ClientInner::Iroh { send, .. } => {
+                    let mut s = send.lock().await;
+                    s.write_all(&encoded).await?;
+                    s.flush().await?; // Flush immediately to avoid buffering delays
                 }
                 ClientInner::Moq { conn } => {
                     let mut c = conn.lock().await;
@@ -521,26 +556,20 @@ impl CanBusSocket for RemoteCanSocket {
     }
 
     fn read_raw(&self) -> anyhow::Result<Option<(u32, Vec<u8>)>> {
-        // Check buffer first
-        if self.read_buffer.len() >= 6 {
-            if let Ok(frame_size) = wire::encoded_size(&self.read_buffer) {
-                if self.read_buffer.len() >= frame_size {
-                    // We have a complete frame, but can't mutate through &self
-                    // This is handled by the mutable version; for trait we return what we can
-                }
-            }
+        // First check if we already have a complete frame in the buffer
+        if let Some(frame) = self.try_decode_buffered()? {
+            return Ok(Some((frame.id(), frame.data().to_vec())));
         }
 
-        // For the trait interface, we need to work with &self
-        // The actual implementation uses the mutable read_frame method
+        // Read more data with timeout
         let timeout = self.timeout;
         let result = self.runtime.block_on(async {
             tokio::time::timeout(timeout, async {
                 let mut temp_buf = vec![0u8; 128];
                 match &self.client {
-                    ClientInner::Iroh { stream, .. } => {
-                        let mut s = stream.lock().await;
-                        match s.read(&mut temp_buf).await? {
+                    ClientInner::Iroh { recv, .. } => {
+                        let mut r = recv.lock().await;
+                        match r.read(&mut temp_buf).await? {
                             Some(n) => {
                                 temp_buf.truncate(n);
                                 Ok(Some(temp_buf))
@@ -568,61 +597,37 @@ impl CanBusSocket for RemoteCanSocket {
 
         match result {
             Ok(Ok(Some(data))) => {
-                // Try to decode the frame
-                if data.len() >= 6 {
-                    if let Ok(frame_size) = wire::encoded_size(&data) {
-                        if data.len() >= frame_size {
-                            let (frame, _) = wire::decode(&data)?;
-                            return Ok(Some((frame.id(), frame.data().to_vec())));
-                        }
-                    }
+                // Add to buffer and try to decode
+                {
+                    let mut buffer = self.read_buffer.lock().unwrap();
+                    buffer.extend_from_slice(&data);
                 }
-                Ok(None)
+                // Try to decode a complete frame
+                if let Some(frame) = self.try_decode_buffered()? {
+                    Ok(Some((frame.id(), frame.data().to_vec())))
+                } else {
+                    Ok(None) // Partial frame, need more data
+                }
             }
-            Ok(Ok(None)) => Ok(None),
+            Ok(Ok(None)) => Ok(None), // Stream closed
             Ok(Err(e)) => Err(e),
             Err(_) => Ok(None), // Timeout
         }
     }
 
-    fn is_data_available(&self, timeout_us: u64) -> anyhow::Result<bool> {
-        // Check if we have buffered data first
-        if self.read_buffer.len() >= 6 {
-            if let Ok(frame_size) = wire::encoded_size(&self.read_buffer) {
-                if self.read_buffer.len() >= frame_size {
+    fn is_data_available(&self, _timeout_us: u64) -> anyhow::Result<bool> {
+        // Check if we have a complete frame buffered
+        let buffer = self.read_buffer.lock().unwrap();
+        if buffer.len() >= 6 {
+            if let Ok(frame_size) = wire::encoded_size(&buffer) {
+                if buffer.len() >= frame_size {
                     return Ok(true);
                 }
             }
         }
-
-        // Try to read with timeout
-        let timeout = std::time::Duration::from_micros(timeout_us);
-        let result = self.runtime.block_on(async {
-            tokio::time::timeout(timeout, async {
-                let mut temp_buf = vec![0u8; 1];
-                match &self.client {
-                    ClientInner::Iroh { stream, .. } => {
-                        let mut s = stream.lock().await;
-                        // Peek if possible, or just check availability
-                        match s.read(&mut temp_buf).await? {
-                            Some(n) => Ok::<bool, anyhow::Error>(n > 0),
-                            None => Ok::<bool, anyhow::Error>(false),
-                        }
-                    }
-                    ClientInner::Moq { .. } => {
-                        // MoQ doesn't support peeking, so we just return false for now
-                        Ok::<bool, anyhow::Error>(false)
-                    }
-                }
-            })
-            .await
-        });
-
-        match result {
-            Ok(Ok(available)) => Ok(available),
-            Ok(Err(_)) => Ok(false),
-            Err(_) => Ok(false), // Timeout
-        }
+        // Return false if no complete frame is buffered
+        // The actual read_frame method will block/timeout as needed
+        Ok(false)
     }
 
     fn set_recv_timeout(&mut self, timeout_us: u64) -> anyhow::Result<()> {
