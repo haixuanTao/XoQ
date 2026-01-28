@@ -6717,7 +6717,6 @@ version = "0.3.4"
 dependencies = [
  "numpy",
  "pyo3",
- "tokio",
  "xoq",
 ]
 
@@ -6726,7 +6725,6 @@ name = "xoq-serial"
 version = "0.3.4"
 dependencies = [
  "pyo3",
- "tokio",
  "xoq",
 ]
 

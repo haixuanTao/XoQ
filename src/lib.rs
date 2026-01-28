@@ -67,6 +67,10 @@ pub mod serial_server;
 #[cfg(any(feature = "serial-remote", all(feature = "serial", feature = "iroh")))]
 pub mod serialport_impl;
 
+// Sync serial client (blocking API with internal runtime)
+#[cfg(any(feature = "serial-remote", all(feature = "serial", feature = "iroh")))]
+pub mod serial_client;
+
 /// `serialport`-compatible module for remote serial ports.
 ///
 /// This module provides a drop-in compatible API with the `serialport` crate.
@@ -95,6 +99,10 @@ pub mod camera_server;
 // Camera client - available with camera-remote OR (camera + iroh)
 #[cfg(any(feature = "camera-remote", all(feature = "camera", feature = "iroh")))]
 pub mod opencv;
+
+// Sync camera client (blocking API with internal runtime)
+#[cfg(any(feature = "camera-remote", all(feature = "camera", feature = "iroh")))]
+pub mod camera_client;
 
 // Platform-independent CAN types (always available)
 pub mod can_types;
@@ -162,6 +170,9 @@ pub use serial_server::Server;
 #[cfg(any(feature = "serial-remote", all(feature = "serial", feature = "iroh")))]
 pub use serialport::{Client, RemoteSerialPort};
 
+#[cfg(any(feature = "serial-remote", all(feature = "serial", feature = "iroh")))]
+pub use serial_client::SyncSerialClient;
+
 // Frame type (available with image feature or camera feature)
 #[cfg(feature = "image")]
 pub use frame::Frame;
@@ -178,6 +189,9 @@ pub use camera_server::{CameraServer, CameraServerBuilder};
 
 #[cfg(any(feature = "camera-remote", all(feature = "camera", feature = "iroh")))]
 pub use opencv::{remote_camera, CameraClient, CameraClientBuilder};
+
+#[cfg(any(feature = "camera-remote", all(feature = "camera", feature = "iroh")))]
+pub use camera_client::SyncCameraClient;
 
 // Platform-independent CAN types (always available)
 pub use can_types::{
