@@ -18,11 +18,22 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use std::sync::Arc;
 
-// Global tokio runtime for blocking calls
-fn runtime() -> &'static tokio::runtime::Runtime {
-    use std::sync::OnceLock;
-    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    RUNTIME.get_or_init(|| tokio::runtime::Runtime::new().expect("Failed to create tokio runtime"))
+/// Run an async function in a dedicated thread with its own runtime.
+/// This avoids "Cannot start a runtime from within a runtime" errors
+/// when called from environments that already have an event loop (e.g., Jupyter).
+fn run_async<F, T>(f: F) -> PyResult<T>
+where
+    F: std::future::Future<Output = Result<T, anyhow::Error>> + Send + 'static,
+    T: Send + 'static,
+{
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new()
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to create runtime: {}", e)))?;
+        rt.block_on(f)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    })
+    .join()
+    .map_err(|_| PyRuntimeError::new_err("Thread panicked"))?
 }
 
 /// Find a subsequence in a slice, returns the starting position if found.

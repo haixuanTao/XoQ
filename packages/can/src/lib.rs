@@ -17,15 +17,19 @@
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
 
-// Global tokio runtime for blocking calls
-fn runtime() -> &'static tokio::runtime::Runtime {
-    use std::sync::OnceLock;
-    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    RUNTIME.get_or_init(|| tokio::runtime::Runtime::new().expect("Failed to create tokio runtime"))
+/// Run a closure in a dedicated thread.
+/// This avoids "Cannot start a runtime from within a runtime" errors
+/// since xoq::RemoteCanSocket::open() creates its own tokio runtime.
+fn run_in_thread<F, T, E>(f: F) -> Result<T, E>
+where
+    F: FnOnce() -> Result<T, E> + Send + 'static,
+    T: Send + 'static,
+    E: Send + 'static,
+{
+    std::thread::spawn(f).join().expect("Thread panicked")
 }
 
 /// A CAN message compatible with python-can's Message class.
@@ -168,6 +172,7 @@ impl Message {
 ///     msg = bus.recv(timeout=1.0)
 #[pyclass]
 pub struct Bus {
+    // Use std::sync::Mutex since RemoteCanSocket methods are already blocking
     socket: Arc<Mutex<xoq::RemoteCanSocket>>,
     channel: String,
     is_open: Arc<std::sync::atomic::AtomicBool>,
@@ -204,8 +209,10 @@ impl Bus {
 
         let channel = channel.ok_or_else(|| PyValueError::new_err("channel is required"))?;
 
-        let socket = runtime().block_on(async {
-            let mut builder = xoq::socketcan::new(channel);
+        let channel_str = channel.to_string();
+        // Run open() in a dedicated thread since it creates its own tokio runtime
+        let socket = run_in_thread(move || {
+            let mut builder = xoq::socketcan::new(&channel_str);
             if fd {
                 builder = builder.enable_fd(true);
             }
@@ -238,25 +245,24 @@ impl Bus {
 
         let _ = timeout; // TODO: implement send timeout
 
-        runtime().block_on(async {
-            let mut socket = self.socket.lock().await;
+        // RemoteCanSocket methods are already blocking (have internal runtime)
+        let mut socket = self.socket.lock().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
-            let result = if msg.is_fd {
-                let flags = xoq::CanFdFlags {
-                    brs: msg.bitrate_switch,
-                    esi: msg.error_state_indicator,
-                };
-                let frame = xoq::CanFdFrame::new_with_flags(msg.arbitration_id, &msg.data, flags)
-                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-                socket.write_fd_frame(&frame)
-            } else {
-                let frame = xoq::CanFrame::new(msg.arbitration_id, &msg.data)
-                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-                socket.write_frame(&frame)
+        let result = if msg.is_fd {
+            let flags = xoq::CanFdFlags {
+                brs: msg.bitrate_switch,
+                esi: msg.error_state_indicator,
             };
+            let frame = xoq::CanFdFrame::new_with_flags(msg.arbitration_id, &msg.data, flags)
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            socket.write_fd_frame(&frame)
+        } else {
+            let frame = xoq::CanFrame::new(msg.arbitration_id, &msg.data)
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            socket.write_frame(&frame)
+        };
 
-            result.map_err(|e| PyRuntimeError::new_err(e.to_string()))
-        })
+        result.map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
     /// Receive a CAN message.
@@ -275,69 +281,68 @@ impl Bus {
         let timeout = timeout.or(self.recv_timeout);
         let start = Instant::now();
 
-        runtime().block_on(async {
-            let mut socket = self.socket.lock().await;
+        // RemoteCanSocket methods are already blocking (have internal runtime)
+        let mut socket = self.socket.lock().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
-            // Set socket timeout if specified
-            if let Some(t) = timeout {
-                let _ = socket.set_timeout(Duration::from_secs_f64(t));
-            }
+        // Set socket timeout if specified
+        if let Some(t) = timeout {
+            let _ = socket.set_timeout(Duration::from_secs_f64(t));
+        }
 
-            loop {
-                let frame = socket
-                    .read_frame()
-                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        loop {
+            let frame = socket
+                .read_frame()
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
-                match frame {
-                    Some(frame) => {
-                        let timestamp = start.elapsed().as_secs_f64();
-                        let msg = match frame {
-                            xoq::AnyCanFrame::Can(f) => Message {
-                                arbitration_id: f.id(),
-                                data: f.data().to_vec(),
-                                is_extended_id: f.is_extended(),
-                                is_fd: false,
-                                is_remote_frame: f.is_remote(),
-                                is_error_frame: f.is_error(),
-                                bitrate_switch: false,
-                                error_state_indicator: false,
-                                timestamp: Some(timestamp),
-                                channel: Some(self.channel.clone()),
-                                dlc: Some(f.dlc()),
-                            },
-                            xoq::AnyCanFrame::CanFd(f) => Message {
-                                arbitration_id: f.id(),
-                                data: f.data().to_vec(),
-                                is_extended_id: f.is_extended(),
-                                is_fd: true,
-                                is_remote_frame: false,
-                                is_error_frame: false,
-                                bitrate_switch: f.flags().brs,
-                                error_state_indicator: f.flags().esi,
-                                timestamp: Some(timestamp),
-                                channel: Some(self.channel.clone()),
-                                dlc: Some(f.len() as u8),
-                            },
-                        };
-                        return Ok(Some(msg));
-                    }
-                    None => {
-                        // Timeout occurred
-                        if let Some(t) = timeout {
-                            if start.elapsed().as_secs_f64() >= t {
-                                return Ok(None);
-                            }
-                        }
-                        // Non-blocking mode with timeout=0
-                        if timeout == Some(0.0) {
+            match frame {
+                Some(frame) => {
+                    let timestamp = start.elapsed().as_secs_f64();
+                    let msg = match frame {
+                        xoq::AnyCanFrame::Can(f) => Message {
+                            arbitration_id: f.id(),
+                            data: f.data().to_vec(),
+                            is_extended_id: f.is_extended(),
+                            is_fd: false,
+                            is_remote_frame: f.is_remote(),
+                            is_error_frame: f.is_error(),
+                            bitrate_switch: false,
+                            error_state_indicator: false,
+                            timestamp: Some(timestamp),
+                            channel: Some(self.channel.clone()),
+                            dlc: Some(f.dlc()),
+                        },
+                        xoq::AnyCanFrame::CanFd(f) => Message {
+                            arbitration_id: f.id(),
+                            data: f.data().to_vec(),
+                            is_extended_id: f.is_extended(),
+                            is_fd: true,
+                            is_remote_frame: false,
+                            is_error_frame: false,
+                            bitrate_switch: f.flags().brs,
+                            error_state_indicator: f.flags().esi,
+                            timestamp: Some(timestamp),
+                            channel: Some(self.channel.clone()),
+                            dlc: Some(f.len() as u8),
+                        },
+                    };
+                    return Ok(Some(msg));
+                }
+                None => {
+                    // Timeout occurred
+                    if let Some(t) = timeout {
+                        if start.elapsed().as_secs_f64() >= t {
                             return Ok(None);
                         }
-                        // Keep trying if no timeout specified
-                        continue;
                     }
+                    // Non-blocking mode with timeout=0
+                    if timeout == Some(0.0) {
+                        return Ok(None);
+                    }
+                    // Keep trying if no timeout specified
+                    continue;
                 }
             }
-        })
+        }
     }
 
     /// Shutdown the bus.
