@@ -1,9 +1,29 @@
-//! pyserial-compatible interface to a remote serial port over P2P.
+//! Drop-in replacement for pyserial - remote serial ports over P2P.
+//!
+//! This module provides a `serial.Serial` compatible class that connects
+//! to remote serial ports over iroh P2P.
+//!
+//! # Example
+//!
+//! ```python
+//! import serial
+//!
+//! # Connect to a remote serial port
+//! ser = serial.Serial('server-endpoint-id', timeout=1.0)
+//! ser.write(b'Hello')
+//! data = ser.readline()
+//! ```
 
-use crate::{runtime, xoq_lib};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use std::sync::Arc;
+
+// Global tokio runtime for blocking calls
+fn runtime() -> &'static tokio::runtime::Runtime {
+    use std::sync::OnceLock;
+    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RUNTIME.get_or_init(|| tokio::runtime::Runtime::new().expect("Failed to create tokio runtime"))
+}
 
 /// Find a subsequence in a slice, returns the starting position if found.
 fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -14,12 +34,12 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// Drop-in replacement for serial.Serial that connects over iroh P2P.
 ///
 /// Example:
-///     ser = xoq.Serial('abc123...')  # server endpoint id
+///     ser = serial.Serial('abc123...')  # server endpoint id
 ///     ser.write(b'AT\r\n')
 ///     response = ser.readline()
 #[pyclass]
 pub struct Serial {
-    inner: Arc<xoq_lib::Client>,
+    inner: Arc<xoq::Client>,
     buffer: Arc<std::sync::Mutex<Vec<u8>>>,
     is_open: Arc<std::sync::atomic::AtomicBool>,
     timeout: Option<f64>,
@@ -38,7 +58,7 @@ impl Serial {
     fn new(port: &str, timeout: Option<f64>) -> PyResult<Self> {
         let port_name = port.to_string();
         runtime().block_on(async {
-            let client = xoq_lib::Client::connect(port)
+            let client = xoq::Client::connect(port)
                 .await
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
@@ -271,4 +291,30 @@ impl Serial {
         self.close()?;
         Ok(false)
     }
+}
+
+// pyserial constants
+#[pymodule]
+fn serial(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<Serial>()?;
+
+    // Parity constants
+    m.add("PARITY_NONE", "N")?;
+    m.add("PARITY_EVEN", "E")?;
+    m.add("PARITY_ODD", "O")?;
+    m.add("PARITY_MARK", "M")?;
+    m.add("PARITY_SPACE", "S")?;
+
+    // Stop bits constants
+    m.add("STOPBITS_ONE", 1.0)?;
+    m.add("STOPBITS_ONE_POINT_FIVE", 1.5)?;
+    m.add("STOPBITS_TWO", 2.0)?;
+
+    // Byte size constants
+    m.add("FIVEBITS", 5)?;
+    m.add("SIXBITS", 6)?;
+    m.add("SEVENBITS", 7)?;
+    m.add("EIGHTBITS", 8)?;
+
+    Ok(())
 }

@@ -1,9 +1,9 @@
 [workspace]
-members = [".", "python"]
+members = [".", "packages/serial", "packages/cv2", "packages/can"]
 
 [package]
 name = "xoq"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 description = "X-Embodiment over QUIC - P2P and relay communication for robotics"
 license = "Apache-2.0"
@@ -14,7 +14,10 @@ default = []
 iroh = ["dep:iroh"]
 serial = ["dep:serialport"]
 camera = ["dep:nokhwa", "dep:image"]
+# Local CAN support (Linux only, requires socketcan)
 can = ["dep:socketcan", "dep:libc"]
+# Remote CAN client (cross-platform, requires iroh)
+can-remote = ["iroh"]
 
 [dependencies]
 moq-transport = "0.12"

@@ -22,11 +22,11 @@ use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
-use crate::can::wire;
+use crate::can_types::wire;
 use crate::iroh::{IrohClientBuilder, IrohConnection};
 
 // Re-export frame types for convenience
-pub use crate::can::{CanFdFlags, CanInterfaceInfo};
+pub use crate::can_types::{CanFdFlags, CanInterfaceInfo};
 
 /// A client that connects to a remote CAN interface over iroh P2P
 pub struct CanClient {
@@ -487,10 +487,10 @@ impl RemoteCanSocket {
 }
 
 // Re-export for public API
-pub use crate::can::AnyCanFrame;
-pub use crate::can::CanBusSocket;
-pub use crate::can::CanFdFrame;
-pub use crate::can::CanFrame;
+pub use crate::can_types::AnyCanFrame;
+pub use crate::can_types::CanBusSocket;
+pub use crate::can_types::CanFdFrame;
+pub use crate::can_types::CanFrame;
 
 impl CanBusSocket for RemoteCanSocket {
     fn is_open(&self) -> bool {

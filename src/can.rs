@@ -1,4 +1,4 @@
-//! Cross-platform CAN bus support.
+//! Local CAN bus support using Linux SocketCAN.
 //!
 //! This module provides CAN bus access using the [`socketcan`](https://crates.io/crates/socketcan) crate,
 //! which works on Linux systems with SocketCAN support.
@@ -45,42 +45,16 @@
 //! ```
 
 use anyhow::Result;
-
-/// Trait for CAN bus socket implementations.
-///
-/// This allows both local socketcan and remote xoq sockets to be used interchangeably.
-/// Implementing this trait enables generic code to work with any CAN socket type.
-///
-/// # Example
-///
-/// ```no_run
-/// use xoq::can::CanBusSocket;
-///
-/// fn send_command(socket: &impl CanBusSocket, can_id: u32, data: &[u8]) -> anyhow::Result<()> {
-///     socket.write_raw(can_id, data)
-/// }
-/// ```
-pub trait CanBusSocket: Send + Sync {
-    /// Check if socket is open/connected.
-    fn is_open(&self) -> bool;
-
-    /// Write a raw CAN frame.
-    fn write_raw(&self, can_id: u32, data: &[u8]) -> anyhow::Result<()>;
-
-    /// Read a raw CAN frame. Returns None on timeout.
-    fn read_raw(&self) -> anyhow::Result<Option<(u32, Vec<u8>)>>;
-
-    /// Check if data is available with timeout (microseconds).
-    fn is_data_available(&self, timeout_us: u64) -> anyhow::Result<bool>;
-
-    /// Set receive timeout in microseconds.
-    fn set_recv_timeout(&mut self, timeout_us: u64) -> anyhow::Result<()>;
-}
 use socketcan::frame::FdFlags;
 use socketcan::{EmbeddedFrame, Frame, Socket};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
+
+// Re-export types from can_types for backwards compatibility
+pub use crate::can_types::{
+    wire, AnyCanFrame, CanBusSocket, CanFdFlags, CanFdFrame, CanFrame, CanInterfaceInfo,
+};
 
 /// CAN socket configuration.
 ///
@@ -131,110 +105,17 @@ impl CanConfig {
     }
 }
 
-/// A standard CAN frame.
-///
-/// Supports up to 8 bytes of data.
-#[derive(Clone, Debug)]
-pub struct CanFrame {
-    id: u32,
-    data: Vec<u8>,
-    is_extended: bool,
-    is_remote: bool,
-    is_error: bool,
-}
-
-impl CanFrame {
-    /// Create a new standard CAN frame.
-    ///
-    /// # Arguments
-    /// * `id` - CAN identifier (11-bit for standard, 29-bit for extended)
-    /// * `data` - Frame data (up to 8 bytes)
-    pub fn new(id: u32, data: &[u8]) -> Result<Self> {
-        if data.len() > 8 {
-            anyhow::bail!("CAN frame data cannot exceed 8 bytes");
-        }
-        Ok(Self {
-            id,
-            data: data.to_vec(),
-            is_extended: id > 0x7FF,
-            is_remote: false,
-            is_error: false,
-        })
-    }
-
-    /// Create a new extended CAN frame.
-    pub fn new_extended(id: u32, data: &[u8]) -> Result<Self> {
-        if data.len() > 8 {
-            anyhow::bail!("CAN frame data cannot exceed 8 bytes");
-        }
-        Ok(Self {
-            id,
-            data: data.to_vec(),
-            is_extended: true,
-            is_remote: false,
-            is_error: false,
-        })
-    }
-
-    /// Create a remote transmission request frame.
-    pub fn new_remote(id: u32, dlc: u8) -> Result<Self> {
-        if dlc > 8 {
-            anyhow::bail!("CAN RTR DLC cannot exceed 8");
-        }
-        Ok(Self {
-            id,
-            data: vec![0; dlc as usize],
-            is_extended: id > 0x7FF,
-            is_remote: true,
-            is_error: false,
-        })
-    }
-
-    /// Get the CAN identifier.
-    pub fn id(&self) -> u32 {
-        self.id
-    }
-
-    /// Get the frame data.
-    pub fn data(&self) -> &[u8] {
-        &self.data
-    }
-
-    /// Check if this is an extended frame (29-bit ID).
-    pub fn is_extended(&self) -> bool {
-        self.is_extended
-    }
-
-    /// Check if this is a remote transmission request.
-    pub fn is_remote(&self) -> bool {
-        self.is_remote
-    }
-
-    /// Check if this is an error frame.
-    pub fn is_error(&self) -> bool {
-        self.is_error
-    }
-
-    /// Get the data length code.
-    pub fn dlc(&self) -> u8 {
-        self.data.len() as u8
-    }
-}
-
+// Conversion implementations for socketcan types
 impl TryFrom<socketcan::CanFrame> for CanFrame {
     type Error = anyhow::Error;
 
     fn try_from(frame: socketcan::CanFrame) -> Result<Self> {
-        // CanFrame is an enum, extract the data frame
         match frame {
             socketcan::CanFrame::Data(data_frame) => Self::try_from(data_frame),
-            socketcan::CanFrame::Remote(remote_frame) => Ok(Self {
-                id: remote_frame.raw_id(),
-                data: vec![0; remote_frame.dlc()],
-                is_extended: remote_frame.is_extended(),
-                is_remote: true,
-                is_error: false,
-            }),
+            socketcan::CanFrame::Remote(remote_frame) => Ok(Self::new_remote(
+                remote_frame.raw_id(),
+                remote_frame.dlc() as u8,
+            )?),
             socketcan::CanFrame::Error(_) => {
                 anyhow::bail!("Cannot convert error frame to CanFrame")
             }
@@ -246,13 +127,9 @@ impl TryFrom<socketcan::CanDataFrame> for CanFrame {
     type Error = anyhow::Error;
 
     fn try_from(frame: socketcan::CanDataFrame) -> Result<Self> {
-        Ok(Self {
-            id: frame.raw_id(),
-            data: frame.data().to_vec(),
-            is_extended: frame.is_extended(),
-            is_remote: false,
-            is_error: false,
-        })
+        let mut f = Self::new(frame.raw_id(), frame.data())?;
+        f.is_extended = frame.is_extended();
+        Ok(f)
     }
 }
 
@@ -260,101 +137,19 @@ impl TryFrom<&CanFrame> for socketcan::CanFrame {
     type Error = anyhow::Error;
 
     fn try_from(frame: &CanFrame) -> Result<Self> {
-        if frame.is_extended {
-            let id = socketcan::ExtendedId::new(frame.id)
-                .ok_or_else(|| anyhow::anyhow!("Invalid extended CAN ID: {}", frame.id))?;
-            let data_frame = socketcan::CanDataFrame::new(id, &frame.data)
+        if frame.is_extended() {
+            let id = socketcan::ExtendedId::new(frame.id())
+                .ok_or_else(|| anyhow::anyhow!("Invalid extended CAN ID: {}", frame.id()))?;
+            let data_frame = socketcan::CanDataFrame::new(id, frame.data())
                 .ok_or_else(|| anyhow::anyhow!("Failed to create CAN frame"))?;
             Ok(socketcan::CanFrame::Data(data_frame))
         } else {
-            let id = socketcan::StandardId::new(frame.id as u16)
-                .ok_or_else(|| anyhow::anyhow!("Invalid standard CAN ID: {}", frame.id))?;
-            let data_frame = socketcan::CanDataFrame::new(id, &frame.data)
+            let id = socketcan::StandardId::new(frame.id() as u16)
+                .ok_or_else(|| anyhow::anyhow!("Invalid standard CAN ID: {}", frame.id()))?;
+            let data_frame = socketcan::CanDataFrame::new(id, frame.data())
                 .ok_or_else(|| anyhow::anyhow!("Failed to create CAN frame"))?;
             Ok(socketcan::CanFrame::Data(data_frame))
         }
-    }
-}
-
-/// A CAN FD frame.
-///
-/// Supports up to 64 bytes of data with flexible data rate.
-#[derive(Clone, Debug)]
-pub struct CanFdFrame {
-    id: u32,
-    data: Vec<u8>,
-    is_extended: bool,
-    flags: CanFdFlags,
-}
-
-/// CAN FD specific flags.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct CanFdFlags {
-    /// Bit rate switch - data phase at higher bit rate
-    pub brs: bool,
-    /// Error state indicator
-    pub esi: bool,
-}
-
-impl CanFdFrame {
-    /// Create a new CAN FD frame.
-    ///
-    /// # Arguments
-    /// * `id` - CAN identifier
-    /// * `data` - Frame data (up to 64 bytes)
-    pub fn new(id: u32, data: &[u8]) -> Result<Self> {
-        if data.len() > 64 {
-            anyhow::bail!("CAN FD frame data cannot exceed 64 bytes");
-        }
-        Ok(Self {
-            id,
-            data: data.to_vec(),
-            is_extended: id > 0x7FF,
-            flags: CanFdFlags::default(),
-        })
-    }
-
-    /// Create a new CAN FD frame with flags.
-    pub fn new_with_flags(id: u32, data: &[u8], flags: CanFdFlags) -> Result<Self> {
-        if data.len() > 64 {
-            anyhow::bail!("CAN FD frame data cannot exceed 64 bytes");
-        }
-        Ok(Self {
-            id,
-            data: data.to_vec(),
-            is_extended: id > 0x7FF,
-            flags,
-        })
-    }
-
-    /// Get the CAN identifier.
-    pub fn id(&self) -> u32 {
-        self.id
-    }
-
-    /// Get the frame data.
-    pub fn data(&self) -> &[u8] {
-        &self.data
-    }
-
-    /// Check if this is an extended frame.
-    pub fn is_extended(&self) -> bool {
-        self.is_extended
-    }
-
-    /// Get the FD flags.
-    pub fn flags(&self) -> CanFdFlags {
-        self.flags
-    }
-
-    /// Get the data length.
-    pub fn len(&self) -> usize {
-        self.data.len()
-    }
-
-    /// Check if the frame has no data.
-    pub fn is_empty(&self) -> bool {
-        self.data.is_empty()
     }
 }
 
@@ -362,15 +157,14 @@ impl TryFrom<socketcan::CanFdFrame> for CanFdFrame {
     type Error = anyhow::Error;
 
     fn try_from(frame: socketcan::CanFdFrame) -> Result<Self> {
-        Ok(Self {
-            id: frame.raw_id(),
-            data: frame.data().to_vec(),
-            is_extended: frame.is_extended(),
-            flags: CanFdFlags {
+        Ok(Self::new_with_flags(
+            frame.raw_id(),
+            frame.data(),
+            CanFdFlags {
                 brs: frame.is_brs(),
                 esi: frame.is_esi(),
             },
-        })
+        )?)
     }
 }
 
@@ -379,52 +173,27 @@ impl TryFrom<&CanFdFrame> for socketcan::CanFdFrame {
 
     fn try_from(frame: &CanFdFrame) -> Result<Self> {
         let fd_flags = FdFlags::from_bits_truncate(
-            if frame.flags.brs { FdFlags::BRS.bits() } else { 0 }
-                | if frame.flags.esi { FdFlags::ESI.bits() } else { 0 },
+            if frame.flags().brs {
+                FdFlags::BRS.bits()
+            } else {
+                0
+            } | if frame.flags().esi {
+                FdFlags::ESI.bits()
+            } else {
+                0
+            },
         );
-        if frame.is_extended {
-            let id = socketcan::ExtendedId::new(frame.id)
-                .ok_or_else(|| anyhow::anyhow!("Invalid extended CAN ID: {}", frame.id))?;
-            socketcan::CanFdFrame::with_flags(id, &frame.data, fd_flags)
+        if frame.is_extended() {
+            let id = socketcan::ExtendedId::new(frame.id())
+                .ok_or_else(|| anyhow::anyhow!("Invalid extended CAN ID: {}", frame.id()))?;
+            socketcan::CanFdFrame::with_flags(id, frame.data(), fd_flags)
                 .ok_or_else(|| anyhow::anyhow!("Failed to create CAN FD frame"))
         } else {
-            let id = socketcan::StandardId::new(frame.id as u16)
-                .ok_or_else(|| anyhow::anyhow!("Invalid standard CAN ID: {}", frame.id))?;
-            socketcan::CanFdFrame::with_flags(id, &frame.data, fd_flags)
+            let id = socketcan::StandardId::new(frame.id() as u16)
+                .ok_or_else(|| anyhow::anyhow!("Invalid standard CAN ID: {}", frame.id()))?;
+            socketcan::CanFdFrame::with_flags(id, frame.data(), fd_flags)
                 .ok_or_else(|| anyhow::anyhow!("Failed to create CAN FD frame"))
         }
-    }
-}
-
-/// Either a standard CAN frame or a CAN FD frame.
-#[derive(Clone, Debug)]
-pub enum AnyCanFrame {
-    /// Standard CAN frame (up to 8 bytes)
-    Can(CanFrame),
-    /// CAN FD frame (up to 64 bytes)
-    CanFd(CanFdFrame),
-}
-
-impl AnyCanFrame {
-    /// Get the CAN identifier.
-    pub fn id(&self) -> u32 {
-        match self {
-            AnyCanFrame::Can(f) => f.id(),
-            AnyCanFrame::CanFd(f) => f.id(),
-        }
-    }
-
-    /// Get the frame data.
-    pub fn data(&self) -> &[u8] {
-        match self {
-            AnyCanFrame::Can(f) => f.data(),
-            AnyCanFrame::CanFd(f) => f.data(),
-        }
-    }
-
-    /// Check if this is a CAN FD frame.
-    pub fn is_fd(&self) -> bool {
-        matches!(self, AnyCanFrame::CanFd(_))
     }
 }
 
@@ -447,15 +216,21 @@ impl CanSocket {
     /// Open a CAN interface with the given configuration.
     pub fn open(config: &CanConfig) -> Result<Self> {
         let (socket, fd_enabled) = if config.enable_fd {
-            let socket = socketcan::CanFdSocket::open(&config.interface)
-                .map_err(|e| anyhow::anyhow!("Failed to open CAN FD interface {}: {}", config.interface, e))?;
+            let socket = socketcan::CanFdSocket::open(&config.interface).map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to open CAN FD interface {}: {}",
+                    config.interface,
+                    e
+                )
+            })?;
             socket
                 .set_read_timeout(config.read_timeout)
                 .map_err(|e| anyhow::anyhow!("Failed to set read timeout: {}", e))?;
             (InnerSocket::CanFd(socket), true)
         } else {
-            let socket = socketcan::CanSocket::open(&config.interface)
-                .map_err(|e| anyhow::anyhow!("Failed to open CAN interface {}: {}", config.interface, e))?;
+            let socket = socketcan::CanSocket::open(&config.interface).map_err(|e| {
+                anyhow::anyhow!("Failed to open CAN interface {}: {}", config.interface, e)
+            })?;
             socket
                 .set_read_timeout(config.read_timeout)
                 .map_err(|e| anyhow::anyhow!("Failed to set read timeout: {}", e))?;
@@ -508,22 +283,27 @@ impl CanSocket {
                         match cmd {
                             ReadCommand::Read => {
                                 match reader_socket.read_frame() {
-                                    Ok(frame) => {
-                                        match CanFrame::try_from(frame) {
-                                            Ok(cf) => {
-                                                if read_tx.send(ReadResult::Frame(AnyCanFrame::Can(cf))).is_err() {
-                                                    break;
-                                                }
-                                            }
-                                            Err(e) => {
-                                                if read_tx.send(ReadResult::Error(e.to_string())).is_err() {
-                                                    break;
-                                                }
+                                    Ok(frame) => match CanFrame::try_from(frame) {
+                                        Ok(cf) => {
+                                            if read_tx
+                                                .send(ReadResult::Frame(AnyCanFrame::Can(cf)))
+                                                .is_err()
+                                            {
+                                                break;
                                             }
                                         }
-                                    }
-                                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
-                                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                                        Err(e) => {
+                                            if read_tx
+                                                .send(ReadResult::Error(e.to_string()))
+                                                .is_err()
+                                            {
+                                                break;
+                                            }
+                                        }
+                                    },
+                                    Err(e)
+                                        if e.kind() == std::io::ErrorKind::WouldBlock
+                                            || e.kind() == std::io::ErrorKind::TimedOut =>
                                     {
                                         if read_tx.send(ReadResult::Timeout).is_err() {
                                             break;
@@ -553,7 +333,10 @@ impl CanSocket {
                                                 match CanFrame::try_from(f) {
                                                     Ok(cf) => AnyCanFrame::Can(cf),
                                                     Err(e) => {
-                                                        if read_tx.send(ReadResult::Error(e.to_string())).is_err() {
+                                                        if read_tx
+                                                            .send(ReadResult::Error(e.to_string()))
+                                                            .is_err()
+                                                        {
                                                             break;
                                                         }
                                                         continue;
@@ -564,7 +347,10 @@ impl CanSocket {
                                                 match CanFdFrame::try_from(f) {
                                                     Ok(cf) => AnyCanFrame::CanFd(cf),
                                                     Err(e) => {
-                                                        if read_tx.send(ReadResult::Error(e.to_string())).is_err() {
+                                                        if read_tx
+                                                            .send(ReadResult::Error(e.to_string()))
+                                                            .is_err()
+                                                        {
                                                             break;
                                                         }
                                                         continue;
@@ -582,8 +368,9 @@ impl CanSocket {
                                             break;
                                         }
                                     }
-                                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
-                                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                                    Err(e)
+                                        if e.kind() == std::io::ErrorKind::WouldBlock
+                                            || e.kind() == std::io::ErrorKind::TimedOut =>
                                     {
                                         if read_tx.send(ReadResult::Timeout).is_err() {
                                             break;
@@ -619,24 +406,22 @@ impl CanSocket {
                     match cmd {
                         WriteCommand::WriteFrame(frame) => {
                             let result = match &frame {
-                                AnyCanFrame::Can(f) => {
-                                    match socketcan::CanFrame::try_from(f) {
-                                        Ok(sf) => writer_socket.write_frame(&sf),
-                                        Err(e) => {
-                                            let _ = write_result_tx.send(WriteResult::Error(e.to_string()));
-                                            continue;
-                                        }
+                                AnyCanFrame::Can(f) => match socketcan::CanFrame::try_from(f) {
+                                    Ok(sf) => writer_socket.write_frame(&sf),
+                                    Err(e) => {
+                                        let _ =
+                                            write_result_tx.send(WriteResult::Error(e.to_string()));
+                                        continue;
                                     }
-                                }
-                                AnyCanFrame::CanFd(f) => {
-                                    match socketcan::CanFdFrame::try_from(f) {
-                                        Ok(sf) => writer_socket.write_frame(&sf),
-                                        Err(e) => {
-                                            let _ = write_result_tx.send(WriteResult::Error(e.to_string()));
-                                            continue;
-                                        }
+                                },
+                                AnyCanFrame::CanFd(f) => match socketcan::CanFdFrame::try_from(f) {
+                                    Ok(sf) => writer_socket.write_frame(&sf),
+                                    Err(e) => {
+                                        let _ =
+                                            write_result_tx.send(WriteResult::Error(e.to_string()));
+                                        continue;
                                     }
-                                }
+                                },
                             };
                             let _ = write_result_tx.send(match result {
                                 Ok(()) => WriteResult::Ok,
@@ -658,18 +443,18 @@ impl CanSocket {
                     match cmd {
                         WriteCommand::WriteFrame(frame) => {
                             let result = match &frame {
-                                AnyCanFrame::Can(f) => {
-                                    match socketcan::CanFrame::try_from(f) {
-                                        Ok(sf) => writer_socket.write_frame(&sf),
-                                        Err(e) => {
-                                            let _ = write_result_tx.send(WriteResult::Error(e.to_string()));
-                                            continue;
-                                        }
+                                AnyCanFrame::Can(f) => match socketcan::CanFrame::try_from(f) {
+                                    Ok(sf) => writer_socket.write_frame(&sf),
+                                    Err(e) => {
+                                        let _ =
+                                            write_result_tx.send(WriteResult::Error(e.to_string()));
+                                        continue;
                                     }
-                                }
+                                },
                                 AnyCanFrame::CanFd(_) => {
                                     let _ = write_result_tx.send(WriteResult::Error(
-                                        "CAN FD frames not supported on standard CAN socket".to_string()
+                                        "CAN FD frames not supported on standard CAN socket"
+                                            .to_string(),
                                     ));
                                     continue;
                                 }
@@ -824,13 +609,6 @@ impl Drop for CanWriter {
     }
 }
 
-/// Information about a CAN interface.
-#[derive(Clone, Debug)]
-pub struct CanInterfaceInfo {
-    /// Interface name (e.g., "can0", "vcan0")
-    pub name: String,
-}
-
 /// List available CAN interfaces on the system.
 ///
 /// This function reads from /sys/class/net to find CAN interfaces.
@@ -867,108 +645,4 @@ pub fn list_interfaces() -> Result<Vec<CanInterfaceInfo>> {
     }
 
     Ok(interfaces)
-}
-
-/// Network frame encoding for CAN frames.
-///
-/// Frame format:
-/// ```text
-/// [1 byte flags][4 bytes can_id (little-endian)][1 byte data_len][0-64 bytes data]
-/// ```
-///
-/// Flags:
-/// - bit 0: CAN FD frame
-/// - bit 1: Extended ID
-/// - bits 2-7: reserved
-pub mod wire {
-    use super::{AnyCanFrame, CanFdFlags, CanFdFrame, CanFrame};
-    use anyhow::Result;
-
-    const FLAG_FD: u8 = 0x01;
-    const FLAG_EXTENDED: u8 = 0x02;
-    const FLAG_BRS: u8 = 0x04;
-    const FLAG_ESI: u8 = 0x08;
-
-    /// Encode a CAN frame for network transmission.
-    pub fn encode(frame: &AnyCanFrame) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(70);
-
-        let (flags, id, data) = match frame {
-            AnyCanFrame::Can(f) => {
-                let mut flags = 0u8;
-                if f.is_extended() {
-                    flags |= FLAG_EXTENDED;
-                }
-                (flags, f.id(), f.data())
-            }
-            AnyCanFrame::CanFd(f) => {
-                let mut flags = FLAG_FD;
-                if f.is_extended() {
-                    flags |= FLAG_EXTENDED;
-                }
-                if f.flags().brs {
-                    flags |= FLAG_BRS;
-                }
-                if f.flags().esi {
-                    flags |= FLAG_ESI;
-                }
-                (flags, f.id(), f.data())
-            }
-        };
-
-        buf.push(flags);
-        buf.extend_from_slice(&id.to_le_bytes());
-        buf.push(data.len() as u8);
-        buf.extend_from_slice(data);
-
-        buf
-    }
-
-    /// Decode a CAN frame from network data.
-    ///
-    /// Returns the decoded frame and the number of bytes consumed.
-    pub fn decode(data: &[u8]) -> Result<(AnyCanFrame, usize)> {
-        if data.len() < 6 {
-            anyhow::bail!("Insufficient data for CAN frame header");
-        }
-
-        let flags = data[0];
-        let id = u32::from_le_bytes([data[1], data[2], data[3], data[4]]);
-        let data_len = data[5] as usize;
-
-        if data.len() < 6 + data_len {
-            anyhow::bail!("Insufficient data for CAN frame payload");
-        }
-
-        let frame_data = &data[6..6 + data_len];
-        let is_fd = (flags & FLAG_FD) != 0;
-        let is_extended = (flags & FLAG_EXTENDED) != 0;
-
-        let frame = if is_fd {
-            let fd_flags = CanFdFlags {
-                brs: (flags & FLAG_BRS) != 0,
-                esi: (flags & FLAG_ESI) != 0,
-            };
-            let mut f = CanFdFrame::new_with_flags(id, frame_data, fd_flags)?;
-            if is_extended {
-                f.is_extended = true;
-            }
-            AnyCanFrame::CanFd(f)
-        } else {
-            let mut f = CanFrame::new(id, frame_data)?;
-            f.is_extended = is_extended;
-            AnyCanFrame::Can(f)
-        };
-
-        Ok((frame, 6 + data_len))
-    }
-
-    /// Get the expected size of an encoded frame given its header.
-    pub fn encoded_size(header: &[u8]) -> Result<usize> {
-        if header.len() < 6 {
-            anyhow::bail!("Insufficient data for CAN frame header");
-        }
-        let data_len = header[5] as usize;
-        Ok(6 + data_len)
-    }
 }

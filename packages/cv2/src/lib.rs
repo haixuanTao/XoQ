@@ -1,11 +1,30 @@
-//! OpenCV-compatible VideoCapture for remote cameras over iroh P2P or MoQ relay.
+//! Drop-in replacement for opencv-python - remote cameras over P2P.
+//!
+//! This module provides a `cv2.VideoCapture` compatible class that connects
+//! to remote cameras over iroh P2P or MoQ relay.
+//!
+//! # Example
+//!
+//! ```python
+//! import cv2
+//!
+//! # Connect to a remote camera
+//! cap = cv2.VideoCapture('server-endpoint-id')
+//! ret, frame = cap.read()
+//! ```
 
-use crate::{runtime, xoq_lib};
 use numpy::{PyArray1, PyArrayMethods};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+
+// Global tokio runtime for blocking calls
+fn runtime() -> &'static tokio::runtime::Runtime {
+    use std::sync::OnceLock;
+    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RUNTIME.get_or_init(|| tokio::runtime::Runtime::new().expect("Failed to create tokio runtime"))
+}
 
 /// OpenCV-compatible VideoCapture for remote cameras over iroh P2P or MoQ relay.
 ///
@@ -18,14 +37,14 @@ use tokio::sync::Mutex;
 ///
 /// Example:
 ///     # Using iroh P2P
-///     cap = xoq.VideoCapture("server-endpoint-id")
+///     cap = cv2.VideoCapture("server-endpoint-id")
 ///
 ///     # Using MoQ relay
-///     cap = xoq.VideoCapture("anon/my-camera")
+///     cap = cv2.VideoCapture("anon/my-camera")
 ///
 ///     # Explicit transport selection
-///     cap = xoq.VideoCapture("anon/my-camera", transport="moq")
-///     cap = xoq.VideoCapture("server-id", transport="iroh")
+///     cap = cv2.VideoCapture("anon/my-camera", transport="moq")
+///     cap = cv2.VideoCapture("server-id", transport="iroh")
 ///
 ///     while True:
 ///         ret, frame = cap.read()
@@ -38,7 +57,7 @@ use tokio::sync::Mutex;
 ///     cap.release()
 #[pyclass]
 pub struct VideoCapture {
-    inner: Arc<Mutex<Option<xoq_lib::CameraClient>>>,
+    inner: Arc<Mutex<Option<xoq::CameraClient>>>,
     is_open: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -57,19 +76,22 @@ impl VideoCapture {
             let use_moq = match transport {
                 Some("moq") => true,
                 Some("iroh") => false,
-                Some(t) => return Err(PyRuntimeError::new_err(format!(
-                    "Unknown transport '{}'. Use 'iroh' or 'moq'", t
-                ))),
+                Some(t) => {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "Unknown transport '{}'. Use 'iroh' or 'moq'",
+                        t
+                    )))
+                }
                 None => source.contains('/'), // Auto-detect: "/" means MoQ path
             };
 
             let client = if use_moq {
-                xoq_lib::CameraClientBuilder::new()
+                xoq::CameraClientBuilder::new()
                     .moq(source)
                     .connect()
                     .await
             } else {
-                xoq_lib::CameraClientBuilder::new()
+                xoq::CameraClientBuilder::new()
                     .iroh(source)
                     .connect()
                     .await
@@ -141,4 +163,47 @@ impl VideoCapture {
             *guard = None;
         });
     }
+}
+
+// OpenCV constants
+#[pymodule]
+fn cv2(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<VideoCapture>()?;
+
+    // Video capture properties
+    m.add("CAP_PROP_FRAME_WIDTH", 3)?;
+    m.add("CAP_PROP_FRAME_HEIGHT", 4)?;
+    m.add("CAP_PROP_FPS", 5)?;
+    m.add("CAP_PROP_FOURCC", 6)?;
+    m.add("CAP_PROP_FRAME_COUNT", 7)?;
+    m.add("CAP_PROP_FORMAT", 8)?;
+    m.add("CAP_PROP_MODE", 9)?;
+    m.add("CAP_PROP_BRIGHTNESS", 10)?;
+    m.add("CAP_PROP_CONTRAST", 11)?;
+    m.add("CAP_PROP_SATURATION", 12)?;
+    m.add("CAP_PROP_HUE", 13)?;
+    m.add("CAP_PROP_GAIN", 14)?;
+    m.add("CAP_PROP_EXPOSURE", 15)?;
+    m.add("CAP_PROP_CONVERT_RGB", 16)?;
+    m.add("CAP_PROP_POS_MSEC", 0)?;
+    m.add("CAP_PROP_POS_FRAMES", 1)?;
+    m.add("CAP_PROP_POS_AVI_RATIO", 2)?;
+
+    // Color conversion codes (subset)
+    m.add("COLOR_BGR2RGB", 4)?;
+    m.add("COLOR_RGB2BGR", 4)?;
+    m.add("COLOR_BGR2GRAY", 6)?;
+    m.add("COLOR_RGB2GRAY", 7)?;
+    m.add("COLOR_GRAY2BGR", 8)?;
+    m.add("COLOR_GRAY2RGB", 8)?;
+
+    // Wait key constants
+    m.add("WINDOW_NORMAL", 0)?;
+    m.add("WINDOW_AUTOSIZE", 1)?;
+    m.add("WINDOW_OPENGL", 4096)?;
+    m.add("WINDOW_FULLSCREEN", 1)?;
+    m.add("WINDOW_FREERATIO", 256)?;
+    m.add("WINDOW_KEEPRATIO", 0)?;
+
+    Ok(())
 }

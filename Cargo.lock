@@ -6679,7 +6679,7 @@ dependencies = [
 
 [[package]]
 name = "xoq"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -6703,10 +6703,28 @@ dependencies = [
 ]
 
 [[package]]
-name = "xoq-python"
-version = "0.2.1"
+name = "xoq-can"
+version = "0.3.0"
+dependencies = [
+ "pyo3",
+ "tokio",
+ "xoq",
+]
+
+[[package]]
+name = "xoq-opencv"
+version = "0.3.0"
 dependencies = [
  "numpy",
+ "pyo3",
+ "tokio",
+ "xoq",
+]
+
+[[package]]
+name = "xoq-serial"
+version = "0.3.0"
+dependencies = [
  "pyo3",
  "tokio",
  "xoq",

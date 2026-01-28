@@ -22,32 +22,6 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
-  # Python linting
-  python-lint:
-    name: Python Lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install linters
-        run: pip install ruff mypy
-
-      - name: Ruff check
-        working-directory: python
-        run: ruff check .
-
-      - name: Ruff format check
-        working-directory: python
-        run: ruff format --check .
-
-      - name: Mypy
-        working-directory: python
-        run: mypy . --ignore-missing-imports
-
   # Clippy linting
   clippy:
     name: Clippy
@@ -64,6 +38,8 @@ jobs:
         run: cargo clippy -- -D warnings
       - name: Clippy (all features)
         run: cargo clippy --features "iroh,serial,camera" -- -D warnings
+      - name: Clippy (workspace)
+        run: cargo clippy --workspace -- -D warnings
 
   # Version consistency check across all packages
   version-check:
@@ -75,20 +51,36 @@ jobs:
       - name: Check version consistency
         run: |
           CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          PYTHON_VERSION=$(grep '^version' python/pyproject.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          SERIAL_VERSION=$(grep '^version' packages/serial/pyproject.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          CV2_VERSION=$(grep '^version' packages/cv2/pyproject.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          CAN_VERSION=$(grep '^version' packages/can/pyproject.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           NPM_VERSION=$(jq -r '.version' js/package.json)
 
           echo "Cargo version: $CARGO_VERSION"
-          echo "Python version: $PYTHON_VERSION"
+          echo "xoq-serial version: $SERIAL_VERSION"
+          echo "xoq-opencv version: $CV2_VERSION"
+          echo "xoq-can version: $CAN_VERSION"
           echo "npm version: $NPM_VERSION"
 
-          if [ "$CARGO_VERSION" != "$PYTHON_VERSION" ]; then
-            echo "ERROR: Cargo ($CARGO_VERSION) and Python ($PYTHON_VERSION) versions don't match"
-            exit 1
+          FAIL=0
+          if [ "$CARGO_VERSION" != "$SERIAL_VERSION" ]; then
+            echo "ERROR: Cargo ($CARGO_VERSION) and xoq-serial ($SERIAL_VERSION) versions don't match"
+            FAIL=1
           fi
-
+          if [ "$CARGO_VERSION" != "$CV2_VERSION" ]; then
+            echo "ERROR: Cargo ($CARGO_VERSION) and xoq-opencv ($CV2_VERSION) versions don't match"
+            FAIL=1
+          fi
+          if [ "$CARGO_VERSION" != "$CAN_VERSION" ]; then
+            echo "ERROR: Cargo ($CARGO_VERSION) and xoq-can ($CAN_VERSION) versions don't match"
+            FAIL=1
+          fi
           if [ "$CARGO_VERSION" != "$NPM_VERSION" ]; then
             echo "ERROR: Cargo ($CARGO_VERSION) and npm ($NPM_VERSION) versions don't match"
+            FAIL=1
+          fi
+
+          if [ $FAIL -eq 1 ]; then
             exit 1
           fi
 
@@ -110,29 +102,6 @@ jobs:
         run: cargo install cargo-semver-checks --locked
       - name: Check semver
         run: cargo semver-checks check-release --features "iroh,serial,camera"
-        continue-on-error: true  # Advisory for now
-
-  # Python API check using griffe
-  semver-python:
-    name: Semver Check (Python)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install griffe
-        run: pip install griffe
-
-      - name: Check Python API
-        working-directory: python
-        run: |
-          # Generate API signature from stub file
-          griffe dump xoq.pyi -o current-api.json 2>/dev/null || echo "Stub check passed"
         continue-on-error: true  # Advisory for now
 
   # npm package check
@@ -220,9 +189,9 @@ jobs:
       - name: Run tests
         run: cargo test --features "iroh,serial,camera" --verbose
 
-  # Build Python bindings
+  # Build Python packages
   python:
-    name: Python Bindings (${{ matrix.os }})
+    name: Python Packages (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -237,7 +206,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: python-${{ matrix.os }}
-          workspaces: python
 
       - uses: actions/setup-python@v5
         with:
@@ -251,15 +219,20 @@ jobs:
       - name: Install maturin
         run: pip install maturin
 
-      # Build Python package with all features
-      - name: Build Python package
-        working-directory: python
-        run: maturin build --features "iroh,serial,camera"
+      # Build xoq-serial
+      - name: Build xoq-serial
+        working-directory: packages/serial
+        run: maturin build --release
 
-      # Build wheel for release
-      - name: Build wheel (release)
-        working-directory: python
-        run: maturin build --release --features "iroh,serial,camera"
+      # Build xoq-opencv
+      - name: Build xoq-opencv
+        working-directory: packages/cv2
+        run: maturin build --release
+
+      # Build xoq-can
+      - name: Build xoq-can
+        working-directory: packages/can
+        run: maturin build --release
 
       # Upload wheels as artifacts
       - name: Upload wheels

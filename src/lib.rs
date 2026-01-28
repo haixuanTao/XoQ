@@ -90,18 +90,25 @@ pub mod camera_server;
 #[cfg(all(feature = "camera", feature = "iroh"))]
 pub mod opencv;
 
+// Platform-independent CAN types (always available)
+pub mod can_types;
+
+// Local CAN support using socketcan (Linux only)
 #[cfg(feature = "can")]
 pub mod can;
 
+// CAN server requires both local CAN and iroh
 #[cfg(all(feature = "can", feature = "iroh"))]
 pub mod can_server;
 
-#[cfg(all(feature = "can", feature = "iroh"))]
+// Remote CAN client (cross-platform, requires iroh)
+#[cfg(feature = "can-remote")]
 pub mod socketcan_impl;
 
 /// `socketcan`-compatible module for remote CAN sockets.
 ///
 /// This module provides a drop-in compatible API similar to the `socketcan` crate.
+/// Available cross-platform when the `can-remote` feature is enabled.
 ///
 /// # Example
 ///
@@ -121,7 +128,7 @@ pub mod socketcan_impl;
 /// }
 /// # Ok::<(), anyhow::Error>(())
 /// ```
-#[cfg(all(feature = "can", feature = "iroh"))]
+#[cfg(feature = "can-remote")]
 pub mod socketcan {
     pub use crate::socketcan_impl::{
         new, AnyCanFrame, CanBusSocket, CanClient, CanFdFlags, CanFdFrame, CanFrame,
@@ -158,16 +165,20 @@ pub use camera_server::{CameraServer, CameraServerBuilder};
 #[cfg(all(feature = "camera", feature = "iroh"))]
 pub use opencv::{remote_camera, CameraClient, CameraClientBuilder};
 
-#[cfg(feature = "can")]
-pub use can::{
-    list_interfaces, AnyCanFrame, CanBusSocket, CanConfig, CanFdFlags, CanFdFrame, CanFrame,
-    CanInterfaceInfo, CanReader, CanSocket, CanWriter,
+// Platform-independent CAN types (always available)
+pub use can_types::{
+    wire as can_wire, AnyCanFrame, CanBusSocket, CanFdFlags, CanFdFrame, CanFrame, CanInterfaceInfo,
 };
+
+// Local CAN support (Linux only)
+#[cfg(feature = "can")]
+pub use can::{list_interfaces, CanConfig, CanReader, CanSocket, CanWriter};
 
 #[cfg(all(feature = "can", feature = "iroh"))]
 pub use can_server::CanServer;
 
-#[cfg(all(feature = "can", feature = "iroh"))]
+// Remote CAN client (cross-platform)
+#[cfg(feature = "can-remote")]
 pub use socketcan::{CanClient, RemoteCanSocket};
 
 // Re-export token generation

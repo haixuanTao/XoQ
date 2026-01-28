@@ -1,4 +1,5 @@
 # Based on maturin generate-ci github
+# Builds and publishes xoq-serial, xoq-opencv, and xoq-can packages
 name: Release PyPI
 
 on:
@@ -11,6 +12,7 @@ permissions:
   contents: read
 
 jobs:
+  # Build matrix for all packages and platforms
   linux:
     runs-on: ${{ matrix.platform.runner }}
     strategy:
@@ -20,6 +22,13 @@ jobs:
             target: x86_64
           - runner: ubuntu-22.04
             target: aarch64
+        package:
+          - name: xoq-serial
+            dir: packages/serial
+          - name: xoq-opencv
+            dir: packages/cv2
+          - name: xoq-can
+            dir: packages/can
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -28,7 +37,7 @@ jobs:
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
-          working-directory: python
+          working-directory: ${{ matrix.package.dir }}
           target: ${{ matrix.platform.target }}
           args: --release --out dist
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
@@ -39,8 +48,8 @@ jobs:
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-linux-${{ matrix.platform.target }}
-          path: python/dist
+          name: wheels-linux-${{ matrix.platform.target }}-${{ matrix.package.name }}
+          path: ${{ matrix.package.dir }}/dist
 
   musllinux:
     runs-on: ${{ matrix.platform.runner }}
@@ -51,6 +60,13 @@ jobs:
             target: x86_64
           - runner: ubuntu-22.04
             target: aarch64
+        package:
+          - name: xoq-serial
+            dir: packages/serial
+          - name: xoq-opencv
+            dir: packages/cv2
+          - name: xoq-can
+            dir: packages/can
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -59,7 +75,7 @@ jobs:
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
-          working-directory: python
+          working-directory: ${{ matrix.package.dir }}
           target: ${{ matrix.platform.target }}
           args: --release --out dist
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
@@ -69,11 +85,20 @@ jobs:
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-musllinux-${{ matrix.platform.target }}
-          path: python/dist
+          name: wheels-musllinux-${{ matrix.platform.target }}-${{ matrix.package.name }}
+          path: ${{ matrix.package.dir }}/dist
 
   windows:
     runs-on: windows-latest
+    strategy:
+      matrix:
+        package:
+          - name: xoq-serial
+            dir: packages/serial
+          - name: xoq-opencv
+            dir: packages/cv2
+          - name: xoq-can
+            dir: packages/can
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -83,15 +108,15 @@ jobs:
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
-          working-directory: python
+          working-directory: ${{ matrix.package.dir }}
           target: x64
           args: --release --out dist
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-windows-x64
-          path: python/dist
+          name: wheels-windows-x64-${{ matrix.package.name }}
+          path: ${{ matrix.package.dir }}/dist
 
   macos:
     runs-on: ${{ matrix.platform.runner }}
@@ -102,6 +127,13 @@ jobs:
             target: x86_64
           - runner: macos-14
             target: aarch64
+        package:
+          - name: xoq-serial
+            dir: packages/serial
+          - name: xoq-opencv
+            dir: packages/cv2
+          - name: xoq-can
+            dir: packages/can
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -110,31 +142,40 @@ jobs:
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
-          working-directory: python
+          working-directory: ${{ matrix.package.dir }}
           target: ${{ matrix.platform.target }}
           args: --release --out dist
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-macos-${{ matrix.platform.target }}
-          path: python/dist
+          name: wheels-macos-${{ matrix.platform.target }}-${{ matrix.package.name }}
+          path: ${{ matrix.package.dir }}/dist
 
   sdist:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        package:
+          - name: xoq-serial
+            dir: packages/serial
+          - name: xoq-opencv
+            dir: packages/cv2
+          - name: xoq-can
+            dir: packages/can
     steps:
       - uses: actions/checkout@v4
       - name: Build sdist
         uses: PyO3/maturin-action@v1
         with:
-          working-directory: python
+          working-directory: ${{ matrix.package.dir }}
           command: sdist
           args: --out dist
       - name: Upload sdist
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-sdist
-          path: python/dist
+          name: wheels-sdist-${{ matrix.package.name }}
+          path: ${{ matrix.package.dir }}/dist
 
   publish:
     name: Publish to PyPI
@@ -150,6 +191,9 @@ jobs:
           path: dist
           pattern: wheels-*
           merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la dist/
 
       - name: Generate artifact attestation
         uses: actions/attest-build-provenance@v1
