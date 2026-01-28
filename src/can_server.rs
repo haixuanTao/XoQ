@@ -115,8 +115,14 @@ impl CanServer {
     }
 
     /// Run the bridge server (blocks forever, handling connections)
+    ///
+    /// When a new client connects, any existing connection is automatically
+    /// terminated to allow reconnection.
     pub async fn run(&self) -> Result<()> {
         tracing::info!("CAN bridge server running. ID: {}", self.server_id);
+
+        // Track the current connection task so we can cancel it when a new client connects
+        let mut current_task: Option<tokio::task::JoinHandle<Result<()>>> = None;
 
         loop {
             // Accept connection
@@ -127,12 +133,21 @@ impl CanServer {
 
             tracing::info!("Client connected: {}", conn.remote_id());
 
-            // Handle this connection
-            if let Err(e) = self.handle_connection(conn).await {
-                tracing::error!("Connection error: {}", e);
+            // Cancel any existing connection to allow reconnection
+            if let Some(task) = current_task.take() {
+                tracing::info!("New client connected, closing previous connection");
+                task.abort();
             }
 
-            tracing::info!("Client disconnected");
+            // Spawn connection handler as a task
+            let can_read_rx = self.can_read_rx.clone();
+            let can_write_tx = self.can_write_tx.clone();
+
+            current_task = Some(tokio::spawn(async move {
+                let result = Self::handle_connection_impl(conn, can_read_rx, can_write_tx).await;
+                tracing::info!("Client disconnected");
+                result
+            }));
         }
     }
 
@@ -151,7 +166,10 @@ impl CanServer {
 
             tracing::info!("Client connected: {}", conn.remote_id());
 
-            if let Err(e) = self.handle_connection(conn).await {
+            let can_read_rx = self.can_read_rx.clone();
+            let can_write_tx = self.can_write_tx.clone();
+
+            if let Err(e) = Self::handle_connection_impl(conn, can_read_rx, can_write_tx).await {
                 tracing::error!("Connection error: {}", e);
             }
 
@@ -160,7 +178,11 @@ impl CanServer {
         }
     }
 
-    async fn handle_connection(&self, conn: IrohConnection) -> Result<()> {
+    async fn handle_connection_impl(
+        conn: IrohConnection,
+        can_read_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<AnyCanFrame>>>,
+        can_write_tx: std::sync::mpsc::Sender<AnyCanFrame>,
+    ) -> Result<()> {
         tracing::debug!("Waiting for client to open stream...");
         let stream = conn
             .accept_stream()
@@ -170,9 +192,6 @@ impl CanServer {
 
         // Split the stream so reads and writes don't block each other
         let (mut send, mut recv) = stream.split();
-
-        let can_read_rx = self.can_read_rx.clone();
-        let can_write_tx = self.can_write_tx.clone();
 
         // Drain any stale frames from the channel before starting
         // This prevents old data from confusing a reconnecting client
