@@ -55,32 +55,21 @@ impl CanServer {
                 .build()
                 .unwrap();
             rt.block_on(async move {
-                let mut consecutive_errors = 0;
                 loop {
                     match reader.read_frame().await {
                         Ok(None) => {
                             // Timeout - no frame available, yield to prevent busy spin
-                            consecutive_errors = 0;
                             tokio::task::yield_now().await;
                         }
                         Ok(Some(frame)) => {
-                            consecutive_errors = 0;
                             tracing::debug!("CAN read frame: ID={:x}", frame.id());
                             if read_tx.send(frame).await.is_err() {
                                 break; // Channel closed
                             }
                         }
                         Err(e) => {
-                            consecutive_errors += 1;
-                            tracing::error!("CAN read error ({}): {}", consecutive_errors, e);
-                            // Only exit on too many consecutive errors (likely device failure)
-                            if consecutive_errors >= 10 {
-                                tracing::error!(
-                                    "Too many consecutive CAN read errors, reader thread exiting"
-                                );
-                                break;
-                            }
-                            // Small delay before retrying
+                            // Log error but never exit - just keep trying
+                            tracing::warn!("CAN read error (ignoring): {}", e);
                             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                         }
                     }
@@ -88,33 +77,19 @@ impl CanServer {
             });
         });
 
-        // Spawn dedicated writer thread
+        // Spawn dedicated writer thread - never exits on errors
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
             rt.block_on(async move {
-                let mut consecutive_errors = 0;
                 while let Ok(frame) = can_write_rx.recv() {
-                    match writer.write_any_frame(frame).await {
-                        Ok(()) => {
-                            consecutive_errors = 0;
-                            tracing::debug!("Wrote frame to CAN");
-                        }
-                        Err(e) => {
-                            consecutive_errors += 1;
-                            tracing::error!("CAN write error ({}): {}", consecutive_errors, e);
-                            // Only exit on too many consecutive errors (likely device failure)
-                            if consecutive_errors >= 10 {
-                                tracing::error!(
-                                    "Too many consecutive CAN write errors, writer thread exiting"
-                                );
-                                break;
-                            }
-                            // Small delay before retrying to avoid busy loop on persistent errors
-                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                        }
+                    if let Err(e) = writer.write_any_frame(frame).await {
+                        // Log error but never exit - just keep trying with next frame
+                        tracing::warn!("CAN write error (ignoring): {}", e);
+                    } else {
+                        tracing::debug!("Wrote frame to CAN");
                     }
                 }
             });
