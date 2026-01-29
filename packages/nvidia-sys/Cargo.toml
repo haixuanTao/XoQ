@@ -1,0 +1,15 @@
+[package]
+name = "nvidia-sys"
+version = "0.1.0"
+edition = "2021"
+description = "Raw NVIDIA Video Codec SDK bindings for NVENC/NVDEC"
+license = "Apache-2.0"
+
+[features]
+default = []
+# Skip library detection for CI builds
+ci-check = []
+
+[dependencies]
+
+[build-dependencies]

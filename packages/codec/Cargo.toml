@@ -1,0 +1,35 @@
+[package]
+name = "xoq-codec"
+version = "0.1.0"
+edition = "2021"
+description = "Hardware-accelerated video codec for xoq with NVIDIA NVENC support"
+license = "Apache-2.0"
+
+[features]
+default = []
+
+# Hardware backends
+nvidia = ["dep:nvidia-sys", "dep:cudarc", "dep:lazy_static"]
+apple = []   # Future: VideoToolbox support
+cpu = []     # Future: Software fallback
+
+# Codec formats
+h264 = []
+hevc = []
+av1 = []
+
+# Integration with xoq Frame type
+xoq-frame = ["dep:xoq"]
+
+[dependencies]
+thiserror = "1"
+
+# NVIDIA backend dependencies
+nvidia-sys = { path = "../nvidia-sys", optional = true }
+cudarc = { version = "0.12", features = ["cuda-version-from-build-system"], optional = true }
+lazy_static = { version = "1", optional = true }
+
+# xoq Frame integration
+xoq = { path = "../..", optional = true }
+
+[dev-dependencies]

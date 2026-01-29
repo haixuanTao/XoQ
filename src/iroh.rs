@@ -9,7 +9,23 @@ use std::path::PathBuf;
 use tokio::fs;
 use tokio_util::sync::CancellationToken;
 
-const DEFAULT_ALPN: &[u8] = b"xoq/p2p/0";
+/// Default ALPN protocol for generic P2P communication.
+pub const DEFAULT_ALPN: &[u8] = b"xoq/p2p/0";
+
+/// ALPN protocol for camera streaming (legacy, JPEG).
+pub const CAMERA_ALPN: &[u8] = b"xoq/camera/0";
+
+/// ALPN protocol for camera streaming with JPEG frames.
+pub const CAMERA_ALPN_JPEG: &[u8] = b"xoq/camera-jpeg/0";
+
+/// ALPN protocol for camera streaming with H.264 encoded frames.
+pub const CAMERA_ALPN_H264: &[u8] = b"xoq/camera-h264/0";
+
+/// ALPN protocol for camera streaming with HEVC/H.265 encoded frames.
+pub const CAMERA_ALPN_HEVC: &[u8] = b"xoq/camera-hevc/0";
+
+/// ALPN protocol for camera streaming with AV1 encoded frames.
+pub const CAMERA_ALPN_AV1: &[u8] = b"xoq/camera-av1/0";
 
 /// Builder for iroh server (accepts connections)
 pub struct IrohServerBuilder {
