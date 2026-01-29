@@ -15,7 +15,8 @@ iroh = ["dep:iroh"]
 image = ["dep:image"]
 # Server-side features (require hardware access)
 serial = ["dep:serialport"]
-camera = ["dep:nokhwa", "image"]
+camera = ["dep:v4l", "image"]
+nvenc = ["camera", "dep:nvidia-video-codec-sdk", "dep:cudarc"]
 # Local CAN support (Linux only, requires socketcan)
 can = ["dep:socketcan", "dep:libc"]
 # Remote client features (cross-platform, no hardware deps)
@@ -28,7 +29,7 @@ moq-transport = "0.12"
 moq-token = "0.5"
 iroh = { version = "0.95", optional = true }
 serialport = { version = "4", optional = true }
-nokhwa = { version = "0.10", features = ["input-native"], optional = true }
+v4l = { version = "0.14", optional = true }
 image = { version = "0.25", optional = true }
 socketcan = { version = "3.5", optional = true }
 libc = { version = "0.2", optional = true }
@@ -41,6 +42,9 @@ tracing-subscriber = "0.3"
 url = "2"
 bytes = "1"
 rand = "0.9"
+# Hardware video encoding (optional)
+nvidia-video-codec-sdk = { path = "../nvidia-video-codec-sdk", optional = true }
+cudarc = { version = "0.16.4", features = ["cuda-version-from-build-system"], optional = true }
 
 [dev-dependencies]
 rustypot = "1.4.2"
@@ -75,3 +79,8 @@ required-features = ["iroh", "can"]
 name = "can_client"
 path = "examples/can_client.rs"
 required-features = ["iroh", "can"]
+
+[[example]]
+name = "camera_server"
+path = "examples/camera_server.rs"
+required-features = ["iroh", "nvenc"]
