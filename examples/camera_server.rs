@@ -1035,11 +1035,12 @@ async fn run_camera_server_h264_nvenc(config: &CameraConfig) -> Result<()> {
 
             frame_count += 1;
 
-            // Slow-start: wait after each of the first 3 frames so the QUIC
-            // stack sends them as small individual packets (avoiding GSO
-            // segmentation on Linux) and the client has time to receive them.
+            // Yield between frames so iroh/QUIC can flush the send buffer.
+            // First 3 frames get extra time to avoid GSO segmentation on Linux.
             if frame_count <= 3 {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            } else {
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
             }
 
             if frame_count % 300 == 0 {
