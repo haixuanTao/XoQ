@@ -980,6 +980,9 @@ async fn run_camera_server_h264_nvenc(config: &CameraConfig) -> Result<()> {
         let mut frame_count = 0u64;
         let cam_idx = config.index;
 
+        // Reset encoder frame counter so first frame is IDR with SPS/PPS
+        encoder.lock().await.frame_count = 0;
+
         loop {
             let h264_data = {
                 let mut cam = camera.lock().await;
