@@ -1023,8 +1023,8 @@ async fn run_camera_server_h264_nvenc(config: &CameraConfig) -> Result<()> {
 
             frame_count += 1;
 
-            // Yield so iroh/QUIC can flush the send buffer.
-            tokio::task::yield_now().await;
+            // Pace frames so iroh/QUIC can flush the send buffer.
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
         }
 
         tracing::info!("[cam{}] Client disconnected", cam_idx);
