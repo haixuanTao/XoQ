@@ -46,15 +46,17 @@ impl VideoCapture {
     /// Open a connection to a remote camera server.
     ///
     /// Args:
-    ///     source: The server's endpoint ID
-    ///     transport: Ignored (for compatibility, only iroh P2P supported)
+    ///     source: Server endpoint ID (iroh) or MoQ path (e.g. "anon/camera-0")
+    ///     transport: Optional override — "moq" or "iroh". Auto-detects if omitted.
     #[new]
     #[pyo3(signature = (source, transport=None))]
     fn new(source: &str, transport: Option<&str>) -> PyResult<Self> {
-        let _ = transport; // Only iroh P2P supported for sync client
-
-        let client = xoq::SyncCameraClient::connect(source)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let client = match transport {
+            Some("moq") => xoq::SyncCameraClient::connect_moq(source),
+            Some("iroh") => xoq::SyncCameraClient::connect(source),
+            _ => xoq::SyncCameraClient::connect_auto(source),
+        }
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
         Ok(VideoCapture {
             inner: Arc::new(Mutex::new(Some(client))),
@@ -75,7 +77,13 @@ impl VideoCapture {
         let mut guard = self.inner.lock().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
         let frame_result = if let Some(client) = guard.as_mut() {
-            client.read_frame().ok()
+            match client.read_frame() {
+                Ok(frame) => Some(frame),
+                Err(e) => {
+                    eprintln!("[xoq_cv2] read_frame error: {e}");
+                    None
+                }
+            }
         } else {
             None
         };
@@ -121,7 +129,7 @@ impl VideoCapture {
 
 // OpenCV constants
 #[pymodule]
-fn cv2(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn xoq_cv2(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<VideoCapture>()?;
 
     // Video capture properties

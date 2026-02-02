@@ -56,14 +56,16 @@ impl MoqBuilder {
     /// Connect as a duplex endpoint (can publish and subscribe)
     pub async fn connect_duplex(self) -> Result<MoqConnection> {
         let url = self.build_url()?;
-        let client = moq_native::ClientConfig::default().init()?;
 
         let publish_origin = moq_lite::Origin::produce();
         let subscribe_origin = moq_lite::Origin::produce();
 
-        let session = client
-            .connect(url, publish_origin.consumer, subscribe_origin.producer)
-            .await?;
+        let client = moq_native::ClientConfig::default()
+            .init()?
+            .with_publish(publish_origin.consumer)
+            .with_consume(subscribe_origin.producer);
+
+        let session = client.connect(url).await?;
 
         Ok(MoqConnection {
             _session: session,
@@ -75,10 +77,14 @@ impl MoqBuilder {
     /// Connect as publisher only
     pub async fn connect_publisher(self) -> Result<MoqPublisher> {
         let url = self.build_url()?;
-        let client = moq_native::ClientConfig::default().init()?;
 
         let origin = moq_lite::Origin::produce();
-        let session = client.connect(url, origin.consumer, None).await?;
+
+        let client = moq_native::ClientConfig::default()
+            .init()?
+            .with_publish(origin.consumer);
+
+        let session = client.connect(url).await?;
 
         Ok(MoqPublisher {
             _session: session,
@@ -89,10 +95,14 @@ impl MoqBuilder {
     /// Connect as subscriber only
     pub async fn connect_subscriber(self) -> Result<MoqSubscriber> {
         let url = self.build_url()?;
-        let client = moq_native::ClientConfig::default().init()?;
 
         let origin = moq_lite::Origin::produce();
-        let session = client.connect(url, None, origin.producer).await?;
+
+        let client = moq_native::ClientConfig::default()
+            .init()?
+            .with_consume(origin.producer);
+
+        let session = client.connect(url).await?;
 
         Ok(MoqSubscriber {
             origin: origin.consumer,

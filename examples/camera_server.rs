@@ -4,26 +4,36 @@
 //!
 //! Examples:
 //!   camera_server 0                       # Single camera (JPEG)
-//!   camera_server 0 --h264                # Single camera with NVENC H.264
+//!   camera_server 0 --h264                # H.264 encoding (NVENC on Linux, VideoToolbox on macOS)
 //!   camera_server 0 2 4                   # Multiple cameras
 //!   camera_server 0 --key-dir /etc/xoq    # Custom key directory
 //!   camera_server --list                  # List available cameras
 //!
 //! Each camera gets its own server ID for independent connections.
-//! Keys are bound to physical USB ports for stability.
+//! Keys are bound to physical USB ports (Linux) or device uniqueID (macOS) for stability.
 
 use anyhow::Result;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
-use xoq::camera::{list_cameras, Camera};
-#[cfg(feature = "nvenc")]
-use xoq::camera::CameraOptions;
 use xoq::iroh::IrohServerBuilder;
+use xoq::MoqBuilder;
 
-// NVENC imports
+// Platform-conditional camera imports
+#[cfg(feature = "camera")]
+use xoq::camera::{Camera, CameraOptions};
+#[cfg(feature = "camera")]
+use xoq::camera::list_cameras;
+
+#[cfg(feature = "camera-macos")]
+use xoq::camera_macos::Camera as CameraMacos;
+#[cfg(feature = "camera-macos")]
+use xoq::camera_macos::list_cameras as list_cameras_macos;
+
+// NVENC imports (Linux)
+#[cfg(feature = "nvenc")]
+use xoq::camera::CameraOptions as NvencCameraOptions;
 #[cfg(feature = "nvenc")]
 use cudarc::driver::CudaContext;
 #[cfg(feature = "nvenc")]
@@ -35,12 +45,18 @@ use nvidia_video_codec_sdk::{
     Bitstream, Buffer, Encoder, EncoderInitParams, EncodePictureParams, Session,
 };
 
+// VideoToolbox imports (macOS)
+#[cfg(feature = "vtenc")]
+use xoq::vtenc::VtEncoder;
+
 const CAMERA_JPEG_ALPN: &[u8] = b"xoq/camera-jpeg/0";
-#[cfg(feature = "nvenc")]
+#[cfg(any(feature = "nvenc", feature = "vtenc"))]
 const CAMERA_H264_ALPN: &[u8] = b"xoq/camera-h264/0";
 
-/// Get unique USB path for a video device
+/// Get unique USB path for a video device (Linux only).
+#[cfg(feature = "camera")]
 fn get_usb_path(video_index: u32) -> Option<String> {
+    use std::process::Command;
     let device = format!("/dev/video{}", video_index);
     let output = Command::new("udevadm")
         .args(["info", "--query=property", "--name", &device])
@@ -56,14 +72,18 @@ fn get_usb_path(video_index: u32) -> Option<String> {
     None
 }
 
-/// Create a stable key name from USB path
+/// Create a stable key name for identity files.
 fn make_key_name(video_index: u32) -> String {
-    if let Some(usb_path) = get_usb_path(video_index) {
-        let safe_path = usb_path.replace(':', "-").replace('.', "_");
-        format!(".xoq_camera_key_{}", safe_path)
-    } else {
-        format!(".xoq_camera_key_idx{}", video_index)
+    #[cfg(feature = "camera")]
+    {
+        if let Some(usb_path) = get_usb_path(video_index) {
+            let safe_path = usb_path.replace(':', "-").replace('.', "_");
+            return format!(".xoq_camera_key_{}", safe_path);
+        }
     }
+
+    // macOS or fallback: use index-based key name
+    format!(".xoq_camera_key_idx{}", video_index)
 }
 
 #[derive(Clone)]
@@ -74,10 +94,11 @@ struct CameraConfig {
     height: u32,
     fps: u32,
     quality: u8,
-    #[cfg_attr(not(feature = "nvenc"), allow(dead_code))]
+    #[cfg_attr(not(any(feature = "nvenc", feature = "vtenc")), allow(dead_code))]
     bitrate: u32,
     use_h264: bool,
     identity_path: PathBuf,
+    moq_path: Option<String>,
 }
 
 fn parse_args() -> Option<(Vec<CameraConfig>, PathBuf)> {
@@ -100,6 +121,7 @@ fn parse_args() -> Option<(Vec<CameraConfig>, PathBuf)> {
     let mut quality = 80u8;
     let mut bitrate = 2_000_000u32; // 2 Mbps default
     let mut use_h264 = false;
+    let mut moq_path: Option<String> = None;
     let mut i = 1;
 
     while i < args.len() {
@@ -129,9 +151,20 @@ fn parse_args() -> Option<(Vec<CameraConfig>, PathBuf)> {
                 bitrate = args[i + 1].parse().unwrap_or(2_000_000);
                 i += 2;
             }
-            "--h264" | "--nvenc" => {
+            "--h264" | "--nvenc" | "--vtenc" => {
                 use_h264 = true;
                 i += 1;
+            }
+            "--moq" => {
+                // --moq [path] — next arg is path if it doesn't look like a flag or index
+                if i + 1 < args.len() && !args[i + 1].starts_with("--") && args[i + 1].parse::<u32>().is_err() {
+                    moq_path = Some(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    // Default path set later after indices are known
+                    moq_path = Some(String::new());
+                    i += 1;
+                }
             }
             _ => {
                 if let Ok(idx) = arg.parse::<u32>() {
@@ -146,9 +179,8 @@ fn parse_args() -> Option<(Vec<CameraConfig>, PathBuf)> {
         return None;
     }
 
-    let cameras = list_cameras().unwrap_or_default();
-    let name_map: std::collections::HashMap<u32, String> =
-        cameras.iter().map(|c| (c.index, c.name.clone())).collect();
+    // List cameras to get names
+    let name_map = get_camera_name_map();
 
     let configs = indices
         .into_iter()
@@ -159,6 +191,13 @@ fn parse_args() -> Option<(Vec<CameraConfig>, PathBuf)> {
                 .unwrap_or_else(|| format!("Camera {}", index));
             let key_name = make_key_name(index);
             let identity_path = key_dir.join(&key_name);
+            let resolved_moq_path = moq_path.as_ref().map(|p| {
+                if p.is_empty() {
+                    format!("anon/camera-{}", index)
+                } else {
+                    p.clone()
+                }
+            });
             CameraConfig {
                 index,
                 name,
@@ -169,6 +208,7 @@ fn parse_args() -> Option<(Vec<CameraConfig>, PathBuf)> {
                 bitrate,
                 use_h264,
                 identity_path,
+                moq_path: resolved_moq_path,
             }
         })
         .collect();
@@ -176,16 +216,60 @@ fn parse_args() -> Option<(Vec<CameraConfig>, PathBuf)> {
     Some((configs, key_dir))
 }
 
+/// Get camera name map from platform-appropriate camera listing.
+fn get_camera_name_map() -> std::collections::HashMap<u32, String> {
+    #[cfg(feature = "camera")]
+    {
+        if let Ok(cameras) = list_cameras() {
+            return cameras.iter().map(|c| (c.index, c.name.clone())).collect();
+        }
+    }
+
+    #[cfg(feature = "camera-macos")]
+    {
+        if let Ok(cameras) = list_cameras_macos() {
+            return cameras.iter().map(|c| (c.index, c.name.clone())).collect();
+        }
+    }
+
+    std::collections::HashMap::new()
+}
+
 fn print_cameras() {
     println!("Available cameras:");
+
+    #[cfg(feature = "camera")]
     match list_cameras() {
         Ok(cameras) if !cameras.is_empty() => {
             for cam in cameras {
                 println!("  [{}] {}", cam.index, cam.name);
             }
+            return;
         }
-        _ => println!("  (none found)"),
+        _ => {}
     }
+
+    #[cfg(feature = "camera-macos")]
+    match list_cameras_macos() {
+        Ok(cameras) if !cameras.is_empty() => {
+            for cam in cameras {
+                println!("  [{}] {}", cam.index, cam.name);
+            }
+            return;
+        }
+        _ => {}
+    }
+
+    println!("  (none found)");
+}
+
+fn encoder_name() -> &'static str {
+    #[cfg(feature = "nvenc")]
+    { return "H.264 (NVENC)"; }
+    #[cfg(feature = "vtenc")]
+    { return "H.264 (VideoToolbox)"; }
+    #[allow(unreachable_code)]
+    "H.264"
 }
 
 fn print_usage() {
@@ -193,7 +277,14 @@ fn print_usage() {
     println!();
     println!("Examples:");
     println!("  camera_server 0                       # Single camera (JPEG)");
+
+    #[cfg(feature = "nvenc")]
     println!("  camera_server 0 --h264                # NVENC H.264 encoding");
+    #[cfg(feature = "vtenc")]
+    println!("  camera_server 0 --h264                # VideoToolbox H.264 encoding");
+    #[cfg(not(any(feature = "nvenc", feature = "vtenc")))]
+    println!("  camera_server 0 --h264                # H.264 encoding (requires nvenc or vtenc feature)");
+
     println!("  camera_server 0 2 4                   # Multiple cameras");
     println!("  camera_server 0 --key-dir /etc/xoq    # Custom key directory");
     println!("  camera_server --list                  # List available cameras");
@@ -205,22 +296,21 @@ fn print_usage() {
     println!("  --height <px>     Frame height (default: 480)");
     println!("  --fps <rate>      Framerate (default: 30)");
     println!("  --quality <1-100> JPEG quality (default: 80)");
-    println!("  --h264, --nvenc   Use NVENC H.264 encoding (requires NVIDIA GPU)");
+    println!("  --h264            Use H.264 encoding (NVENC on Linux, VideoToolbox on macOS)");
     println!("  --bitrate <bps>   H.264 bitrate in bps (default: 2000000)");
+    println!("  --moq [path]      Use MoQ relay transport (default: anon/camera-<index>)");
     println!();
     print_cameras();
 }
 
+// ============================================================================
+// NVENC encoder (Linux)
+// ============================================================================
+
 #[cfg(feature = "nvenc")]
-/// NVENC encoder wrapper.
-/// Uses ManuallyDrop to control drop order: buffers must drop before session.
 struct NvencEncoder {
-    // Drop order matters: buffers reference the session's encoder pointer,
-    // so they must be dropped BEFORE the session.
     input_buffer: std::mem::ManuallyDrop<Buffer<'static>>,
     output_bitstream: std::mem::ManuallyDrop<Bitstream<'static>>,
-    // Owned via raw pointer for stable 'static address.
-    // Reclaimed and dropped properly in Drop impl.
     session: *mut Session,
     width: u32,
     height: u32,
@@ -233,14 +323,10 @@ unsafe impl Send for NvencEncoder {}
 #[cfg(feature = "nvenc")]
 impl Drop for NvencEncoder {
     fn drop(&mut self) {
-        // Drop buffers first while the session/encoder is still valid
         unsafe {
             std::mem::ManuallyDrop::drop(&mut self.input_buffer);
             std::mem::ManuallyDrop::drop(&mut self.output_bitstream);
         }
-        // Reclaim the session and drop it properly.
-        // Session::drop() sends EOS - catch_unwind handles the case where
-        // the encoder is busy (e.g. task was aborted mid-encode).
         if !self.session.is_null() {
             let session = unsafe { Box::from_raw(self.session) };
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(session)));
@@ -251,15 +337,12 @@ impl Drop for NvencEncoder {
 #[cfg(feature = "nvenc")]
 impl NvencEncoder {
     fn new(width: u32, height: u32, fps: u32, bitrate: u32) -> Result<Self> {
-        // Initialize CUDA
         let cuda_ctx = CudaContext::new(0)
             .map_err(|e| anyhow::anyhow!("Failed to create CUDA context: {}", e))?;
 
-        // Create encoder
         let encoder = Encoder::initialize_with_cuda(cuda_ctx)
             .map_err(|e| anyhow::anyhow!("Failed to initialize NVENC: {:?}", e))?;
 
-        // Get preset config
         let mut preset_config = encoder
             .get_preset_config(
                 NV_ENC_CODEC_H264_GUID,
@@ -268,7 +351,6 @@ impl NvencEncoder {
             )
             .map_err(|e| anyhow::anyhow!("Failed to get preset config: {:?}", e))?;
 
-        // Configure for low latency
         let config = &mut preset_config.presetCfg;
         config.gopLength = fps;
         config.frameIntervalP = 1;
@@ -276,7 +358,6 @@ impl NvencEncoder {
         config.rcParams.maxBitRate = bitrate;
         config.rcParams.vbvBufferSize = bitrate / fps;
 
-        // Create init params
         let mut init_params = EncoderInitParams::new(NV_ENC_CODEC_H264_GUID, width, height);
         init_params
             .preset_guid(NV_ENC_PRESET_P4_GUID)
@@ -287,7 +368,6 @@ impl NvencEncoder {
 
         let buffer_format = NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_NV12;
 
-        // Start session - own via raw pointer for stable 'static address
         let session = encoder
             .start_session(buffer_format, init_params)
             .map_err(|e| anyhow::anyhow!("Failed to start session: {:?}", e))?;
@@ -406,16 +486,31 @@ impl NvencEncoder {
     }
 }
 
-/// Run camera server - now fully async since Camera is Send
+// ============================================================================
+// Camera server functions
+// ============================================================================
+
+/// Run camera server with automatic restart on failure.
 async fn run_camera_server(config: CameraConfig) -> Result<()> {
     loop {
         tracing::info!("[cam{}] Starting {}...", config.index, config.name);
 
-        let result = if config.use_h264 {
+        let result = if let Some(ref moq_path) = config.moq_path {
+            if config.use_h264 {
+                #[cfg(all(feature = "vtenc", any(feature = "camera", feature = "camera-macos")))]
+                { run_camera_server_moq_h264_vtenc(&config, moq_path).await }
+                #[cfg(not(all(feature = "vtenc", any(feature = "camera", feature = "camera-macos"))))]
+                { anyhow::bail!("MoQ H.264 requires the 'vtenc' feature and a camera feature") }
+            } else {
+                run_camera_server_moq(&config, moq_path).await
+            }
+        } else if config.use_h264 {
             #[cfg(feature = "nvenc")]
-            { run_camera_server_h264(&config).await }
-            #[cfg(not(feature = "nvenc"))]
-            { anyhow::bail!("H.264 requires the 'nvenc' feature") }
+            { run_camera_server_h264_nvenc(&config).await }
+            #[cfg(feature = "vtenc")]
+            { run_camera_server_h264_vtenc(&config).await }
+            #[cfg(not(any(feature = "nvenc", feature = "vtenc")))]
+            { anyhow::bail!("H.264 requires the 'nvenc' or 'vtenc' feature") }
         } else {
             run_camera_server_jpeg(&config).await
         };
@@ -435,8 +530,175 @@ async fn run_camera_server(config: CameraConfig) -> Result<()> {
     Ok(())
 }
 
-async fn run_camera_server_jpeg(config: &CameraConfig) -> Result<()> {
+// ============================================================================
+// MoQ server (JPEG via relay, platform-conditional camera open)
+// ============================================================================
+
+#[cfg(not(any(feature = "camera", feature = "camera-macos")))]
+async fn run_camera_server_moq(_config: &CameraConfig, _moq_path: &str) -> Result<()> {
+    anyhow::bail!("MoQ mode requires the 'camera' or 'camera-macos' feature")
+}
+
+#[cfg(any(feature = "camera", feature = "camera-macos"))]
+async fn run_camera_server_moq(config: &CameraConfig, moq_path: &str) -> Result<()> {
+    #[cfg(feature = "camera")]
     let camera = Camera::open(config.index, config.width, config.height, config.fps)?;
+    #[cfg(all(feature = "camera-macos", not(feature = "camera")))]
+    let camera = CameraMacos::open(config.index, config.width, config.height, config.fps)?;
+
+    tracing::info!(
+        "[cam{}] Opened: {}x{} ({}) - MoQ JPEG mode",
+        config.index,
+        camera.width(),
+        camera.height(),
+        camera.format_name()
+    );
+
+    let camera = Arc::new(Mutex::new(camera));
+
+    let mut publisher = MoqBuilder::new()
+        .path(moq_path)
+        .connect_publisher()
+        .await?;
+
+    tracing::info!("[cam{}] MoQ path: {}", config.index, moq_path);
+
+    let mut track = publisher.create_track("camera");
+    let mut frame_count = 0u64;
+    let quality = config.quality;
+    let cam_idx = config.index;
+
+    loop {
+        let (jpeg, width, height, timestamp_us) = {
+            let mut cam = camera.lock().await;
+            let frame = cam.capture()?;
+            let jpeg = frame.to_jpeg(quality)?;
+            (jpeg, frame.width, frame.height, frame.timestamp_us)
+        };
+
+        // MoQ frame format: width(4) + height(4) + timestamp(4) + JPEG data
+        let mut buf = Vec::with_capacity(12 + jpeg.len());
+        buf.extend_from_slice(&width.to_le_bytes());
+        buf.extend_from_slice(&height.to_le_bytes());
+        buf.extend_from_slice(&(timestamp_us as u32).to_le_bytes());
+        buf.extend_from_slice(&jpeg);
+
+        track.write(buf);
+
+        frame_count += 1;
+        if frame_count % 300 == 0 {
+            tracing::info!("[cam{}] {} MoQ frames sent", cam_idx, frame_count);
+        }
+    }
+}
+
+// ============================================================================
+// MoQ H.264 CMAF server (macOS VideoToolbox)
+// ============================================================================
+
+#[cfg(all(feature = "vtenc", any(feature = "camera", feature = "camera-macos")))]
+async fn run_camera_server_moq_h264_vtenc(config: &CameraConfig, moq_path: &str) -> Result<()> {
+    use video_toolbox_sys::helpers::{CmafConfig, CmafMuxer};
+
+    #[cfg(feature = "camera")]
+    let camera = Camera::open(config.index, config.width, config.height, config.fps)?;
+    #[cfg(all(feature = "camera-macos", not(feature = "camera")))]
+    let camera = CameraMacos::open(config.index, config.width, config.height, config.fps)?;
+
+    let actual_width = camera.width();
+    let actual_height = camera.height();
+
+    tracing::info!(
+        "[cam{}] Opened: {}x{} ({}) - MoQ H.264/CMAF mode",
+        config.index,
+        actual_width,
+        actual_height,
+        camera.format_name()
+    );
+
+    let mut encoder = VtEncoder::new(actual_width, actual_height, config.fps, config.bitrate)?;
+    tracing::info!("[cam{}] VideoToolbox encoder initialized", config.index);
+
+    let mut muxer = CmafMuxer::new(CmafConfig {
+        fragment_duration_ms: 33, // 1 frame @ 30fps for lowest latency
+        timescale: 90000,
+    });
+
+    let camera = Arc::new(Mutex::new(camera));
+
+    let mut publisher = MoqBuilder::new()
+        .path(moq_path)
+        .connect_publisher()
+        .await?;
+
+    tracing::info!("[cam{}] MoQ path: {} (H.264 CMAF)", config.index, moq_path);
+
+    let mut track = publisher.create_track("video");
+    let mut init_segment: Option<Vec<u8>> = None;
+    let mut frame_count = 0u64;
+    let cam_idx = config.index;
+
+    loop {
+        let encoded = {
+            let mut cam = camera.lock().await;
+            let pixel_buffer = cam.capture_pixel_buffer()?;
+            encoder.encode_pixel_buffer_nals(pixel_buffer.as_ptr(), pixel_buffer.timestamp_us)?
+        };
+
+        // On first keyframe with SPS/PPS: create and send init segment
+        if init_segment.is_none() {
+            if let (Some(ref sps), Some(ref pps)) = (&encoded.sps, &encoded.pps) {
+                let init = muxer.create_init_segment(sps, pps, actual_width, actual_height);
+                track.write(init.clone());
+                init_segment = Some(init);
+                tracing::info!("[cam{}] Sent CMAF init segment", cam_idx);
+            }
+        }
+
+        // Compute timing in timescale 90000
+        let pts = (frame_count as i64) * 90000 / config.fps as i64;
+        let dts = pts;
+        let duration = (90000 / config.fps) as u32;
+
+        // Feed NALs to CmafMuxer; when a segment is ready, send it
+        if let Some(segment) = muxer.add_frame(&encoded.nals, pts, dts, duration, encoded.is_keyframe) {
+            // Prepend init segment on keyframes for late-joiner support
+            if encoded.is_keyframe {
+                if let Some(ref init) = init_segment {
+                    let mut combined = init.clone();
+                    combined.extend_from_slice(&segment);
+                    track.write(combined);
+                } else {
+                    track.write(segment);
+                }
+            } else {
+                track.write(segment);
+            }
+        }
+
+        frame_count += 1;
+        if frame_count % 300 == 0 {
+            tracing::info!("[cam{}] {} H.264 CMAF frames sent", cam_idx, frame_count);
+        }
+    }
+}
+
+// ============================================================================
+// JPEG server (platform-conditional camera open)
+// ============================================================================
+
+#[cfg(not(any(feature = "camera", feature = "camera-macos")))]
+async fn run_camera_server_jpeg(_config: &CameraConfig) -> Result<()> {
+    anyhow::bail!("JPEG mode requires the 'camera' or 'camera-macos' feature")
+}
+
+#[cfg(any(feature = "camera", feature = "camera-macos"))]
+async fn run_camera_server_jpeg(config: &CameraConfig) -> Result<()> {
+    // Open camera using platform-appropriate type
+    #[cfg(feature = "camera")]
+    let camera = Camera::open(config.index, config.width, config.height, config.fps)?;
+    #[cfg(all(feature = "camera-macos", not(feature = "camera")))]
+    let camera = CameraMacos::open(config.index, config.width, config.height, config.fps)?;
 
     tracing::info!(
         "[cam{}] Opened: {}x{} ({}) - JPEG mode",
@@ -457,9 +719,13 @@ async fn run_camera_server_jpeg(config: &CameraConfig) -> Result<()> {
     tracing::info!("[cam{}] Server ID: {}", config.index, server.id());
 
     loop {
-        let conn = match server.accept().await? {
-            Some(c) => c,
-            None => break,
+        let conn = match server.accept().await {
+            Ok(Some(c)) => c,
+            Ok(None) => break,
+            Err(e) => {
+                tracing::debug!("[cam{}] Accept error (retrying): {}", config.index, e);
+                continue;
+            }
         };
 
         tracing::info!("[cam{}] Client: {}", config.index, conn.remote_id());
@@ -508,9 +774,12 @@ async fn run_camera_server_jpeg(config: &CameraConfig) -> Result<()> {
     Ok(())
 }
 
+// ============================================================================
+// H.264 server - NVENC (Linux)
+// ============================================================================
+
 #[cfg(feature = "nvenc")]
-async fn run_camera_server_h264(config: &CameraConfig) -> Result<()> {
-    // Open camera with YUYV preferred for hardware encoding
+async fn run_camera_server_h264_nvenc(config: &CameraConfig) -> Result<()> {
     let camera = Camera::open_with_options(
         config.index,
         config.width,
@@ -531,7 +800,6 @@ async fn run_camera_server_h264(config: &CameraConfig) -> Result<()> {
         camera.format_name()
     );
 
-    // Create NVENC encoder
     let encoder = NvencEncoder::new(actual_width, actual_height, config.fps, config.bitrate)?;
     tracing::info!("[cam{}] NVENC encoder initialized", config.index);
 
@@ -547,9 +815,13 @@ async fn run_camera_server_h264(config: &CameraConfig) -> Result<()> {
     tracing::info!("[cam{}] Server ID: {}", config.index, server.id());
 
     loop {
-        let conn = match server.accept().await? {
-            Some(c) => c,
-            None => break,
+        let conn = match server.accept().await {
+            Ok(Some(c)) => c,
+            Ok(None) => break,
+            Err(e) => {
+                tracing::debug!("[cam{}] Accept error (retrying): {}", config.index, e);
+                continue;
+            }
         };
 
         tracing::info!("[cam{}] Client: {}", config.index, conn.remote_id());
@@ -567,7 +839,6 @@ async fn run_camera_server_h264(config: &CameraConfig) -> Result<()> {
         let cam_idx = config.index;
 
         loop {
-            // Capture and encode
             let h264_data = {
                 let mut cam = camera.lock().await;
                 let raw_frame = cam.capture_raw()?;
@@ -576,14 +847,11 @@ async fn run_camera_server_h264(config: &CameraConfig) -> Result<()> {
                 if is_yuyv {
                     enc.encode_yuyv(&raw_frame.data, raw_frame.timestamp_us)?
                 } else {
-                    // MJPEG: decode to RGB first, then encode
                     let frame = cam.capture()?;
                     enc.encode_rgb(&frame.data, frame.timestamp_us)?
                 }
             };
 
-            // Header: width(4) + height(4) + timestamp(8) + length(4) = 20 bytes
-            // Note: timestamp is frame count for H.264
             let timestamp_us = frame_count * 1_000_000 / config.fps as u64;
             let mut header = Vec::with_capacity(20);
             header.extend_from_slice(&actual_width.to_le_bytes());
@@ -607,6 +875,103 @@ async fn run_camera_server_h264(config: &CameraConfig) -> Result<()> {
     Ok(())
 }
 
+// ============================================================================
+// H.264 server - VideoToolbox (macOS)
+// ============================================================================
+
+#[cfg(feature = "vtenc")]
+async fn run_camera_server_h264_vtenc(config: &CameraConfig) -> Result<()> {
+    let camera = CameraMacos::open(config.index, config.width, config.height, config.fps)?;
+
+    let actual_width = camera.width();
+    let actual_height = camera.height();
+
+    tracing::info!(
+        "[cam{}] Opened: {}x{} ({}) - H.264/VideoToolbox mode",
+        config.index,
+        actual_width,
+        actual_height,
+        camera.format_name()
+    );
+
+    let encoder = VtEncoder::new(actual_width, actual_height, config.fps, config.bitrate)?;
+    tracing::info!("[cam{}] VideoToolbox encoder initialized", config.index);
+
+    let camera = Arc::new(Mutex::new(camera));
+    let encoder = Arc::new(Mutex::new(encoder));
+
+    let server = IrohServerBuilder::new()
+        .alpn(CAMERA_H264_ALPN)
+        .identity_path(&config.identity_path)
+        .bind()
+        .await?;
+
+    tracing::info!("[cam{}] Server ID: {}", config.index, server.id());
+
+    loop {
+        let conn = match server.accept().await {
+            Ok(Some(c)) => c,
+            Ok(None) => break,
+            Err(e) => {
+                tracing::debug!("[cam{}] Accept error (retrying): {}", config.index, e);
+                continue;
+            }
+        };
+
+        tracing::info!("[cam{}] Client: {}", config.index, conn.remote_id());
+
+        let stream = match conn.accept_stream().await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::debug!("[cam{}] Stream error: {}", config.index, e);
+                continue;
+            }
+        };
+
+        let (mut send, _recv) = stream.split();
+        let mut frame_count = 0u64;
+        let cam_idx = config.index;
+
+        loop {
+            let h264_data = {
+                let mut cam = camera.lock().await;
+                let pixel_buffer = cam.capture_pixel_buffer()?;
+
+                let mut enc = encoder.lock().await;
+                // Zero-copy: pass CVPixelBuffer directly to VideoToolbox
+                enc.encode_pixel_buffer(pixel_buffer.as_ptr(), pixel_buffer.timestamp_us)?
+                // pixel_buffer dropped here → CFRelease
+            };
+
+            let timestamp_us = frame_count * 1_000_000 / config.fps as u64;
+            let mut header = Vec::with_capacity(20);
+            header.extend_from_slice(&actual_width.to_le_bytes());
+            header.extend_from_slice(&actual_height.to_le_bytes());
+            header.extend_from_slice(&timestamp_us.to_le_bytes());
+            header.extend_from_slice(&(h264_data.len() as u32).to_le_bytes());
+
+            if send.write_all(&header).await.is_err() || send.write_all(&h264_data).await.is_err() {
+                break;
+            }
+            use tokio::time::Duration;
+            use tokio::time::sleep;
+            sleep(Duration::from_millis(30)).await; // Yield to allow other tasks to run
+            frame_count += 1;
+            if frame_count % 300 == 0 {
+                tracing::info!("[cam{}] {} H.264 frames sent", cam_idx, frame_count);
+            }
+        }
+
+        tracing::info!("[cam{}] Client disconnected", cam_idx);
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// Main
+// ============================================================================
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -626,22 +991,36 @@ async fn main() -> Result<()> {
     };
 
     let use_h264 = configs.first().map(|c| c.use_h264).unwrap_or(false);
+    let use_moq = configs.first().and_then(|c| c.moq_path.as_ref()).is_some();
 
-    #[cfg(not(feature = "nvenc"))]
-    if use_h264 {
-        eprintln!("Error: H.264 encoding requires the 'nvenc' feature.");
+    #[cfg(not(any(feature = "nvenc", feature = "vtenc")))]
+    if use_h264 && !use_moq {
+        eprintln!("Error: H.264 encoding requires the 'nvenc' or 'vtenc' feature.");
+        #[cfg(target_os = "macos")]
+        eprintln!("Rebuild with: cargo run --example camera_server --features iroh,vtenc");
+        #[cfg(not(target_os = "macos"))]
         eprintln!("Rebuild with: cargo run --example camera_server --features iroh,nvenc");
         return Ok(());
     }
 
+    let encoding_str = if use_moq && use_h264 {
+        "H.264 CMAF (MoQ relay)"
+    } else if use_moq {
+        "JPEG (MoQ relay)"
+    } else if use_h264 {
+        encoder_name()
+    } else {
+        "JPEG"
+    };
+
     tracing::info!("Camera server starting");
     tracing::info!("Key dir: {}", key_dir.display());
     tracing::info!("Cameras: {}", configs.len());
-    tracing::info!("Encoding: {}", if use_h264 { "H.264 (NVENC)" } else { "JPEG" });
+    tracing::info!("Encoding: {}", encoding_str);
 
     println!("\n========================================");
     println!("Camera Server Starting...");
-    println!("Encoding: {}", if use_h264 { "H.264 (NVENC)" } else { "JPEG" });
+    println!("Encoding: {}", encoding_str);
     println!("========================================\n");
 
     // Spawn all camera servers as async tasks
@@ -663,7 +1042,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Drain remaining tasks so NvencEncoder destructors run before process exit
+    // Drain remaining tasks so encoder destructors run before process exit
     while tasks.join_next().await.is_some() {}
 
     Ok(())

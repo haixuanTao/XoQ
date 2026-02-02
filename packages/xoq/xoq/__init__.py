@@ -9,8 +9,7 @@ except ImportError:
 
 # Re-export xoq-opencv as xoq.cv2
 try:
-    import cv2
-    cv2 = cv2
+    import xoq_cv2 as cv2
 except ImportError:
     cv2 = None
 

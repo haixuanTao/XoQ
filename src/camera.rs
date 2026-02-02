@@ -76,6 +76,8 @@ pub enum RawFormat {
     Yuyv,
     /// MJPEG - compressed, needs decode for encoding
     Mjpeg,
+    /// BGRA (32-bit) - macOS AVFoundation native format
+    Bgra,
 }
 
 impl Frame {

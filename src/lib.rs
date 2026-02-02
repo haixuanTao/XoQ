@@ -93,6 +93,12 @@ pub mod serialport {
 #[cfg(feature = "camera")]
 pub mod camera;
 
+#[cfg(feature = "camera-macos")]
+pub mod camera_macos;
+
+#[cfg(feature = "vtenc")]
+pub mod vtenc;
+
 #[cfg(all(feature = "camera", feature = "iroh"))]
 pub mod camera_server;
 
@@ -183,6 +189,11 @@ pub use frame::Frame;
 #[cfg(feature = "camera")]
 pub use camera::{list_cameras, Camera, CameraInfo};
 
+#[cfg(feature = "camera-macos")]
+pub use camera_macos::{
+    list_cameras as list_cameras_macos, Camera as CameraMacos, CameraInfo as CameraInfoMacos,
+};
+
 // Re-export Frame from camera module when camera is enabled (for backwards compat)
 #[cfg(all(feature = "camera", not(feature = "image")))]
 pub use camera::Frame;
@@ -192,6 +203,9 @@ pub use camera_server::{CameraServer, CameraServerBuilder};
 
 #[cfg(any(feature = "camera-remote", all(feature = "camera", feature = "iroh")))]
 pub use opencv::{remote_camera, CameraClient, CameraClientBuilder};
+
+#[cfg(feature = "videotoolbox")]
+pub use opencv::VtDecoder;
 
 #[cfg(any(feature = "camera-remote", all(feature = "camera", feature = "iroh")))]
 pub use camera_client::SyncCameraClient;
