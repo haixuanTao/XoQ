@@ -401,54 +401,47 @@ impl CameraClientBuilder {
         };
 
         let mut last_error = None;
-        for attempt in 0..3u32 {
-            if attempt > 0 {
-                tracing::info!("Retrying iroh connection (attempt {}/3)...", attempt + 1);
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            }
+        for alpn in &alpns {
+            match IrohClientBuilder::new()
+                .alpn(alpn)
+                .connect_str(server_id)
+                .await
+            {
+                Ok(conn) => {
+                    let encoding = if *alpn == CAMERA_ALPN_H264 {
+                        StreamEncoding::H264
+                    } else {
+                        StreamEncoding::Jpeg
+                    };
 
-            for alpn in &alpns {
-                match IrohClientBuilder::new()
-                    .alpn(alpn)
-                    .connect_str(server_id)
-                    .await
-                {
-                    Ok(conn) => {
-                        let encoding = if *alpn == CAMERA_ALPN_H264 {
-                            StreamEncoding::H264
-                        } else {
-                            StreamEncoding::Jpeg
-                        };
+                    tracing::info!(
+                        "Connected with {} encoding",
+                        if encoding == StreamEncoding::H264 { "H.264" } else { "JPEG" }
+                    );
 
-                        tracing::info!(
-                            "Connected with {} encoding",
-                            if encoding == StreamEncoding::H264 { "H.264" } else { "JPEG" }
-                        );
+                    let stream = conn.open_stream().await?;
+                    let (_send, recv) = stream.split();
 
-                        let stream = conn.open_stream().await?;
-                        let (_send, recv) = stream.split();
+                    // Create decoder if H.264
+                    #[cfg(any(feature = "nvenc", feature = "videotoolbox"))]
+                    let decoder = if encoding == StreamEncoding::H264 {
+                        Some(Arc::new(Mutex::new(H264Decoder::new()?)))
+                    } else {
+                        None
+                    };
 
-                        // Create decoder if H.264
+                    return Ok(CameraClientInner::Iroh {
+                        recv: Arc::new(Mutex::new(recv)),
+                        _conn: conn,
+                        encoding,
                         #[cfg(any(feature = "nvenc", feature = "videotoolbox"))]
-                        let decoder = if encoding == StreamEncoding::H264 {
-                            Some(Arc::new(Mutex::new(H264Decoder::new()?)))
-                        } else {
-                            None
-                        };
-
-                        return Ok(CameraClientInner::Iroh {
-                            recv: Arc::new(Mutex::new(recv)),
-                            _conn: conn,
-                            encoding,
-                            #[cfg(any(feature = "nvenc", feature = "videotoolbox"))]
-                            decoder,
-                        });
-                    }
-                    Err(e) => {
-                        tracing::debug!("Failed to connect with ALPN {:?}: {}",
-                            String::from_utf8_lossy(alpn), e);
-                        last_error = Some(e);
-                    }
+                        decoder,
+                    });
+                }
+                Err(e) => {
+                    tracing::debug!("Failed to connect with ALPN {:?}: {}",
+                        String::from_utf8_lossy(alpn), e);
+                    last_error = Some(e);
                 }
             }
         }
@@ -470,12 +463,12 @@ impl CameraClientBuilder {
 
         // Try "video" (H.264 CMAF) track first if H.264 is preferred
         let (track, encoding) = if prefer_h264 {
-            match conn.subscribe_track("video").await? {
-                Some(t) => {
+            match conn.subscribe_track("video").await {
+                Ok(Some(t)) => {
                     eprintln!("[xoq] Subscribed to H.264 CMAF 'video' track");
                     (t, StreamEncoding::H264)
                 }
-                None => {
+                _ => {
                     eprintln!("[xoq] No 'video' track, falling back to 'camera' (JPEG)");
                     let t = conn
                         .subscribe_track("camera")
