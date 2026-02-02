@@ -420,6 +420,11 @@ pub struct BufferLock<'a, 'b> {
 }
 
 impl BufferLock<'_, '_> {
+    /// Get the pitch (stride in bytes) of the locked buffer.
+    pub fn pitch(&self) -> u32 {
+        self.pitch
+    }
+
     /// Write data to the buffer.
     ///
     /// # Safety
@@ -435,6 +440,42 @@ impl BufferLock<'_, '_> {
         // - Write pitched?
         data.as_ptr()
             .copy_to(self.data_ptr.cast::<u8>(), data.len());
+    }
+
+    /// Write NV12 data to the buffer, handling pitch (stride) correctly.
+    ///
+    /// `data` must be tightly packed NV12: `width * height` bytes of Y plane
+    /// followed by `width * (height / 2)` bytes of interleaved UV plane.
+    ///
+    /// # Safety
+    ///
+    /// `width` and `height` must match the encoder's configured dimensions.
+    pub unsafe fn write_nv12(&mut self, data: &[u8], width: u32, height: u32) {
+        let w = width as usize;
+        let h = height as usize;
+        let p = self.pitch as usize;
+        let dst = self.data_ptr.cast::<u8>();
+
+        if p == w {
+            // No padding — fast path (flat copy)
+            data.as_ptr().copy_to(dst, data.len());
+        } else {
+            // Copy Y plane row by row
+            for y in 0..h {
+                data.as_ptr()
+                    .add(y * w)
+                    .copy_to_nonoverlapping(dst.add(y * p), w);
+            }
+            // Copy UV plane row by row
+            let uv_h = h / 2;
+            let src_uv = w * h;
+            let dst_uv = p * h;
+            for y in 0..uv_h {
+                data.as_ptr()
+                    .add(src_uv + y * w)
+                    .copy_to_nonoverlapping(dst.add(dst_uv + y * p), w);
+            }
+        }
     }
 }
 

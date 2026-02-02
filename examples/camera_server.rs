@@ -423,7 +423,14 @@ impl NvencEncoder {
                 .input_buffer
                 .lock()
                 .map_err(|e| anyhow::anyhow!("Failed to lock input: {:?}", e))?;
-            unsafe { lock.write(&self.nv12_buffer) };
+            if self.frame_count == 0 {
+                eprintln!(
+                    "[nvenc] buffer pitch={}, width={}, height={} ({})",
+                    lock.pitch(), self.width, self.height,
+                    if lock.pitch() == self.width { "no padding" } else { "PITCHED" },
+                );
+            }
+            unsafe { lock.write_nv12(&self.nv12_buffer, self.width, self.height) };
         }
 
         let is_idr = self.frame_count % self.fps as u64 == 0;
