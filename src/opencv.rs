@@ -1017,6 +1017,20 @@ mod nvdec {
             decoder.width = format.coded_width;
             decoder.height = format.coded_height;
 
+            // Use display_area from SPS for accurate display dimensions
+            let da = &format.display_area;
+            if da.right > da.left && da.bottom > da.top {
+                decoder.display_width = (da.right - da.left) as u32;
+                decoder.display_height = (da.bottom - da.top) as u32;
+            }
+
+            eprintln!(
+                "[nvdec] sequence: coded={}x{}, display_area=({},{},{},{}), display={}x{}",
+                format.coded_width, format.coded_height,
+                da.left, da.top, da.right, da.bottom,
+                decoder.display_width, decoder.display_height,
+            );
+
             format.min_num_decode_surfaces as i32
         }
 
@@ -1075,42 +1089,56 @@ mod nvdec {
                 return 0;
             }
 
-            // Copy NV12 data from GPU to CPU
+            // Copy NV12 data from GPU to CPU using cuMemcpy2D (handles pitch)
             let width = decoder.width as usize;
             let height = decoder.height as usize;
+            let surface_height = height; // ulTargetHeight used for UV plane offset
             let nv12_size = width * height * 3 / 2;
             let mut nv12_data = vec![0u8; nv12_size];
 
-            // Note: dev_ptr is a device pointer, we need cuMemcpy to copy from GPU
-            // For now, this is a simplified version - proper implementation would use
-            // cuMemcpyDtoH or cuMemcpy2D
-            // TODO: Use proper CUDA memory copy
-
-            // Copy Y plane (row by row due to pitch)
-            for y in 0..height {
-                let src_offset = y * pitch as usize;
-                let dst_offset = y * width;
-                unsafe {
-                    cudarc::driver::sys::cuMemcpyDtoH_v2(
-                        nv12_data.as_mut_ptr().add(dst_offset) as *mut c_void,
-                        (dev_ptr + src_offset as u64) as cudarc::driver::sys::CUdeviceptr,
-                        width,
-                    );
-                }
+            // Log first frame diagnostics
+            static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!(
+                    "[nvdec] display_callback: coded={}x{}, pitch={}, dev_ptr=0x{:x}, nv12_size={}",
+                    width, height, pitch, dev_ptr, nv12_size,
+                );
             }
 
-            // Copy UV plane
-            let uv_height = height / 2;
-            for y in 0..uv_height {
-                let src_offset = (height * pitch as usize) + y * pitch as usize;
-                let dst_offset = width * height + y * width;
-                unsafe {
-                    cudarc::driver::sys::cuMemcpyDtoH_v2(
-                        nv12_data.as_mut_ptr().add(dst_offset) as *mut c_void,
-                        (dev_ptr + src_offset as u64) as cudarc::driver::sys::CUdeviceptr,
-                        width,
-                    );
-                }
+            // Copy Y plane using cuMemcpy2D
+            let mut copy_y: cudarc::driver::sys::CUDA_MEMCPY2D = unsafe { std::mem::zeroed() };
+            copy_y.srcMemoryType = cudarc::driver::sys::CUmemorytype::CU_MEMORYTYPE_DEVICE;
+            copy_y.srcDevice = dev_ptr as cudarc::driver::sys::CUdeviceptr;
+            copy_y.srcPitch = pitch as usize;
+            copy_y.dstMemoryType = cudarc::driver::sys::CUmemorytype::CU_MEMORYTYPE_HOST;
+            copy_y.dstHost = nv12_data.as_mut_ptr() as *mut c_void;
+            copy_y.dstPitch = width;
+            copy_y.WidthInBytes = width;
+            copy_y.Height = height;
+
+            let result = unsafe { cudarc::driver::sys::cuMemcpy2D_v2(&copy_y) };
+            if result != CUDA_SUCCESS {
+                tracing::error!("cuMemcpy2D Y plane failed: {:?}", result);
+                let _ = unsafe { cuvidUnmapVideoFrame64(decoder.decoder, dev_ptr) };
+                return 0;
+            }
+
+            // Copy UV plane — starts at surface_height * pitch in GPU memory
+            let mut copy_uv: cudarc::driver::sys::CUDA_MEMCPY2D = unsafe { std::mem::zeroed() };
+            copy_uv.srcMemoryType = cudarc::driver::sys::CUmemorytype::CU_MEMORYTYPE_DEVICE;
+            copy_uv.srcDevice = (dev_ptr + (surface_height as u64) * (pitch as u64)) as cudarc::driver::sys::CUdeviceptr;
+            copy_uv.srcPitch = pitch as usize;
+            copy_uv.dstMemoryType = cudarc::driver::sys::CUmemorytype::CU_MEMORYTYPE_HOST;
+            copy_uv.dstHost = unsafe { nv12_data.as_mut_ptr().add(width * height) as *mut c_void };
+            copy_uv.dstPitch = width;
+            copy_uv.WidthInBytes = width;
+            copy_uv.Height = height / 2;
+
+            let result = unsafe { cudarc::driver::sys::cuMemcpy2D_v2(&copy_uv) };
+            if result != CUDA_SUCCESS {
+                tracing::error!("cuMemcpy2D UV plane failed: {:?}", result);
+                let _ = unsafe { cuvidUnmapVideoFrame64(decoder.decoder, dev_ptr) };
+                return 0;
             }
 
             // Unmap
