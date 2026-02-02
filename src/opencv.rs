@@ -909,14 +909,7 @@ mod nvdec {
                     timestamp_us: decoded.timestamp,
                 })
             } else {
-                // No frame decoded yet - return placeholder frame
-                // This can happen at stream start before first I-frame
-                Ok(Frame {
-                    width,
-                    height,
-                    data: vec![128u8; (width * height * 3) as usize], // Gray frame
-                    timestamp_us: timestamp,
-                })
+                anyhow::bail!("NvdecDecoder: no frame decoded (data_len={}, {}x{}, frame_count={})", h264_data.len(), width, height, self.decoded_frames.len());
             }
         }
 
@@ -1321,6 +1314,16 @@ mod vtdec {
             // Parse Annex B to extract NALs, SPS/PPS, and AVCC data
             let (avcc_data, sps, pps) = annex_b_to_avcc(h264_data);
 
+            if self.frame_count < 5 {
+                let preview_len = h264_data.len().min(64);
+                let hex: Vec<String> = h264_data[..preview_len].iter().map(|b| format!("{:02x}", b)).collect();
+                eprintln!(
+                    "VtDecoder frame {}: h264_data len={}, first {} bytes=[{}], avcc_len={}, sps={}, pps={}",
+                    self.frame_count, h264_data.len(), preview_len, hex.join(" "),
+                    avcc_data.len(), sps.is_some(), pps.is_some()
+                );
+            }
+
             // Resolve current SPS/PPS: use newly parsed if available, else cached
             let current_sps = sps.unwrap_or_else(|| self.sps.clone());
             let current_pps = pps.unwrap_or_else(|| self.pps.clone());
@@ -1328,25 +1331,14 @@ mod vtdec {
             if current_sps.is_empty() || current_pps.is_empty() {
                 // No SPS/PPS yet and none in this frame - can't decode
                 if self.session.is_null() {
-                    return Ok(Frame {
-                        width,
-                        height,
-                        data: vec![128u8; (width * height * 3) as usize],
-                        timestamp_us: timestamp,
-                    });
+                    anyhow::bail!("VtDecoder: no SPS/PPS available and no session initialized (frame {})", self.frame_count);
                 }
             } else {
                 self.ensure_session(&current_sps, &current_pps, width, height)?;
             }
 
             if avcc_data.is_empty() {
-                // Only SPS/PPS in this packet, no slice data
-                return Ok(Frame {
-                    width,
-                    height,
-                    data: vec![128u8; (width * height * 3) as usize],
-                    timestamp_us: timestamp,
-                });
+                anyhow::bail!("VtDecoder: frame {} has no slice data (only SPS/PPS), h264_data len={}", self.frame_count, h264_data.len());
             }
 
             // Clear the frame slot
@@ -1450,12 +1442,7 @@ mod vtdec {
             }
 
             // Callback didn't fire or produced no frame
-            Ok(Frame {
-                width,
-                height,
-                data: vec![128u8; (width * height * 3) as usize],
-                timestamp_us: timestamp,
-            })
+            anyhow::bail!("VtDecoder: decompression callback produced no frame (frame {}, avcc_len={}, {}x{})", self.frame_count - 1, h264_data.len(), width, height);
         }
 
         fn destroy_session(&mut self) {

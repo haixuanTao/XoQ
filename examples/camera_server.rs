@@ -358,6 +358,12 @@ impl NvencEncoder {
         config.rcParams.maxBitRate = bitrate;
         config.rcParams.vbvBufferSize = bitrate / fps;
 
+        // H.264-specific: ensure IDR frames include SPS/PPS so decoders can initialize
+        unsafe {
+            config.encodeCodecConfig.h264Config.idrPeriod = fps;
+            config.encodeCodecConfig.h264Config.set_repeatSPSPPS(1);
+        }
+
         let mut init_params = EncoderInitParams::new(NV_ENC_CODEC_H264_GUID, width, height);
         init_params
             .preset_guid(NV_ENC_PRESET_P4_GUID)
