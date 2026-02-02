@@ -1036,12 +1036,7 @@ async fn run_camera_server_h264_nvenc(config: &CameraConfig) -> Result<()> {
             frame_count += 1;
 
             // Yield between frames so iroh/QUIC can flush the send buffer.
-            // First 3 frames get extra time to avoid GSO segmentation on Linux.
-            if frame_count <= 3 {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            } else {
-                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-            }
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
 
             if frame_count % 300 == 0 {
                 tracing::info!("[cam{}] {} H.264 frames sent", cam_idx, frame_count);
