@@ -1314,16 +1314,6 @@ mod vtdec {
             // Parse Annex B to extract NALs, SPS/PPS, and AVCC data
             let (avcc_data, sps, pps) = annex_b_to_avcc(h264_data);
 
-            if self.frame_count < 5 {
-                let preview_len = h264_data.len().min(64);
-                let hex: Vec<String> = h264_data[..preview_len].iter().map(|b| format!("{:02x}", b)).collect();
-                eprintln!(
-                    "VtDecoder frame {}: h264_data len={}, first {} bytes=[{}], avcc_len={}, sps={}, pps={}",
-                    self.frame_count, h264_data.len(), preview_len, hex.join(" "),
-                    avcc_data.len(), sps.is_some(), pps.is_some()
-                );
-            }
-
             // Resolve current SPS/PPS: use newly parsed if available, else cached
             let current_sps = sps.unwrap_or_else(|| self.sps.clone());
             let current_pps = pps.unwrap_or_else(|| self.pps.clone());

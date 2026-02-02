@@ -40,7 +40,7 @@ use cudarc::driver::CudaContext;
 use nvidia_video_codec_sdk::{
     sys::nvEncodeAPI::{
         NV_ENC_BUFFER_FORMAT, NV_ENC_CODEC_H264_GUID, NV_ENC_PRESET_P4_GUID,
-        NV_ENC_TUNING_INFO,
+        NV_ENC_TUNING_INFO, NV_ENC_PIC_TYPE,
     },
     Bitstream, Buffer, Encoder, EncoderInitParams, EncodePictureParams, Session,
 };
@@ -315,6 +315,8 @@ struct NvencEncoder {
     width: u32,
     height: u32,
     nv12_buffer: Vec<u8>,
+    frame_count: u64,
+    fps: u32,
 }
 
 #[cfg(feature = "nvenc")]
@@ -372,7 +374,6 @@ impl NvencEncoder {
             .preset_guid(NV_ENC_PRESET_P4_GUID)
             .tuning_info(NV_ENC_TUNING_INFO::NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY)
             .framerate(fps, 1)
-            .enable_picture_type_decision()
             .encode_config(config);
 
         let buffer_format = NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_NV12;
@@ -401,6 +402,8 @@ impl NvencEncoder {
             width,
             height,
             nv12_buffer: vec![0u8; nv12_size],
+            frame_count: 0,
+            fps,
         })
     }
 
@@ -423,6 +426,13 @@ impl NvencEncoder {
             unsafe { lock.write(&self.nv12_buffer) };
         }
 
+        let picture_type = if self.frame_count % self.fps as u64 == 0 {
+            NV_ENC_PIC_TYPE::NV_ENC_PIC_TYPE_IDR
+        } else {
+            NV_ENC_PIC_TYPE::NV_ENC_PIC_TYPE_P
+        };
+        self.frame_count += 1;
+
         let session: &Session = unsafe { &*self.session };
         session
             .encode_picture(
@@ -430,6 +440,7 @@ impl NvencEncoder {
                 &mut *self.output_bitstream,
                 EncodePictureParams {
                     input_timestamp: timestamp_us,
+                    picture_type,
                     ..Default::default()
                 },
             )
