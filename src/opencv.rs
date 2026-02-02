@@ -1089,56 +1089,53 @@ mod nvdec {
                 return 0;
             }
 
-            // Copy NV12 data from GPU to CPU using cuMemcpy2D (handles pitch)
+            // Copy NV12 data from GPU to CPU (row by row to handle pitch)
             let width = decoder.width as usize;
             let height = decoder.height as usize;
-            let surface_height = height; // ulTargetHeight used for UV plane offset
             let nv12_size = width * height * 3 / 2;
             let mut nv12_data = vec![0u8; nv12_size];
 
-            // Log first frame diagnostics
+            // Copy Y plane
+            let mut y_errors = 0u32;
+            for y in 0..height {
+                let src = (dev_ptr + (y as u64) * (pitch as u64)) as cudarc::driver::sys::CUdeviceptr;
+                let dst = unsafe { nv12_data.as_mut_ptr().add(y * width) as *mut c_void };
+                let r = unsafe { cudarc::driver::sys::cuMemcpyDtoH_v2(dst, src, width) };
+                if r != CUDA_SUCCESS && y_errors == 0 {
+                    eprintln!("[nvdec] cuMemcpyDtoH Y row {} failed: {:?}", y, r);
+                    y_errors += 1;
+                }
+            }
+
+            // Copy UV plane (starts at surface_height * pitch in GPU memory)
+            let uv_height = height / 2;
+            let mut uv_errors = 0u32;
+            for y in 0..uv_height {
+                let src = (dev_ptr + ((height + y) as u64) * (pitch as u64)) as cudarc::driver::sys::CUdeviceptr;
+                let dst = unsafe { nv12_data.as_mut_ptr().add(width * height + y * width) as *mut c_void };
+                let r = unsafe { cudarc::driver::sys::cuMemcpyDtoH_v2(dst, src, width) };
+                if r != CUDA_SUCCESS && uv_errors == 0 {
+                    eprintln!("[nvdec] cuMemcpyDtoH UV row {} failed: {:?}", y, r);
+                    uv_errors += 1;
+                }
+            }
+
+            // Validate NV12 data on first frame
             static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
             if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                let y_nonzero = nv12_data[..width * height].iter().filter(|&&b| b != 0).count();
+                let uv_nonzero = nv12_data[width * height..].iter().filter(|&&b| b != 0).count();
+                let y_sample: Vec<u8> = nv12_data[..20.min(width)].to_vec();
+                let uv_sample: Vec<u8> = nv12_data[width * height..width * height + 20.min(width)].to_vec();
                 eprintln!(
-                    "[nvdec] display_callback: coded={}x{}, pitch={}, dev_ptr=0x{:x}, nv12_size={}",
-                    width, height, pitch, dev_ptr, nv12_size,
+                    "[nvdec] coded={}x{}, pitch={}, Y_nonzero={}/{}, UV_nonzero={}/{}, Y_errs={}, UV_errs={}",
+                    width, height, pitch,
+                    y_nonzero, width * height,
+                    uv_nonzero, width * uv_height,
+                    y_errors, uv_errors,
                 );
-            }
-
-            // Copy Y plane using cuMemcpy2D
-            let mut copy_y: cudarc::driver::sys::CUDA_MEMCPY2D = unsafe { std::mem::zeroed() };
-            copy_y.srcMemoryType = cudarc::driver::sys::CUmemorytype::CU_MEMORYTYPE_DEVICE;
-            copy_y.srcDevice = dev_ptr as cudarc::driver::sys::CUdeviceptr;
-            copy_y.srcPitch = pitch as usize;
-            copy_y.dstMemoryType = cudarc::driver::sys::CUmemorytype::CU_MEMORYTYPE_HOST;
-            copy_y.dstHost = nv12_data.as_mut_ptr() as *mut c_void;
-            copy_y.dstPitch = width;
-            copy_y.WidthInBytes = width;
-            copy_y.Height = height;
-
-            let result = unsafe { cudarc::driver::sys::cuMemcpy2D_v2(&copy_y) };
-            if result != CUDA_SUCCESS {
-                tracing::error!("cuMemcpy2D Y plane failed: {:?}", result);
-                let _ = unsafe { cuvidUnmapVideoFrame64(decoder.decoder, dev_ptr) };
-                return 0;
-            }
-
-            // Copy UV plane — starts at surface_height * pitch in GPU memory
-            let mut copy_uv: cudarc::driver::sys::CUDA_MEMCPY2D = unsafe { std::mem::zeroed() };
-            copy_uv.srcMemoryType = cudarc::driver::sys::CUmemorytype::CU_MEMORYTYPE_DEVICE;
-            copy_uv.srcDevice = (dev_ptr + (surface_height as u64) * (pitch as u64)) as cudarc::driver::sys::CUdeviceptr;
-            copy_uv.srcPitch = pitch as usize;
-            copy_uv.dstMemoryType = cudarc::driver::sys::CUmemorytype::CU_MEMORYTYPE_HOST;
-            copy_uv.dstHost = unsafe { nv12_data.as_mut_ptr().add(width * height) as *mut c_void };
-            copy_uv.dstPitch = width;
-            copy_uv.WidthInBytes = width;
-            copy_uv.Height = height / 2;
-
-            let result = unsafe { cudarc::driver::sys::cuMemcpy2D_v2(&copy_uv) };
-            if result != CUDA_SUCCESS {
-                tracing::error!("cuMemcpy2D UV plane failed: {:?}", result);
-                let _ = unsafe { cuvidUnmapVideoFrame64(decoder.decoder, dev_ptr) };
-                return 0;
+                eprintln!("[nvdec] Y[0..20]={:?}", y_sample);
+                eprintln!("[nvdec] UV[0..20]={:?}", uv_sample);
             }
 
             // Unmap
@@ -1243,6 +1240,7 @@ mod vtdec {
         fn CVPixelBufferGetWidth(pixel_buffer: CVPixelBufferRef) -> usize;
         fn CVPixelBufferGetHeight(pixel_buffer: CVPixelBufferRef) -> usize;
         fn CVPixelBufferGetBytesPerRow(pixel_buffer: CVPixelBufferRef) -> usize;
+        fn CVPixelBufferGetPixelFormatType(pixel_buffer: CVPixelBufferRef) -> u32;
     }
 
     #[repr(C)]
@@ -1310,23 +1308,26 @@ mod vtdec {
 
                 self.format_desc = format_desc;
 
-                // Build destination pixel buffer attributes (request BGRA)
+                // Build destination pixel buffer attributes (request BGRA).
+                // Do NOT specify Width/Height — let VideoToolbox derive them from the
+                // format description (which contains the coded dimensions and crop rect).
+                // Specifying display dimensions (e.g. 360) when the coded height is 368
+                // causes some hardware decoders to silently produce all-zero frames.
                 let pixel_format_key = CFString::new("PixelFormatType");
                 let pixel_format_value = CFNumber::from(0x42475241i32); // kCVPixelFormatType_32BGRA
-                let width_key = CFString::new("Width");
-                let width_value = CFNumber::from(width as i32);
-                let height_key = CFString::new("Height");
-                let height_value = CFNumber::from(height as i32);
+
+                // IOSurface backing is required for hardware-accelerated decode paths.
+                let iosurface_key = CFString::new("IOSurfaceProperties");
+                let empty_pairs: Vec<(CFString, CFString)> = Vec::new();
+                let iosurface_value = CFDictionary::from_CFType_pairs(&empty_pairs);
 
                 let keys = vec![
                     pixel_format_key.as_CFType(),
-                    width_key.as_CFType(),
-                    height_key.as_CFType(),
+                    iosurface_key.as_CFType(),
                 ];
                 let values = vec![
                     pixel_format_value.as_CFType(),
-                    width_value.as_CFType(),
-                    height_value.as_CFType(),
+                    iosurface_value.as_CFType(),
                 ];
 
                 let dest_attrs = CFDictionary::from_CFType_pairs(
@@ -1379,6 +1380,28 @@ mod vtdec {
         ) -> Result<Frame> {
             // Parse Annex B to extract NALs, SPS/PPS, and AVCC data
             let (avcc_data, sps, pps) = annex_b_to_avcc(h264_data);
+
+            if self.frame_count < 3 {
+                let nals = parse_annex_b(h264_data);
+                let nal_types: Vec<u8> = nals.iter().map(|(t, _)| *t).collect();
+                eprintln!(
+                    "[vtdec] frame {}: h264={} bytes, avcc={} bytes, NALs={:?}, sps={}, pps={}, {}x{}",
+                    self.frame_count, h264_data.len(), avcc_data.len(), nal_types,
+                    sps.as_ref().map(|s| s.len()).unwrap_or(0),
+                    pps.as_ref().map(|s| s.len()).unwrap_or(0),
+                    width, height,
+                );
+                if let Some(ref s) = sps {
+                    eprintln!("[vtdec] SPS ({} bytes): {:02x?}", s.len(), &s[..s.len().min(32)]);
+                }
+            }
+            // Dump first 3 H.264 frames for offline analysis
+            if self.frame_count < 3 {
+                let path = format!("/tmp/xoq_frame_{}.h264", self.frame_count);
+                if let Ok(()) = std::fs::write(&path, h264_data) {
+                    eprintln!("[vtdec] dumped {} bytes to {}", h264_data.len(), path);
+                }
+            }
 
             // Resolve current SPS/PPS: use newly parsed if available, else cached
             let current_sps = sps.unwrap_or_else(|| self.sps.clone());
@@ -1482,8 +1505,15 @@ mod vtdec {
                 CFRelease(sample_buffer as CFTypeRef);
                 // avcc_buf (Box) dropped here, safe after sync decode
 
+                if self.frame_count < 3 {
+                    eprintln!(
+                        "[vtdec] decode status={}, info_flags=0x{:x} (frame {})",
+                        status, info_flags, self.frame_count
+                    );
+                }
+
                 if status != 0 {
-                    anyhow::bail!("VideoToolbox decode failed: {}", status);
+                    anyhow::bail!("VideoToolbox decode failed: status={}, info_flags=0x{:x}", status, info_flags);
                 }
             }
 
@@ -1532,11 +1562,11 @@ mod vtdec {
         _duration: CMTime,
     ) {
         if status != 0 {
-            tracing::warn!("VideoToolbox decode callback failed with status: {}", status);
+            eprintln!("[vtdec] callback FAILED with status: {}", status);
             return;
         }
         if image_buffer.is_null() {
-            tracing::warn!("VideoToolbox decode callback: null image buffer");
+            eprintln!("[vtdec] callback: null image buffer");
             return;
         }
 
@@ -1547,6 +1577,27 @@ mod vtdec {
             let width = CVPixelBufferGetWidth(image_buffer);
             let height = CVPixelBufferGetHeight(image_buffer);
             let bytes_per_row = CVPixelBufferGetBytesPerRow(image_buffer);
+            let pixel_format = CVPixelBufferGetPixelFormatType(image_buffer);
+
+            // Log first few frames for diagnostics
+            static VT_LOG_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            if VT_LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3 {
+                let fmt_str = match pixel_format {
+                    0x42475241 => "BGRA",
+                    0x34323076 => "420v (NV12-biplanar)",
+                    0x34323066 => "420f (NV12-fullrange)",
+                    _ => "unknown",
+                };
+                eprintln!(
+                    "[vtdec] callback: {}x{}, bytes_per_row={}, format=0x{:08x} ({}), base_addr={:?}",
+                    width, height, bytes_per_row, pixel_format, fmt_str,
+                    base_address,
+                );
+                if !base_address.is_null() {
+                    let sample = std::slice::from_raw_parts(base_address as *const u8, 16.min(bytes_per_row));
+                    eprintln!("[vtdec] first 16 bytes: {:?}", sample);
+                }
+            }
 
             if !base_address.is_null() && width > 0 && height > 0 {
                 let src = std::slice::from_raw_parts(

@@ -408,11 +408,27 @@ impl NvencEncoder {
     }
 
     fn encode_yuyv(&mut self, yuyv: &[u8], timestamp_us: u64) -> Result<Vec<u8>> {
+        if self.frame_count == 0 {
+            let nonzero = yuyv.iter().filter(|&&b| b != 0).count();
+            eprintln!(
+                "[nvenc] YUYV input: {} bytes, nonzero={}/{} first16={:?}",
+                yuyv.len(), nonzero, yuyv.len(),
+                &yuyv[..yuyv.len().min(16)],
+            );
+        }
         self.yuyv_to_nv12(yuyv);
         self.encode_nv12(timestamp_us)
     }
 
     fn encode_rgb(&mut self, rgb: &[u8], timestamp_us: u64) -> Result<Vec<u8>> {
+        if self.frame_count == 0 {
+            let nonzero = rgb.iter().filter(|&&b| b != 0).count();
+            eprintln!(
+                "[nvenc] RGB input: {} bytes, nonzero={}/{} first16={:?}",
+                rgb.len(), nonzero, rgb.len(),
+                &rgb[..rgb.len().min(16)],
+            );
+        }
         self.rgb_to_nv12(rgb);
         self.encode_nv12(timestamp_us)
     }
@@ -424,10 +440,23 @@ impl NvencEncoder {
                 .lock()
                 .map_err(|e| anyhow::anyhow!("Failed to lock input: {:?}", e))?;
             if self.frame_count == 0 {
+                let aligned_h = (self.height as usize + 15) & !15;
                 eprintln!(
-                    "[nvenc] buffer pitch={}, width={}, height={} ({})",
-                    lock.pitch(), self.width, self.height,
+                    "[nvenc] buffer pitch={}, width={}, height={}, aligned_height={} ({})",
+                    lock.pitch(), self.width, self.height, aligned_h,
                     if lock.pitch() == self.width { "no padding" } else { "PITCHED" },
+                );
+                // Log NV12 content before write
+                let y_nonzero = self.nv12_buffer[..self.width as usize * self.height as usize]
+                    .iter().filter(|&&b| b != 0).count();
+                let uv_start = (self.width * self.height) as usize;
+                let uv_nonzero = self.nv12_buffer[uv_start..]
+                    .iter().filter(|&&b| b != 0).count();
+                eprintln!(
+                    "[nvenc] NV12 buffer: Y nonzero={}/{}, UV nonzero={}/{}, Y first16={:?}",
+                    y_nonzero, self.width as usize * self.height as usize,
+                    uv_nonzero, self.nv12_buffer.len() - uv_start,
+                    &self.nv12_buffer[..16],
                 );
             }
             unsafe { lock.write_nv12(&self.nv12_buffer, self.width, self.height) };
