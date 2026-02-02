@@ -17,6 +17,10 @@ use url::Url;
 
 /// Create a QUIC endpoint configured for WebTransport (HTTP/3).
 fn create_quic_endpoint() -> Result<quinn::Endpoint> {
+    // Install ring as the default crypto provider (required when both ring and
+    // aws-lc-rs features are resolved from transitive dependencies).
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 
