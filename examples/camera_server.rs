@@ -358,8 +358,11 @@ impl NvencEncoder {
         config.rcParams.maxBitRate = bitrate;
         config.rcParams.vbvBufferSize = bitrate / fps;
 
-        // H.264-specific: ensure IDR frames include SPS/PPS so decoders can initialize
+        // H.264-specific: ensure IDR frames with SPS/PPS so decoders can initialize.
+        // Ultra-low-latency preset enables intra refresh (gradual refresh without IDR),
+        // which must be disabled for cross-platform decoding compatibility.
         unsafe {
+            config.encodeCodecConfig.h264Config.set_enableIntraRefresh(0);
             config.encodeCodecConfig.h264Config.idrPeriod = fps;
             config.encodeCodecConfig.h264Config.set_repeatSPSPPS(1);
         }
