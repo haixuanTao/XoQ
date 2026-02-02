@@ -64,10 +64,19 @@ fn main() {
     // Check that nvcc is available — cudarc needs it to detect the CUDA version.
     // Without it, cudarc may bind to newer APIs than the installed driver supports.
     if std::process::Command::new("nvcc").arg("--version").output().is_err() {
+        let install_hint = if cfg!(target_os = "linux") {
+            "Install with: sudo apt install nvidia-cuda-toolkit\n             \
+             Or download from: https://developer.nvidia.com/cuda-downloads"
+        } else if cfg!(target_os = "windows") {
+            "Download from: https://developer.nvidia.com/cuda-downloads\n             \
+             Make sure nvcc.exe is in your PATH after installation."
+        } else {
+            "NVENC requires an NVIDIA GPU and the CUDA toolkit.\n             \
+             Download from: https://developer.nvidia.com/cuda-downloads"
+        };
         panic!(
             "nvcc not found. The CUDA toolkit is required for NVENC encoding.\n\
-             Install it with: sudo apt install nvidia-cuda-toolkit\n\
-             Or download from: https://developer.nvidia.com/cuda-downloads"
+             {install_hint}"
         );
     }
 
