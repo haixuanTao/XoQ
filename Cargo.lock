@@ -6881,7 +6881,9 @@ dependencies = [
  "objc2",
  "objc2-av-foundation",
  "objc2-foundation",
+ "quinn",
  "rand 0.9.2",
+ "rustls",
  "rustypot",
  "serialport",
  "socketcan",
@@ -6892,6 +6894,9 @@ dependencies = [
  "url",
  "v4l",
  "video-toolbox-sys",
+ "web-transport",
+ "web-transport-quinn 0.3.4",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]

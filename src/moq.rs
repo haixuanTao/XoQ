@@ -1,15 +1,42 @@
 //! MoQ transport builder
 //!
 //! Provides a builder API for creating MoQ clients and servers that communicate
-//! via a relay server.
+//! via a relay server using the IETF MoQ Transport protocol (draft-14).
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use bytes::Bytes;
-use moq_lite::Session;
-use moq_native::moq_lite;
+use moq_transport::coding::TrackNamespace;
+use moq_transport::serve::{
+    StreamWriter, SubgroupsReader, Track, TrackReaderMode, Tracks, TracksRequest, TracksWriter,
+};
+use moq_transport::session::{Session, Subscriber};
 use url::Url;
+
+/// Create a QUIC endpoint configured for WebTransport (HTTP/3).
+fn create_quic_endpoint() -> Result<quinn::Endpoint> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+    let mut tls = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    tls.alpn_protocols = vec![web_transport_quinn::ALPN.to_vec()];
+
+    let crypto: quinn::crypto::rustls::QuicClientConfig = tls.try_into()?;
+    let mut config = quinn::ClientConfig::new(Arc::new(crypto));
+
+    let mut transport = quinn::TransportConfig::default();
+    transport.max_idle_timeout(Some(Duration::from_secs(10).try_into().unwrap()));
+    transport.keep_alive_interval(Some(Duration::from_secs(4)));
+    config.transport_config(Arc::new(transport));
+
+    let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse()?)?;
+    endpoint.set_default_client_config(config);
+    Ok(endpoint)
+}
 
 /// Builder for MoQ connections
 pub struct MoqBuilder {
@@ -58,90 +85,111 @@ impl MoqBuilder {
     /// Connect as a duplex endpoint (can publish and subscribe)
     pub async fn connect_duplex(self) -> Result<MoqConnection> {
         let url = self.build_url()?;
+        let path = self.path.clone();
+        let endpoint = create_quic_endpoint()?;
 
-        let publish_origin = moq_lite::Origin::produce();
-        let subscribe_origin = moq_lite::Origin::produce();
+        let wt = web_transport_quinn::connect(&endpoint, &url).await?;
+        let wt_session = web_transport::Session::from(wt);
 
-        let mut client = moq_native::ClientConfig::default()
-            .init()?
-            .with_publish(publish_origin.consumer)
-            .with_consume(subscribe_origin.producer);
-        client.websocket.enabled = false;
+        let (session, publisher, subscriber) = Session::connect(wt_session, None).await?;
 
-        let session = Self::connect_quic_with_retry(&client, url).await?;
+        // Session MUST run in background for control/data messages
+        let session_task = tokio::spawn(async move {
+            if let Err(e) = session.run().await {
+                eprintln!("[xoq] session error: {}", e);
+            }
+        });
+
+        // Create tracks registry for publishing
+        let namespace = TrackNamespace::from_utf8_path(&path);
+        let (tracks_writer, tracks_request, tracks_reader) =
+            Tracks::new(namespace.clone()).produce();
+
+        // Announce namespace in background (blocks while serving subscriptions)
+        let mut pub_handle = publisher;
+        let announce_task = tokio::spawn(async move {
+            if let Err(e) = pub_handle.announce(tracks_reader).await {
+                eprintln!("[xoq] announce error: {}", e);
+            }
+        });
 
         Ok(MoqConnection {
-            _session: session,
-            publish_origin: publish_origin.producer,
-            subscribe_origin: subscribe_origin.consumer,
+            tracks_writer,
+            _tracks_request: tracks_request,
+            subscriber,
+            namespace,
+            _session_task: session_task,
+            _announce_task: announce_task,
         })
     }
 
     /// Connect as publisher only
     pub async fn connect_publisher(self) -> Result<MoqPublisher> {
         let url = self.build_url()?;
+        let path = self.path.clone();
+        let endpoint = create_quic_endpoint()?;
 
-        let origin = moq_lite::Origin::produce();
+        let wt = web_transport_quinn::connect(&endpoint, &url).await?;
+        let wt_session = web_transport::Session::from(wt);
 
-        let mut client = moq_native::ClientConfig::default()
-            .init()?
-            .with_publish(origin.consumer);
-        client.websocket.enabled = false;
+        let (session, publisher, _subscriber) = Session::connect(wt_session, None).await?;
 
-        let session = Self::connect_quic_with_retry(&client, url).await?;
+        // Session MUST run in background for control/data messages
+        let session_task = tokio::spawn(async move {
+            if let Err(e) = session.run().await {
+                eprintln!("[xoq] session error: {}", e);
+            }
+        });
+
+        // Create tracks registry
+        let namespace = TrackNamespace::from_utf8_path(&path);
+        let (tracks_writer, tracks_request, tracks_reader) = Tracks::new(namespace).produce();
+
+        // Announce namespace in background (blocks while serving subscriptions)
+        let mut pub_handle = publisher;
+        let announce_task = tokio::spawn(async move {
+            if let Err(e) = pub_handle.announce(tracks_reader).await {
+                eprintln!("[xoq] announce error: {}", e);
+            }
+        });
 
         Ok(MoqPublisher {
-            _session: session,
-            origin: origin.producer,
+            tracks_writer,
+            _tracks_request: tracks_request,
+            _session_task: session_task,
+            _announce_task: announce_task,
         })
     }
 
     /// Connect as subscriber only
     pub async fn connect_subscriber(self) -> Result<MoqSubscriber> {
         let url = self.build_url()?;
+        let path = self.path.clone();
         eprintln!("[xoq] MoQ subscriber connecting to {}...", url);
 
-        let origin = moq_lite::Origin::produce();
+        let endpoint = create_quic_endpoint()?;
 
-        let mut client = moq_native::ClientConfig::default()
-            .init()?
-            .with_consume(origin.producer);
-        client.websocket.enabled = false;
+        let wt = web_transport_quinn::connect(&endpoint, &url).await?;
+        let wt_session = web_transport::Session::from(wt);
 
-        let session = tokio::time::timeout(
-            Duration::from_secs(10),
-            Self::connect_quic_with_retry(&client, url),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("MoQ subscriber connection timed out after 10s"))??;
+        let (session, _publisher, subscriber) = Session::connect(wt_session, None).await?;
+
+        // Session MUST run in background for control/data messages
+        let session_task = tokio::spawn(async move {
+            if let Err(e) = session.run().await {
+                eprintln!("[xoq] session error: {}", e);
+            }
+        });
+
+        let namespace = TrackNamespace::from_utf8_path(&path);
 
         eprintln!("[xoq] MoQ subscriber connected to relay");
 
         Ok(MoqSubscriber {
-            origin: origin.consumer,
-            _session: session,
+            subscriber,
+            namespace,
+            _session_task: session_task,
         })
-    }
-
-    /// Connect via QUIC, retrying once if the first attempt fails (e.g. due to GSO).
-    ///
-    /// On Linux, the first QUIC send may fail with EIO if the NIC doesn't support
-    /// UDP GSO. quinn-udp then disables GSO on the socket, so a retry succeeds.
-    async fn connect_quic_with_retry(
-        client: &moq_native::Client,
-        url: Url,
-    ) -> Result<moq_lite::Session> {
-        match client.connect(url.clone()).await {
-            Ok(session) => Ok(session),
-            Err(first_err) => {
-                eprintln!(
-                    "[xoq] QUIC connect failed ({}), retrying (GSO now disabled)...",
-                    first_err
-                );
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                client.connect(url).await.map_err(Into::into)
-            }
-        }
     }
 }
 
@@ -153,138 +201,124 @@ impl Default for MoqBuilder {
 
 /// A duplex MoQ connection that can publish and subscribe
 pub struct MoqConnection {
-    _session: Session,
-    publish_origin: moq_lite::OriginProducer,
-    subscribe_origin: moq_lite::OriginConsumer,
+    tracks_writer: TracksWriter,
+    _tracks_request: TracksRequest,
+    subscriber: Subscriber,
+    namespace: TrackNamespace,
+    _session_task: tokio::task::JoinHandle<()>,
+    _announce_task: tokio::task::JoinHandle<()>,
 }
 
 impl MoqConnection {
     /// Create a track for publishing
     pub fn create_track(&mut self, name: &str) -> MoqTrackWriter {
-        let mut broadcast = moq_lite::Broadcast::produce();
-        let track = broadcast.producer.create_track(moq_lite::Track {
-            name: name.to_string(),
-            priority: 0,
-        });
-        self.publish_origin
-            .publish_broadcast("", broadcast.consumer);
-        MoqTrackWriter {
-            track,
-            _broadcast: broadcast.producer,
-        }
+        let track_writer = self
+            .tracks_writer
+            .create(name)
+            .expect("tracks reader dropped");
+        let stream_writer = track_writer.stream(0).expect("track already has a mode");
+        MoqTrackWriter { stream_writer }
     }
 
-    /// Wait for an announced broadcast and subscribe to a track (with timeout)
+    /// Subscribe to a track by name (no announcement handshake needed)
     pub async fn subscribe_track(&mut self, track_name: &str) -> Result<Option<MoqTrackReader>> {
-        tracing::info!("Waiting for broadcast announcement (track: {})...", track_name);
-
-        let announced = tokio::time::timeout(
-            Duration::from_secs(10),
-            self.subscribe_origin.announced(),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!(
-            "Timed out waiting for broadcast announcement after 10s. \
-             Is the server publishing to this path?"
-        ))?;
-
-        if let Some((_path, Some(broadcast))) = announced {
-            tracing::info!("Received broadcast announcement, subscribing to track '{}'", track_name);
-            let track_info = moq_lite::Track {
-                name: track_name.to_string(),
-                priority: 0,
-            };
-            let track = broadcast.subscribe_track(&track_info);
-            return Ok(Some(MoqTrackReader { track }));
-        }
-        tracing::warn!("Broadcast announcement returned None");
-        Ok(None)
-    }
-
-    /// Get the subscribe origin for manual handling
-    pub fn subscribe_origin(&mut self) -> &mut moq_lite::OriginConsumer {
-        &mut self.subscribe_origin
-    }
-
-    /// Get the publish origin for manual handling
-    pub fn publish_origin(&mut self) -> &mut moq_lite::OriginProducer {
-        &mut self.publish_origin
+        subscribe_track_impl(&mut self.subscriber, &self.namespace, track_name).await
     }
 }
 
 /// A publish-only MoQ connection
 pub struct MoqPublisher {
-    _session: Session,
-    origin: moq_lite::OriginProducer,
+    tracks_writer: TracksWriter,
+    _tracks_request: TracksRequest,
+    _session_task: tokio::task::JoinHandle<()>,
+    _announce_task: tokio::task::JoinHandle<()>,
 }
 
 impl MoqPublisher {
     /// Create a track for publishing
     pub fn create_track(&mut self, name: &str) -> MoqTrackWriter {
-        let mut broadcast = moq_lite::Broadcast::produce();
-        let track = broadcast.producer.create_track(moq_lite::Track {
-            name: name.to_string(),
-            priority: 0,
-        });
-        self.origin.publish_broadcast("", broadcast.consumer);
-        MoqTrackWriter {
-            track,
-            _broadcast: broadcast.producer,
-        }
+        let track_writer = self
+            .tracks_writer
+            .create(name)
+            .expect("tracks reader dropped");
+        let stream_writer = track_writer.stream(0).expect("track already has a mode");
+        MoqTrackWriter { stream_writer }
     }
 }
 
 /// A subscribe-only MoQ connection
 pub struct MoqSubscriber {
-    _session: Session,
-    origin: moq_lite::OriginConsumer,
+    subscriber: Subscriber,
+    namespace: TrackNamespace,
+    _session_task: tokio::task::JoinHandle<()>,
 }
 
 impl MoqSubscriber {
-    /// Wait for an announced broadcast and subscribe to a track (with timeout)
+    /// Subscribe to a track by name (no announcement handshake needed)
     pub async fn subscribe_track(&mut self, track_name: &str) -> Result<Option<MoqTrackReader>> {
-        eprintln!("[xoq] Waiting for broadcast announcement (track: '{}')...", track_name);
-
-        let announced = tokio::time::timeout(
-            Duration::from_secs(10),
-            self.origin.announced(),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!(
-            "Timed out waiting for broadcast announcement after 10s. \
-             Is the server publishing to this path?"
-        ))?;
-
-        if let Some((path, Some(broadcast))) = announced {
-            eprintln!("[xoq] Broadcast announced (path: '{}'), subscribing to track '{}'", path, track_name);
-            let track_info = moq_lite::Track {
-                name: track_name.to_string(),
-                priority: 0,
-            };
-            let track = broadcast.subscribe_track(&track_info);
-            return Ok(Some(MoqTrackReader { track }));
-        }
-        eprintln!("[xoq] Broadcast announcement returned None");
-        Ok(None)
+        subscribe_track_impl(&mut self.subscriber, &self.namespace, track_name).await
     }
+}
 
-    /// Get the origin for manual handling
-    pub fn origin(&mut self) -> &mut moq_lite::OriginConsumer {
-        &mut self.origin
+/// Shared subscribe logic for both MoqConnection and MoqSubscriber.
+async fn subscribe_track_impl(
+    subscriber: &mut Subscriber,
+    namespace: &TrackNamespace,
+    track_name: &str,
+) -> Result<Option<MoqTrackReader>> {
+    eprintln!(
+        "[xoq] Subscribing to track '{}' in namespace '{}'...",
+        track_name,
+        namespace.to_utf8_path()
+    );
+
+    let (track_writer, track_reader) =
+        Track::new(namespace.clone(), track_name.to_string()).produce();
+
+    // Subscribe in background (blocks until subscription ends)
+    let mut sub = subscriber.clone();
+    tokio::spawn(async move {
+        if let Err(e) = sub.subscribe(track_writer).await {
+            eprintln!("[xoq] subscribe error: {}", e);
+        }
+    });
+
+    // Wait for the track mode to be set (data must arrive first)
+    let mode = tokio::time::timeout(Duration::from_secs(10), track_reader.mode())
+        .await
+        .map_err(|_| anyhow::anyhow!("Timed out waiting for track data after 10s"))?
+        .map_err(|e| anyhow::anyhow!("Track error: {}", e))?;
+
+    eprintln!("[xoq] Track '{}' mode received, creating reader", track_name);
+
+    match mode {
+        TrackReaderMode::Stream(stream_reader) => Ok(Some(MoqTrackReader {
+            inner: ReaderInner::Stream(stream_reader),
+        })),
+        TrackReaderMode::Subgroups(subgroups_reader) => Ok(Some(MoqTrackReader {
+            inner: ReaderInner::Subgroups {
+                subgroups: subgroups_reader,
+                current: None,
+            },
+        })),
+        TrackReaderMode::Datagrams(_) => {
+            anyhow::bail!("Datagram mode not supported");
+        }
     }
 }
 
 /// A track writer for publishing data
 pub struct MoqTrackWriter {
-    track: moq_lite::TrackProducer,
-    // Keep the broadcast producer alive
-    _broadcast: moq_lite::BroadcastProducer,
+    stream_writer: StreamWriter,
 }
 
 impl MoqTrackWriter {
-    /// Write a frame of data
+    /// Write a frame of data. Each write creates a new group with one object.
     pub fn write(&mut self, data: impl Into<Bytes>) {
-        self.track.write_frame(data.into());
+        let data = data.into();
+        if let Ok(mut group) = self.stream_writer.append() {
+            let _ = group.write(data);
+        }
     }
 
     /// Write string data
@@ -293,20 +327,68 @@ impl MoqTrackWriter {
     }
 }
 
+/// Internal reader state that handles both Stream and Subgroups wire formats.
+enum ReaderInner {
+    Stream(moq_transport::serve::StreamReader),
+    Subgroups {
+        subgroups: SubgroupsReader,
+        current: Option<moq_transport::serve::SubgroupReader>,
+    },
+}
+
 /// A track reader for receiving data
 pub struct MoqTrackReader {
-    track: moq_lite::TrackConsumer,
+    inner: ReaderInner,
 }
 
 impl MoqTrackReader {
     /// Read the next frame
     pub async fn read(&mut self) -> Result<Option<Bytes>> {
-        if let Ok(Some(mut group)) = self.track.next_group().await {
-            if let Ok(Some(frame)) = group.read_frame().await {
-                return Ok(Some(frame));
+        match &mut self.inner {
+            ReaderInner::Stream(stream_reader) => {
+                // Get next group, then read the first object from it
+                match stream_reader.next().await {
+                    Ok(Some(mut group)) => match group.read_next().await {
+                        Ok(data) => Ok(data),
+                        Err(e) => Err(anyhow::anyhow!("Stream group read error: {}", e)),
+                    },
+                    Ok(None) => Ok(None),
+                    Err(e) => Err(anyhow::anyhow!("Stream read error: {}", e)),
+                }
+            }
+            ReaderInner::Subgroups {
+                subgroups,
+                current,
+            } => {
+                loop {
+                    // Try to read from current subgroup first
+                    if let Some(ref mut reader) = current {
+                        match reader.read_next().await {
+                            Ok(Some(data)) => return Ok(Some(data)),
+                            Ok(None) => {
+                                // Current subgroup exhausted, get next one
+                                *current = None;
+                            }
+                            Err(e) => {
+                                // Current subgroup errored, try next one
+                                eprintln!("[xoq] subgroup read error: {}", e);
+                                *current = None;
+                            }
+                        }
+                    }
+
+                    // Get next subgroup
+                    match subgroups.next().await {
+                        Ok(Some(reader)) => {
+                            *current = Some(reader);
+                            // Loop back to read from the new subgroup
+                        }
+                        Ok(None) => return Ok(None),
+                        Err(e) => return Err(anyhow::anyhow!("Subgroups read error: {}", e)),
+                    }
+                }
             }
         }
-        Ok(None)
     }
 
     /// Read the next frame as string

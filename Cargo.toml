@@ -39,6 +39,11 @@ image = { version = "0.25", optional = true }
 socketcan = { version = "3.5", optional = true }
 libc = { version = "0.2", optional = true }
 moq-native = "0.12"
+web-transport-quinn = "0.3"
+web-transport = "0.3"
+quinn = { version = "0.11", features = ["ring"] }
+rustls = { version = "0.23", features = ["ring"] }
+webpki-roots = "0.26"
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
 anyhow = "1"
@@ -100,3 +105,7 @@ required-features = ["iroh", "can"]
 name = "camera_server"
 path = "examples/camera_server.rs"
 required-features = ["iroh"]
+
+[[example]]
+name = "moq_test"
+path = "examples/moq_test.rs"
