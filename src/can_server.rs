@@ -206,7 +206,7 @@ fn can_writer_thread(
                 latest.insert(frame.id(), frame);
             }
 
-            // Write all latest frames to CAN bus (deterministic order by CAN ID)
+            // Write latest frame for each CAN ID (deterministic order by ID)
             for (_, frame) in latest.iter() {
                 let result = match frame {
                     AnyCanFrame::Can(f) => match socketcan::CanFrame::try_from(f) {
@@ -258,7 +258,7 @@ fn can_writer_thread(
                 latest.insert(frame.id(), frame);
             }
 
-            // Write all latest frames to CAN bus (deterministic order by CAN ID)
+            // Write latest frame for each CAN ID (deterministic order by ID)
             for (_, frame) in latest.iter() {
                 let result = match frame {
                     AnyCanFrame::Can(f) => match socketcan::CanFrame::try_from(f) {
