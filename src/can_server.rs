@@ -247,7 +247,7 @@ fn can_writer_thread(
 const BATCH_GAP: Duration = Duration::from_millis(2);
 
 /// Maximum batches held in the jitter buffer.
-const BUFFER_CAP: usize = 10;
+const BUFFER_CAP: usize = 30;
 
 /// Minimum playback interval clamp.
 const MIN_INTERVAL: Duration = Duration::from_millis(10);
