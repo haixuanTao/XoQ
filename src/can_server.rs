@@ -244,9 +244,12 @@ fn can_writer_thread(
 }
 
 /// Batch gap: frames arriving within this window are grouped into one batch.
-const BATCH_GAP: Duration = Duration::from_millis(2);
+/// Must be wide enough to capture all motor frames in one control cycle
+/// (8 motors arriving over the network may spread across several ms).
+const BATCH_GAP: Duration = Duration::from_millis(10);
 
-/// Maximum batches held in the jitter buffer (~100ms at 30Hz).
+/// Maximum batches held in the jitter buffer.
+/// At 30Hz (~33ms/cycle), 3 cycles ≈ 100ms max latency.
 const BUFFER_CAP: usize = 3;
 
 /// Minimum playback interval clamp.
