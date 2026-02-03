@@ -496,7 +496,7 @@ async fn handle_connection(
                                             match can_write_tx.try_send(frame) {
                                                 Ok(()) => {}
                                                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                                                    tracing::debug!("CAN write channel full, dropping frame");
+                                                    tracing::warn!("CAN write channel full, dropping frame");
                                                 }
                                                 Err(_) => {
                                                     tracing::error!("CAN writer thread died");
