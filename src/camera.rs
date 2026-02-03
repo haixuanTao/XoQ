@@ -25,18 +25,44 @@
 use anyhow::Result;
 use std::path::PathBuf;
 use v4l::buffer::Type;
+use v4l::framesize::FrameSizeEnum;
 use v4l::io::mmap::Stream;
 use v4l::io::traits::CaptureStream;
 use v4l::video::Capture;
 use v4l::{Device, FourCC};
 
-/// Check whether the V4L2 format is really YUYV by validating the reported
-/// image size.  YUYV is 2 bytes per pixel, so the size must be ≥ w*h*2.
-/// Some drivers (e.g. certain USB cameras at non-standard resolutions) report
-/// YUYV but provide a buffer that is too small.
-fn is_valid_yuyv(f: &v4l::Format) -> bool {
-    let expected = (f.width as u64) * (f.height as u64) * 2;
-    f.size as u64 >= expected
+/// Ask V4L2 whether `fourcc` at `width`×`height` is an advertised frame size.
+/// Uses VIDIOC_ENUM_FRAMESIZES.  Returns `true` if the enumeration fails
+/// (driver doesn't support it — fall through to set_format check).
+fn device_supports_resolution(device: &Device, fourcc: FourCC, width: u32, height: u32) -> bool {
+    let framesizes = match device.enum_framesizes(fourcc) {
+        Ok(sizes) => sizes,
+        Err(_) => return true, // can't enumerate → assume supported
+    };
+    if framesizes.is_empty() {
+        return true; // empty list → assume supported
+    }
+    for fs in framesizes {
+        match fs.size {
+            FrameSizeEnum::Discrete(d) => {
+                if d.width == width && d.height == height {
+                    return true;
+                }
+            }
+            FrameSizeEnum::Stepwise(s) => {
+                let w_ok = width >= s.min_width
+                    && width <= s.max_width
+                    && (s.step_width == 0 || (width - s.min_width) % s.step_width == 0);
+                let h_ok = height >= s.min_height
+                    && height <= s.max_height
+                    && (s.step_height == 0 || (height - s.min_height) % s.step_height == 0);
+                if w_ok && h_ok {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Information about an available camera.
@@ -222,58 +248,59 @@ impl Camera {
         format.width = width;
         format.height = height;
 
-        if prefer_yuyv {
-            // Try YUYV first (better for hardware encoding)
-            format.fourcc = FourCC::new(b"YUYV");
+        let yuyv = FourCC::new(b"YUYV");
+        let mjpg = FourCC::new(b"MJPG");
+
+        // Check which formats actually support this resolution via
+        // VIDIOC_ENUM_FRAMESIZES (the proper V4L2 way).
+        let yuyv_ok = device_supports_resolution(device, yuyv, width, height);
+        let mjpg_ok = device_supports_resolution(device, mjpg, width, height);
+
+        if !yuyv_ok {
+            eprintln!(
+                "[camera] YUYV not advertised at {}x{} — skipping",
+                width, height
+            );
+        }
+
+        if prefer_yuyv && yuyv_ok {
+            format.fourcc = yuyv;
             if let Ok(f) = device.set_format(&format) {
-                if f.fourcc == FourCC::new(b"YUYV") {
-                    if is_valid_yuyv(&f) {
-                        return Ok((f, CaptureFormat::Yuyv));
-                    }
-                    eprintln!(
-                        "[camera] YUYV negotiated but size {} < expected {} — falling back to MJPEG",
-                        f.size,
-                        width * height * 2
-                    );
+                if f.fourcc == yuyv {
+                    return Ok((f, CaptureFormat::Yuyv));
                 }
             }
-            // Fall back to MJPEG
-            format.fourcc = FourCC::new(b"MJPG");
+        }
+
+        // Try MJPEG
+        if mjpg_ok {
+            format.fourcc = mjpg;
             if let Ok(f) = device.set_format(&format) {
-                if f.fourcc == FourCC::new(b"MJPG") {
+                if f.fourcc == mjpg {
                     return Ok((f, CaptureFormat::Mjpeg));
                 }
             }
-        } else {
-            // Try MJPEG first (more efficient for CPU)
-            format.fourcc = FourCC::new(b"MJPG");
+        }
+
+        // If we didn't prefer YUYV above, try it now as last resort
+        if !prefer_yuyv && yuyv_ok {
+            format.fourcc = yuyv;
             if let Ok(f) = device.set_format(&format) {
-                if f.fourcc == FourCC::new(b"MJPG") {
-                    return Ok((f, CaptureFormat::Mjpeg));
-                }
-            }
-            // Fall back to YUYV
-            format.fourcc = FourCC::new(b"YUYV");
-            if let Ok(f) = device.set_format(&format) {
-                if f.fourcc == FourCC::new(b"YUYV") {
-                    if is_valid_yuyv(&f) {
-                        return Ok((f, CaptureFormat::Yuyv));
-                    }
-                    eprintln!(
-                        "[camera] YUYV negotiated but size {} < expected {} — falling back",
-                        f.size,
-                        width * height * 2
-                    );
+                if f.fourcc == yuyv {
+                    return Ok((f, CaptureFormat::Yuyv));
                 }
             }
         }
 
         // Accept whatever the camera gives us
         let f = device.format()?;
-        if f.fourcc == FourCC::new(b"YUYV") && is_valid_yuyv(&f) {
+        eprintln!(
+            "[camera] Negotiated format: {} {}x{} size={}",
+            f.fourcc, f.width, f.height, f.size
+        );
+        if f.fourcc == yuyv {
             Ok((f, CaptureFormat::Yuyv))
         } else {
-            // Treat anything else (including invalid YUYV) as MJPEG
             Ok((f, CaptureFormat::Mjpeg))
         }
     }
@@ -301,14 +328,25 @@ impl Camera {
         let (data, _meta) = self.stream.next()?;
         let timestamp_us = self.start_time.elapsed().as_micros() as u64;
 
+        let expected_yuyv = (self.width as usize) * (self.height as usize) * 2;
+
         let rgb_data = match self.format {
-            CaptureFormat::Mjpeg => {
-                // Decode MJPEG to RGB
-                Self::mjpeg_to_rgb(data, self.width, self.height)?
+            CaptureFormat::Yuyv if data.len() >= expected_yuyv => {
+                Self::yuyv_to_rgb(data, self.width, self.height)
             }
             CaptureFormat::Yuyv => {
-                // Convert YUYV to RGB
-                Self::yuyv_to_rgb(data, self.width, self.height)
+                // Driver lied: buffer is too small for YUYV.
+                // Switch permanently and try MJPEG decode.
+                eprintln!(
+                    "[camera] YUYV buffer {} bytes < expected {} — switching to MJPEG",
+                    data.len(),
+                    expected_yuyv
+                );
+                self.format = CaptureFormat::Mjpeg;
+                Self::mjpeg_to_rgb(data, self.width, self.height)?
+            }
+            CaptureFormat::Mjpeg => {
+                Self::mjpeg_to_rgb(data, self.width, self.height)?
             }
         };
 
@@ -325,9 +363,20 @@ impl Camera {
         let (data, _meta) = self.stream.next()?;
         let timestamp_us = self.start_time.elapsed().as_micros() as u64;
 
+        let expected_yuyv = (self.width as usize) * (self.height as usize) * 2;
+
         let raw_format = match self.format {
+            CaptureFormat::Yuyv if data.len() >= expected_yuyv => RawFormat::Yuyv,
+            CaptureFormat::Yuyv => {
+                eprintln!(
+                    "[camera] YUYV buffer {} bytes < expected {} — switching to MJPEG",
+                    data.len(),
+                    expected_yuyv
+                );
+                self.format = CaptureFormat::Mjpeg;
+                RawFormat::Mjpeg
+            }
             CaptureFormat::Mjpeg => RawFormat::Mjpeg,
-            CaptureFormat::Yuyv => RawFormat::Yuyv,
         };
 
         Ok(RawFrame {
