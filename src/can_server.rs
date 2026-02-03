@@ -192,7 +192,7 @@ fn can_writer_thread(
         };
         let _ = init_tx.send(Ok(()));
 
-        let mut latest: std::collections::HashMap<u32, AnyCanFrame> = std::collections::HashMap::new();
+        let mut latest: std::collections::BTreeMap<u32, AnyCanFrame> = std::collections::BTreeMap::new();
         loop {
             // Block until at least one frame arrives
             let frame = match rx.recv() {
@@ -206,9 +206,9 @@ fn can_writer_thread(
                 latest.insert(frame.id(), frame);
             }
 
-            // Write all latest frames to CAN bus
-            for (_, frame) in latest.drain() {
-                let result = match &frame {
+            // Write all latest frames to CAN bus (deterministic order by CAN ID)
+            for (_, frame) in latest.iter() {
+                let result = match frame {
                     AnyCanFrame::Can(f) => match socketcan::CanFrame::try_from(f) {
                         Ok(sf) => write_with_retry(|| socket.write_frame(&sf)),
                         Err(e) => {
@@ -228,6 +228,7 @@ fn can_writer_thread(
                     tracing::warn!("CAN write error (dropping frame): {}", e);
                 }
             }
+            latest.clear();
         }
     } else {
         let socket = match socketcan::CanSocket::open(&interface) {
@@ -243,7 +244,7 @@ fn can_writer_thread(
         };
         let _ = init_tx.send(Ok(()));
 
-        let mut latest: std::collections::HashMap<u32, AnyCanFrame> = std::collections::HashMap::new();
+        let mut latest: std::collections::BTreeMap<u32, AnyCanFrame> = std::collections::BTreeMap::new();
         loop {
             // Block until at least one frame arrives
             let frame = match rx.recv() {
@@ -257,9 +258,9 @@ fn can_writer_thread(
                 latest.insert(frame.id(), frame);
             }
 
-            // Write all latest frames to CAN bus
-            for (_, frame) in latest.drain() {
-                let result = match &frame {
+            // Write all latest frames to CAN bus (deterministic order by CAN ID)
+            for (_, frame) in latest.iter() {
+                let result = match frame {
                     AnyCanFrame::Can(f) => match socketcan::CanFrame::try_from(f) {
                         Ok(sf) => write_with_retry(|| socket.write_frame(&sf)),
                         Err(e) => {
@@ -276,6 +277,7 @@ fn can_writer_thread(
                     tracing::warn!("CAN write error (dropping frame): {}", e);
                 }
             }
+            latest.clear();
         }
     }
 }
