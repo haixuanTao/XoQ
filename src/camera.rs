@@ -30,6 +30,15 @@ use v4l::io::traits::CaptureStream;
 use v4l::video::Capture;
 use v4l::{Device, FourCC};
 
+/// Check whether the V4L2 format is really YUYV by validating the reported
+/// image size.  YUYV is 2 bytes per pixel, so the size must be ≥ w*h*2.
+/// Some drivers (e.g. certain USB cameras at non-standard resolutions) report
+/// YUYV but provide a buffer that is too small.
+fn is_valid_yuyv(f: &v4l::Format) -> bool {
+    let expected = (f.width as u64) * (f.height as u64) * 2;
+    f.size as u64 >= expected
+}
+
 /// Information about an available camera.
 #[derive(Debug, Clone)]
 pub struct CameraInfo {
@@ -218,7 +227,14 @@ impl Camera {
             format.fourcc = FourCC::new(b"YUYV");
             if let Ok(f) = device.set_format(&format) {
                 if f.fourcc == FourCC::new(b"YUYV") {
-                    return Ok((f, CaptureFormat::Yuyv));
+                    if is_valid_yuyv(&f) {
+                        return Ok((f, CaptureFormat::Yuyv));
+                    }
+                    eprintln!(
+                        "[camera] YUYV negotiated but size {} < expected {} — falling back to MJPEG",
+                        f.size,
+                        width * height * 2
+                    );
                 }
             }
             // Fall back to MJPEG
@@ -240,17 +256,25 @@ impl Camera {
             format.fourcc = FourCC::new(b"YUYV");
             if let Ok(f) = device.set_format(&format) {
                 if f.fourcc == FourCC::new(b"YUYV") {
-                    return Ok((f, CaptureFormat::Yuyv));
+                    if is_valid_yuyv(&f) {
+                        return Ok((f, CaptureFormat::Yuyv));
+                    }
+                    eprintln!(
+                        "[camera] YUYV negotiated but size {} < expected {} — falling back",
+                        f.size,
+                        width * height * 2
+                    );
                 }
             }
         }
 
         // Accept whatever the camera gives us
         let f = device.format()?;
-        if f.fourcc == FourCC::new(b"MJPG") {
-            Ok((f, CaptureFormat::Mjpeg))
-        } else {
+        if f.fourcc == FourCC::new(b"YUYV") && is_valid_yuyv(&f) {
             Ok((f, CaptureFormat::Yuyv))
+        } else {
+            // Treat anything else (including invalid YUYV) as MJPEG
+            Ok((f, CaptureFormat::Mjpeg))
         }
     }
 
