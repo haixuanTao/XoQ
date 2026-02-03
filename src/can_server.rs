@@ -145,9 +145,9 @@ fn can_reader_thread(
 }
 
 /// Maximum retries on ENOBUFS before dropping a frame.
-const WRITE_RETRIES: u32 = 20;
-/// Delay between retries on ENOBUFS (500us). Total max backoff = 10ms.
-const WRITE_RETRY_DELAY: Duration = Duration::from_micros(500);
+const WRITE_RETRIES: u32 = 50;
+/// Delay between retries on ENOBUFS (100us). Total max backoff = 5ms.
+const WRITE_RETRY_DELAY: Duration = Duration::from_micros(100);
 
 /// Retry a CAN write on ENOBUFS (kernel tx queue full).
 ///
