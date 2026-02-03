@@ -379,6 +379,15 @@ fn collect_batches(
     }
 }
 
+struct IntervalStats {
+    median: f64,
+    iqr: f64,
+    p95: f64,
+    p99: f64,
+    min: f64,
+    max: f64,
+}
+
 /// Statistics collected during jitter buffer operation.
 struct JitterStats {
     /// Total batches received from the network.
@@ -423,9 +432,6 @@ impl JitterStats {
             return;
         }
 
-        let arrival_jitter = Self::compute_jitter(&self.arrival_intervals);
-        let playback_jitter = Self::compute_jitter(&self.playback_intervals);
-
         tracing::warn!("=== Jitter Buffer Stats ===");
         tracing::warn!(
             "Batches: {} received, {} played, {} replayed, {} dropped",
@@ -436,41 +442,65 @@ impl JitterStats {
         );
         tracing::warn!("Peak buffer depth: {}", self.max_buffer_depth);
 
-        if let Some((mean, stddev, min, max)) = arrival_jitter {
+        if let Some(s) = Self::compute_stats(&self.arrival_intervals) {
             tracing::warn!(
-                "Arrival intervals:  mean={:.1}ms stddev={:.1}ms min={:.1}ms max={:.1}ms",
-                mean, stddev, min, max,
+                "Arrival:  median={:.1}ms p95={:.1}ms p99={:.1}ms min={:.1}ms max={:.1}ms",
+                s.median, s.p95, s.p99, s.min, s.max,
             );
         }
-        if let Some((mean, stddev, min, max)) = playback_jitter {
+        if let Some(s) = Self::compute_stats(&self.playback_intervals) {
             tracing::warn!(
-                "Playback intervals: mean={:.1}ms stddev={:.1}ms min={:.1}ms max={:.1}ms",
-                mean, stddev, min, max,
+                "Playback: median={:.1}ms p95={:.1}ms p99={:.1}ms min={:.1}ms max={:.1}ms",
+                s.median, s.p95, s.p99, s.min, s.max,
             );
         }
 
-        if let (Some((_, arr_std, _, _)), Some((_, play_std, _, _))) =
-            (arrival_jitter, playback_jitter)
-        {
-            if arr_std > 0.001 {
-                let reduction = ((arr_std - play_std) / arr_std * 100.0).max(0.0);
-                tracing::warn!("Jitter reduction: {:.0}%", reduction);
+        if let (Some(arr), Some(play)) = (
+            Self::compute_stats(&self.arrival_intervals),
+            Self::compute_stats(&self.playback_intervals),
+        ) {
+            // Jitter reduction based on IQR (robust to outliers)
+            if arr.iqr > 0.001 {
+                let reduction = ((arr.iqr - play.iqr) / arr.iqr * 100.0).max(0.0);
+                tracing::warn!(
+                    "Jitter reduction: {:.0}% (arrival IQR={:.1}ms → playback IQR={:.1}ms)",
+                    reduction, arr.iqr, play.iqr,
+                );
             }
         }
     }
 
-    /// Returns (mean, stddev, min, max) in ms, or None if not enough data.
-    fn compute_jitter(intervals: &[f64]) -> Option<(f64, f64, f64, f64)> {
+    fn percentile(sorted: &[f64], p: f64) -> f64 {
+        if sorted.is_empty() {
+            return 0.0;
+        }
+        let idx = (p / 100.0 * (sorted.len() - 1) as f64).round() as usize;
+        sorted[idx.min(sorted.len() - 1)]
+    }
+
+    fn compute_stats(intervals: &[f64]) -> Option<IntervalStats> {
         if intervals.len() < 2 {
             return None;
         }
-        let n = intervals.len() as f64;
-        let mean = intervals.iter().sum::<f64>() / n;
-        let variance = intervals.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n;
-        let stddev = variance.sqrt();
-        let min = intervals.iter().cloned().fold(f64::INFINITY, f64::min);
-        let max = intervals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        Some((mean, stddev, min, max))
+        let mut sorted = intervals.to_vec();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        let median = Self::percentile(&sorted, 50.0);
+        let p25 = Self::percentile(&sorted, 25.0);
+        let p75 = Self::percentile(&sorted, 75.0);
+        let p95 = Self::percentile(&sorted, 95.0);
+        let p99 = Self::percentile(&sorted, 99.0);
+        let min = sorted[0];
+        let max = sorted[sorted.len() - 1];
+
+        Some(IntervalStats {
+            median,
+            iqr: p75 - p25,
+            p95,
+            p99,
+            min,
+            max,
+        })
     }
 }
 
