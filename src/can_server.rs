@@ -261,11 +261,9 @@ const DEFAULT_INTERVAL: Duration = Duration::from_millis(33);
 /// EMA smoothing factor for interval estimation (weight given to new measurement).
 const EMA_ALPHA: f64 = 0.2;
 
-/// Playback interval multiplier. >1.0 means playback is slightly slower than
-/// arrival, which causes the buffer to gradually fill and stay near the cap.
-/// This provides maximum jitter absorption at the cost of dropping the oldest
-/// (stalest) batches when the buffer is full. 1.05 = 5% slower.
-const PLAYBACK_INTERVAL_MULTIPLIER: f64 = 1.05;
+/// Playback interval multiplier. 1.0 = play at exactly the measured arrival
+/// rate. The buffer fills naturally from arrival jitter (early batches pile up).
+const PLAYBACK_INTERVAL_MULTIPLIER: f64 = 1.0;
 
 /// Number of consecutive regular-cadence multi-frame batches required to activate buffering.
 const STREAMING_THRESHOLD: u32 = 15;
