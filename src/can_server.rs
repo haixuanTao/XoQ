@@ -241,7 +241,7 @@ impl CanServer {
         // CAN→Network channel (tokio mpsc for async receiver)
         let (can_read_tx, can_read_rx) = tokio::sync::mpsc::channel::<AnyCanFrame>(256);
         // Network→CAN channel (bounded — backpressures through QUIC when CAN bus is busy)
-        let (can_write_tx, can_write_rx) = tokio::sync::mpsc::channel::<AnyCanFrame>(64);
+        let (can_write_tx, can_write_rx) = tokio::sync::mpsc::channel::<AnyCanFrame>(4);
 
         // Spawn reader thread
         let (reader_init_tx, reader_init_rx) = std::sync::mpsc::sync_channel::<Result<()>>(1);
@@ -495,9 +495,15 @@ async fn handle_connection(
                                                 frame.id(),
                                                 consumed
                                             );
-                                            if can_write_tx.send(frame).await.is_err() {
-                                                tracing::error!("CAN writer thread died");
-                                                break;
+                                            match can_write_tx.try_send(frame) {
+                                                Ok(()) => {}
+                                                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                                    tracing::debug!("CAN write channel full, dropping frame");
+                                                }
+                                                Err(_) => {
+                                                    tracing::error!("CAN writer thread died");
+                                                    break;
+                                                }
                                             }
                                             pending.drain(..consumed);
                                         }
