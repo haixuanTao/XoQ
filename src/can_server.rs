@@ -145,17 +145,16 @@ fn can_reader_thread(
     }
 }
 
-/// Writer thread: receives frames from a tokio mpsc channel, buffers them into
-/// batches, and plays them out to CAN at a steady measured rate (jitter buffer).
+/// Writer thread: receives frames from a tokio mpsc channel and writes them to CAN.
 ///
-/// Frames arriving within 2ms of each other are grouped as one batch (one control
-/// cycle). The playback interval is estimated via exponential moving average of
-/// inter-batch arrival times. Two batches are buffered so that short network
-/// hiccups are absorbed without stalling the motors.
+/// When [`JITTER_BUFFER_ENABLED`] is `true`, frames are buffered into batches and
+/// played out at a steady measured rate to absorb network jitter (follower arm).
+/// When `false`, frames are written immediately as they arrive (leader arm).
 fn can_writer_thread(
     interface: String,
     enable_fd: bool,
-    rx: tokio::sync::mpsc::Receiver<AnyCanFrame>,
+    jitter_buffer: bool,
+    mut rx: tokio::sync::mpsc::Receiver<AnyCanFrame>,
     init_tx: std::sync::mpsc::SyncSender<Result<()>>,
 ) {
     if enable_fd {
@@ -172,7 +171,7 @@ fn can_writer_thread(
         };
         let _ = init_tx.send(Ok(()));
 
-        jitter_buffer_loop(rx, |frame| {
+        let write_fn = |frame: &AnyCanFrame| {
             let result = match frame {
                 AnyCanFrame::Can(f) => match socketcan::CanFrame::try_from(f) {
                     Ok(sf) => socket.write_frame(&sf).map(|_| ()),
@@ -192,7 +191,15 @@ fn can_writer_thread(
             if let Err(e) = result {
                 tracing::warn!("CAN write error (dropping frame): {}", e);
             }
-        });
+        };
+
+        if jitter_buffer {
+            jitter_buffer_loop(rx, write_fn);
+        } else {
+            while let Some(frame) = rx.blocking_recv() {
+                write_fn(&frame);
+            }
+        }
     } else {
         let socket = match socketcan::CanSocket::open(&interface) {
             Ok(s) => s,
@@ -207,7 +214,7 @@ fn can_writer_thread(
         };
         let _ = init_tx.send(Ok(()));
 
-        jitter_buffer_loop(rx, |frame| {
+        let write_fn = |frame: &AnyCanFrame| {
             let result = match frame {
                 AnyCanFrame::Can(f) => match socketcan::CanFrame::try_from(f) {
                     Ok(sf) => socket.write_frame(&sf).map(|_| ()),
@@ -224,7 +231,15 @@ fn can_writer_thread(
             if let Err(e) = result {
                 tracing::warn!("CAN write error (dropping frame): {}", e);
             }
-        });
+        };
+
+        if jitter_buffer {
+            jitter_buffer_loop(rx, write_fn);
+        } else {
+            while let Some(frame) = rx.blocking_recv() {
+                write_fn(&frame);
+            }
+        }
     }
 }
 
@@ -452,10 +467,13 @@ impl CanServer {
     /// # Arguments
     /// * `interface` - CAN interface name (e.g., "can0", "vcan0")
     /// * `enable_fd` - Enable CAN FD support
+    /// * `jitter_buffer` - Enable jitter buffer in writer thread (use `true` for
+    ///   follower arms to smooth network jitter, `false` for leader arms)
     /// * `identity_path` - Optional path to save/load server identity
     pub async fn new(
         interface: &str,
         enable_fd: bool,
+        jitter_buffer: bool,
         identity_path: Option<&str>,
     ) -> Result<Self> {
         // CAN→Network channel (small to avoid batching stale responses)
@@ -478,7 +496,7 @@ impl CanServer {
         std::thread::Builder::new()
             .name(format!("can-write-{}", interface))
             .spawn(move || {
-                can_writer_thread(iface_writer, enable_fd, can_write_rx, writer_init_tx);
+                can_writer_thread(iface_writer, enable_fd, jitter_buffer, can_write_rx, writer_init_tx);
             })?;
 
         // Wait for both threads to initialize (propagate socket open errors)
