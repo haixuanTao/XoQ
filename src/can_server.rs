@@ -153,7 +153,7 @@ const WRITE_RETRY_DELAY: Duration = Duration::from_micros(500);
 ///
 /// CAN sockets return ENOBUFS immediately regardless of SO_SNDTIMEO,
 /// so we must retry in userspace with a short sleep between attempts.
-fn write_with_retry(mut write_fn: impl FnMut() -> std::io::Result<usize>) -> std::io::Result<()> {
+fn write_with_retry<T>(mut write_fn: impl FnMut() -> std::io::Result<T>) -> std::io::Result<()> {
     for attempt in 0..WRITE_RETRIES {
         match write_fn() {
             Ok(_) => return Ok(()),
