@@ -510,17 +510,14 @@ fn jitter_buffer_loop(
         // --- Block until the next frame arrives ---
         let frame = match rx.blocking_recv() {
             Some(f) => f,
-            None => {
-
-                return;
-            }
+            None => return,
         };
         let now = Instant::now();
         current_batch.push(frame);
         last_frame_time = Some(now);
 
-        // --- Collect rest of this batch + any further batches ready now ---
-        let disconnected = drain_into_batches(
+        // --- Drain all immediately available frames ---
+        let mut disconnected = drain_into_batches(
             &mut rx,
             &mut current_batch,
             &mut last_frame_time,
@@ -532,6 +529,36 @@ fn jitter_buffer_loop(
             streaming_start,
             &mut streaming_batch_count,
         );
+
+        // Wait BATCH_GAP for more frames, then finalize any partial batch
+        if !current_batch.is_empty() && !disconnected {
+            std::thread::sleep(BATCH_GAP);
+            disconnected = drain_into_batches(
+                &mut rx,
+                &mut current_batch,
+                &mut last_frame_time,
+                &mut buffer,
+                &mut last_batch_arrival,
+                &mut interval_estimate,
+                &mut consecutive_regular,
+                &mut stats,
+                streaming_start,
+                &mut streaming_batch_count,
+            );
+            // Finalize whatever is left
+            if !current_batch.is_empty() {
+                finalize_batch(
+                    &mut buffer,
+                    &mut current_batch,
+                    &mut last_batch_arrival,
+                    &mut interval_estimate,
+                    &mut consecutive_regular,
+                    &mut stats,
+                    streaming_start,
+                    &mut streaming_batch_count,
+                );
+            }
+        }
 
         // --- Decide mode: activate streaming after enough regular batches ---
         if !streaming && consecutive_regular >= STREAMING_THRESHOLD {
@@ -547,15 +574,12 @@ fn jitter_buffer_loop(
         if !streaming {
             // Passthrough: write all buffered batches immediately
             while let Some(batch) = buffer.pop_front() {
-                for f in &batch {
-                    write_frame(f);
-                }
+                write_batch(&batch, &mut write_frame);
                 last_played_batch = Some(batch);
             }
             last_play_time = Some(Instant::now());
 
             if disconnected {
-
                 return;
             }
             continue;
