@@ -269,7 +269,7 @@ const BUFFER_CATCHUP_THRESHOLD: usize = 2;
 
 /// Delay between individual CAN frame writes within a batch, to avoid
 /// overflowing the kernel CAN socket buffer (ENOBUFS / os error 105).
-const INTER_FRAME_DELAY: Duration = Duration::from_micros(500);
+const INTER_FRAME_DELAY: Duration = Duration::from_millis(1);
 
 /// Number of consecutive regular-cadence multi-frame batches required to activate buffering.
 const STREAMING_THRESHOLD: u32 = 15;
