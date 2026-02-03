@@ -21,8 +21,8 @@ use crate::iroh::{IrohConnection, IrohServerBuilder};
 /// A server that bridges a local CAN interface to remote clients over iroh P2P.
 pub struct CanServer {
     server_id: String,
-    /// Sender for frames to write to CAN interface (std channel — writer thread blocks on recv).
-    can_write_tx: std::sync::mpsc::SyncSender<AnyCanFrame>,
+    /// Sender for frames to write to CAN interface (bounded tokio channel for async backpressure).
+    can_write_tx: tokio::sync::mpsc::Sender<AnyCanFrame>,
     /// Receiver for frames read from CAN interface.
     /// Wrapped in `Mutex<Option<>>` so ownership can be transferred to/from connection tasks.
     /// The Mutex is held only for a quick `take()`/`replace()` swap, never across awaits.
@@ -175,7 +175,7 @@ fn write_with_retry(mut write_fn: impl FnMut() -> std::io::Result<()>) -> std::i
 fn can_writer_thread(
     interface: String,
     enable_fd: bool,
-    rx: std::sync::mpsc::Receiver<AnyCanFrame>,
+    mut rx: tokio::sync::mpsc::Receiver<AnyCanFrame>,
     init_tx: std::sync::mpsc::SyncSender<Result<()>>,
 ) {
     if enable_fd {
@@ -192,7 +192,7 @@ fn can_writer_thread(
         };
         let _ = init_tx.send(Ok(()));
 
-        while let Ok(frame) = rx.recv() {
+        while let Some(frame) = rx.blocking_recv() {
             let result = match &frame {
                 AnyCanFrame::Can(f) => match socketcan::CanFrame::try_from(f) {
                     Ok(sf) => write_with_retry(|| socket.write_frame(&sf)),
@@ -227,7 +227,7 @@ fn can_writer_thread(
         };
         let _ = init_tx.send(Ok(()));
 
-        while let Ok(frame) = rx.recv() {
+        while let Some(frame) = rx.blocking_recv() {
             let result = match &frame {
                 AnyCanFrame::Can(f) => match socketcan::CanFrame::try_from(f) {
                     Ok(sf) => write_with_retry(|| socket.write_frame(&sf)),
@@ -265,8 +265,8 @@ impl CanServer {
     ) -> Result<Self> {
         // CAN→Network channel (tokio mpsc for async receiver)
         let (can_read_tx, can_read_rx) = tokio::sync::mpsc::channel::<AnyCanFrame>(256);
-        // Network→CAN channel (bounded to match Linux CAN txqueuelen default of 10)
-        let (can_write_tx, can_write_rx) = std::sync::mpsc::sync_channel::<AnyCanFrame>(10);
+        // Network→CAN channel (bounded — async send backpressures network when CAN bus is busy)
+        let (can_write_tx, can_write_rx) = tokio::sync::mpsc::channel::<AnyCanFrame>(10);
 
         // Spawn reader thread
         let (reader_init_tx, reader_init_rx) = std::sync::mpsc::sync_channel::<Result<()>>(1);
@@ -425,7 +425,7 @@ impl CanServer {
 async fn handle_connection(
     conn: IrohConnection,
     mut can_read_rx: tokio::sync::mpsc::Receiver<AnyCanFrame>,
-    can_write_tx: std::sync::mpsc::SyncSender<AnyCanFrame>,
+    can_write_tx: tokio::sync::mpsc::Sender<AnyCanFrame>,
     cancel: CancellationToken,
 ) -> (Result<()>, tokio::sync::mpsc::Receiver<AnyCanFrame>) {
     let stream = match conn.accept_stream().await {
@@ -520,7 +520,7 @@ async fn handle_connection(
                                                 frame.id(),
                                                 consumed
                                             );
-                                            if can_write_tx.send(frame).is_err() {
+                                            if can_write_tx.send(frame).await.is_err() {
                                                 tracing::error!("CAN writer thread died");
                                                 break;
                                             }
