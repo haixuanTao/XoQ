@@ -5,6 +5,7 @@
 
 use anyhow::Result;
 use socketcan::Socket;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
@@ -26,22 +27,28 @@ pub struct CanServer {
 fn can_reader_thread_fd(
     socket: Arc<socketcan::CanFdSocket>,
     tx: tokio::sync::mpsc::Sender<AnyCanFrame>,
+    write_count: Arc<AtomicU64>,
 ) {
     let mut last_read = Instant::now();
     let mut timeouts: u32 = 0;
+    let mut writes_at_gap_start: u64 = 0;
     loop {
         match socket.read_frame() {
             Ok(frame) => {
                 let gap = last_read.elapsed();
                 if gap > Duration::from_millis(50) {
+                    let writes_now = write_count.load(Ordering::Relaxed);
+                    let writes_during = writes_now - writes_at_gap_start;
                     tracing::warn!(
-                        "CAN read gap: {:.1}ms ({} timeouts)",
+                        "CAN read gap: {:.1}ms ({} timeouts, {} writes during gap)",
                         gap.as_secs_f64() * 1000.0,
                         timeouts,
+                        writes_during,
                     );
                 }
                 last_read = Instant::now();
                 timeouts = 0;
+                writes_at_gap_start = write_count.load(Ordering::Relaxed);
                 let any_frame = match frame {
                     socketcan::CanAnyFrame::Normal(f) => match CanFrame::try_from(f) {
                         Ok(cf) => AnyCanFrame::Can(cf),
@@ -84,22 +91,28 @@ fn can_reader_thread_fd(
 fn can_reader_thread_std(
     socket: Arc<socketcan::CanSocket>,
     tx: tokio::sync::mpsc::Sender<AnyCanFrame>,
+    write_count: Arc<AtomicU64>,
 ) {
     let mut last_read = Instant::now();
     let mut timeouts: u32 = 0;
+    let mut writes_at_gap_start: u64 = 0;
     loop {
         match socket.read_frame() {
             Ok(frame) => {
                 let gap = last_read.elapsed();
                 if gap > Duration::from_millis(50) {
+                    let writes_now = write_count.load(Ordering::Relaxed);
+                    let writes_during = writes_now - writes_at_gap_start;
                     tracing::warn!(
-                        "CAN read gap: {:.1}ms ({} timeouts)",
+                        "CAN read gap: {:.1}ms ({} timeouts, {} writes during gap)",
                         gap.as_secs_f64() * 1000.0,
                         timeouts,
+                        writes_during,
                     );
                 }
                 last_read = Instant::now();
                 timeouts = 0;
+                writes_at_gap_start = write_count.load(Ordering::Relaxed);
                 let any_frame = match CanFrame::try_from(frame) {
                     Ok(cf) => AnyCanFrame::Can(cf),
                     Err(e) => {
@@ -130,7 +143,9 @@ fn can_reader_thread_std(
 fn can_writer_thread_fd(
     socket: Arc<socketcan::CanFdSocket>,
     mut rx: tokio::sync::mpsc::Receiver<AnyCanFrame>,
+    write_count: Arc<AtomicU64>,
 ) {
+    let write_count_ref = &write_count;
     let write_fn = |frame: &AnyCanFrame| {
         for attempt in 0..4u32 {
             let result = match frame {
@@ -150,6 +165,7 @@ fn can_writer_thread_fd(
                 },
             };
             if result.is_ok() {
+                write_count_ref.fetch_add(1, Ordering::Relaxed);
                 return;
             }
             let err = result.unwrap_err();
@@ -171,7 +187,9 @@ fn can_writer_thread_fd(
 fn can_writer_thread_std(
     socket: Arc<socketcan::CanSocket>,
     mut rx: tokio::sync::mpsc::Receiver<AnyCanFrame>,
+    write_count: Arc<AtomicU64>,
 ) {
+    let write_count_ref = &write_count;
     let write_fn = |frame: &AnyCanFrame| {
         for attempt in 0..4u32 {
             let result = match frame {
@@ -188,6 +206,7 @@ fn can_writer_thread_std(
                 }
             };
             if result.is_ok() {
+                write_count_ref.fetch_add(1, Ordering::Relaxed);
                 return;
             }
             let err = result.unwrap_err();
@@ -214,6 +233,7 @@ impl CanServer {
     ) -> Result<Self> {
         let (can_read_tx, can_read_rx) = tokio::sync::mpsc::channel::<AnyCanFrame>(16);
         let (can_write_tx, can_write_rx) = tokio::sync::mpsc::channel::<AnyCanFrame>(1);
+        let write_count = Arc::new(AtomicU64::new(0));
 
         if enable_fd {
             let socket = socketcan::CanFdSocket::open(interface).map_err(|e| {
@@ -226,14 +246,16 @@ impl CanServer {
             let socket = Arc::new(socket);
 
             let socket_reader = Arc::clone(&socket);
+            let wc_reader = Arc::clone(&write_count);
             std::thread::Builder::new()
                 .name(format!("can-read-{}", interface))
-                .spawn(move || can_reader_thread_fd(socket_reader, can_read_tx))?;
+                .spawn(move || can_reader_thread_fd(socket_reader, can_read_tx, wc_reader))?;
 
             let socket_writer = Arc::clone(&socket);
+            let wc_writer = Arc::clone(&write_count);
             std::thread::Builder::new()
                 .name(format!("can-write-{}", interface))
-                .spawn(move || can_writer_thread_fd(socket_writer, can_write_rx))?;
+                .spawn(move || can_writer_thread_fd(socket_writer, can_write_rx, wc_writer))?;
         } else {
             let socket = socketcan::CanSocket::open(interface).map_err(|e| {
                 anyhow::anyhow!("Failed to open CAN socket on {}: {}", interface, e)
@@ -245,14 +267,16 @@ impl CanServer {
             let socket = Arc::new(socket);
 
             let socket_reader = Arc::clone(&socket);
+            let wc_reader = Arc::clone(&write_count);
             std::thread::Builder::new()
                 .name(format!("can-read-{}", interface))
-                .spawn(move || can_reader_thread_std(socket_reader, can_read_tx))?;
+                .spawn(move || can_reader_thread_std(socket_reader, can_read_tx, wc_reader))?;
 
             let socket_writer = Arc::clone(&socket);
+            let wc_writer = Arc::clone(&write_count);
             std::thread::Builder::new()
                 .name(format!("can-write-{}", interface))
-                .spawn(move || can_writer_thread_std(socket_writer, can_write_rx))?;
+                .spawn(move || can_writer_thread_std(socket_writer, can_write_rx, wc_writer))?;
         }
 
         let mut builder = IrohServerBuilder::new();
