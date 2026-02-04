@@ -170,6 +170,7 @@ fn can_writer_thread_fd(
     write_count: Arc<AtomicU64>,
 ) {
     let write_count_ref = &write_count;
+    let mut last_recv = Instant::now();
     let write_fn = |frame: &AnyCanFrame| {
         for attempt in 0..4u32 {
             let result = match frame {
@@ -203,7 +204,23 @@ fn can_writer_thread_fd(
     };
 
     while let Some(frame) = rx.blocking_recv() {
+        let recv_gap = last_recv.elapsed();
+        last_recv = Instant::now();
+        if recv_gap > Duration::from_millis(50) {
+            tracing::warn!(
+                "CAN writer: {:.1}ms gap between commands from network",
+                recv_gap.as_secs_f64() * 1000.0,
+            );
+        }
+        let write_start = Instant::now();
         write_fn(&frame);
+        let write_dur = write_start.elapsed();
+        if write_dur > Duration::from_millis(5) {
+            tracing::warn!(
+                "CAN writer: write_frame took {:.1}ms",
+                write_dur.as_secs_f64() * 1000.0,
+            );
+        }
     }
 }
 
@@ -243,8 +260,25 @@ fn can_writer_thread_std(
         }
     };
 
+    let mut last_recv = Instant::now();
     while let Some(frame) = rx.blocking_recv() {
+        let recv_gap = last_recv.elapsed();
+        last_recv = Instant::now();
+        if recv_gap > Duration::from_millis(50) {
+            tracing::warn!(
+                "CAN writer: {:.1}ms gap between commands from network",
+                recv_gap.as_secs_f64() * 1000.0,
+            );
+        }
+        let write_start = Instant::now();
         write_fn(&frame);
+        let write_dur = write_start.elapsed();
+        if write_dur > Duration::from_millis(5) {
+            tracing::warn!(
+                "CAN writer: write_frame took {:.1}ms",
+                write_dur.as_secs_f64() * 1000.0,
+            );
+        }
     }
 }
 
