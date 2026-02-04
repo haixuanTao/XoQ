@@ -65,7 +65,8 @@ impl CanClient {
         let encoded = wire::encode(&AnyCanFrame::Can(frame.clone()));
         let mut send = self.send.lock().await;
         send.write_all(&encoded).await?;
-        send.flush().await?;
+        drop(send);
+        tokio::task::yield_now().await;
         Ok(())
     }
 
@@ -74,7 +75,8 @@ impl CanClient {
         let encoded = wire::encode(&AnyCanFrame::CanFd(frame.clone()));
         let mut send = self.send.lock().await;
         send.write_all(&encoded).await?;
-        send.flush().await?;
+        drop(send);
+        tokio::task::yield_now().await;
         Ok(())
     }
 
@@ -381,20 +383,12 @@ impl RemoteCanSocket {
         self.runtime.block_on(async {
             match &self.client {
                 ClientInner::Iroh { send, .. } => {
-                    let t0 = std::time::Instant::now();
                     let mut s = send.lock().await;
-                    let lock_dur = t0.elapsed();
                     s.write_all(data).await?;
-                    let write_dur = t0.elapsed();
-                    s.flush().await?;
-                    let total_dur = t0.elapsed();
-                    println!(
-                        "[xoq] write_raw: lock={:.1}ms write={:.1}ms flush={:.1}ms total={:.1}ms",
-                        lock_dur.as_secs_f64() * 1000.0,
-                        (write_dur - lock_dur).as_secs_f64() * 1000.0,
-                        (total_dur - write_dur).as_secs_f64() * 1000.0,
-                        total_dur.as_secs_f64() * 1000.0,
-                    );
+                    drop(s);
+                    // quinn's flush() is a no-op — yield to let the connection
+                    // task pack the data into a UDP packet before we return
+                    tokio::time::sleep(std::time::Duration::from_micros(100)).await;
                 }
                 ClientInner::Moq { conn } => {
                     let mut c = conn.lock().await;
@@ -431,15 +425,8 @@ impl RemoteCanSocket {
     fn read_raw_with_timeout(&mut self) -> Result<Option<Vec<u8>>> {
         let timeout = self.timeout;
         let result = self.runtime.block_on(async {
-            // Flush any pending writes before reading — coalesces the entire
-            // send batch (e.g. 8 motor commands) into a single QUIC flush.
-            match &self.client {
-                ClientInner::Iroh { send, .. } => {
-                    let mut s = send.lock().await;
-                    s.flush().await.ok();
-                }
-                ClientInner::Moq { .. } => {}
-            }
+            // No flush needed — quinn's flush() is a no-op.
+            // Writes are sent by the connection task asynchronously.
             tokio::time::timeout(timeout, async {
                 let mut temp_buf = vec![0u8; 128];
                 match &self.client {
@@ -563,7 +550,9 @@ impl CanBusSocket for RemoteCanSocket {
                 ClientInner::Iroh { send, .. } => {
                     let mut s = send.lock().await;
                     s.write_all(&encoded).await?;
-                    s.flush().await?; // Flush immediately to avoid buffering delays
+                    drop(s);
+                    // quinn's flush() is a no-op — yield to let connection task send
+                    tokio::time::sleep(std::time::Duration::from_micros(100)).await;
                 }
                 ClientInner::Moq { conn } => {
                     let mut c = conn.lock().await;

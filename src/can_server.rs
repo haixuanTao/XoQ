@@ -502,9 +502,8 @@ async fn handle_connection(
             if send.write_all(&batch_buf).await.is_err() {
                 break;
             }
-            if send.flush().await.is_err() {
-                break;
-            }
+            // quinn's flush() is a no-op — yield to let connection task send
+            tokio::task::yield_now().await;
         }
 
         can_read_rx

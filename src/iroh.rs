@@ -256,10 +256,12 @@ impl IrohStream {
         Ok(())
     }
 
-    /// Flush the write buffer
+    /// Flush the write buffer.
+    ///
+    /// Note: quinn's SendStream::flush() is a no-op (returns Ready immediately).
+    /// For actual send behavior, yield to let the connection task run.
     pub async fn flush(&mut self) -> Result<()> {
-        use tokio::io::AsyncWriteExt;
-        self.send.flush().await?;
+        tokio::task::yield_now().await;
         Ok(())
     }
 

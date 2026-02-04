@@ -43,12 +43,12 @@ impl SyncSerialClient {
 
     /// Write data to the remote serial port.
     pub fn write(&self, data: &[u8]) -> Result<()> {
-        use tokio::io::AsyncWriteExt;
-
         self.runtime.block_on(async {
             let mut send = self.send.lock().await;
             send.write_all(data).await?;
-            send.flush().await?;
+            drop(send);
+            // quinn's flush() is a no-op — yield to let connection task send
+            tokio::time::sleep(std::time::Duration::from_micros(100)).await;
             Ok(())
         })
     }
