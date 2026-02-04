@@ -1,6 +1,6 @@
 //! CAN bridge server - bridges local CAN interface to remote clients
 //!
-//! Usage: can_server <interface[:fd]>... [--key-dir <path>] [--no-jitter-buffer]
+//! Usage: can_server <interface[:fd]>... [--key-dir <path>]
 //!
 //! Examples:
 //!   can_server can0                      # Single interface (backward compatible)
@@ -8,7 +8,6 @@
 //!   can_server can0 can1 vcan0           # Multiple interfaces
 //!   can_server can0:fd can1              # Mixed (can0=FD, can1=standard)
 //!   can_server can0 --key-dir /etc/xoq   # Custom key directory
-//!   can_server can0 --no-jitter-buffer   # Leader arm (no jitter buffer)
 
 use anyhow::Result;
 use std::env;
@@ -21,7 +20,6 @@ use xoq::CanServer;
 struct InterfaceConfig {
     interface: String,
     enable_fd: bool,
-    jitter_buffer: bool,
     identity_path: PathBuf,
 }
 
@@ -35,7 +33,6 @@ fn parse_args() -> Option<(Vec<InterfaceConfig>, PathBuf)> {
 
     let mut interfaces = Vec::new();
     let mut key_dir = PathBuf::from(".");
-    let mut jitter_buffer = true;
     let mut i = 1;
 
     while i < args.len() {
@@ -52,14 +49,8 @@ fn parse_args() -> Option<(Vec<InterfaceConfig>, PathBuf)> {
             }
         }
 
-        if arg == "--no-jitter-buffer" {
-            jitter_buffer = false;
-            i += 1;
-            continue;
-        }
-
-        // Skip legacy --fd flag (handled via :fd suffix now)
-        if arg == "--fd" {
+        // Skip legacy flags
+        if arg == "--no-jitter-buffer" || arg == "--fd" {
             i += 1;
             continue;
         }
@@ -87,7 +78,6 @@ fn parse_args() -> Option<(Vec<InterfaceConfig>, PathBuf)> {
             InterfaceConfig {
                 interface,
                 enable_fd,
-                jitter_buffer,
                 identity_path,
             }
         })
@@ -97,7 +87,7 @@ fn parse_args() -> Option<(Vec<InterfaceConfig>, PathBuf)> {
 }
 
 fn print_usage() {
-    println!("Usage: can_server <interface[:fd]>... [--key-dir <path>] [--no-jitter-buffer]");
+    println!("Usage: can_server <interface[:fd]>... [--key-dir <path>]");
     println!();
     println!("Examples:");
     println!("  can_server can0                      # Single interface");
@@ -105,12 +95,10 @@ fn print_usage() {
     println!("  can_server can0 can1 vcan0           # Multiple interfaces");
     println!("  can_server can0:fd can1              # Mixed (can0=FD, can1=standard)");
     println!("  can_server can0 --key-dir /etc/xoq   # Custom key directory");
-    println!("  can_server can0 --no-jitter-buffer   # Leader arm (direct passthrough)");
     println!();
     println!("Options:");
     println!("  :fd                 Append to interface name to enable CAN FD");
     println!("  --key-dir           Directory for identity key files (default: current dir)");
-    println!("  --no-jitter-buffer  Disable jitter buffer (use for leader arm)");
     println!();
     println!("Available CAN interfaces:");
     match xoq::list_interfaces() {
@@ -159,14 +147,22 @@ async fn run_server(config: &InterfaceConfig) -> Result<()> {
     let server = CanServer::new(
         &config.interface,
         config.enable_fd,
-        config.jitter_buffer,
         Some(&identity_path_str),
     )
     .await?;
 
-    tracing::info!("[{}] Interface: {} (FD: {}, jitter_buffer: {})", config.interface, config.interface, config.enable_fd, config.jitter_buffer);
+    tracing::info!(
+        "[{}] Interface: {} (FD: {})",
+        config.interface,
+        config.interface,
+        config.enable_fd,
+    );
     tracing::info!("[{}] Server ID: {}", config.interface, server.id());
-    tracing::info!("[{}] Identity: {}", config.interface, config.identity_path.display());
+    tracing::info!(
+        "[{}] Identity: {}",
+        config.interface,
+        config.identity_path.display()
+    );
     tracing::info!("[{}] Waiting for connections...", config.interface);
 
     server.run().await?;
