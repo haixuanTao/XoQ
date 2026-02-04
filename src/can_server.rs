@@ -8,7 +8,7 @@
 //! awaits. CAN-to-network writes are batched for throughput.
 
 use anyhow::Result;
-use socketcan::{CanFilter, EmbeddedFrame, Frame, Socket, SocketOptions};
+use socketcan::{EmbeddedFrame, Frame, Socket};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -59,21 +59,6 @@ fn can_reader_thread(
         if let Err(e) = socket.set_read_timeout(timeout) {
             let _ = init_tx.send(Err(anyhow::anyhow!("Failed to set read timeout: {}", e)));
             return;
-        }
-        // Filter out broadcast/sync frames (0x7ff, 0x1) that lose CAN arbitration
-        // and cause read_frame() to block for ~90ms waiting for bus access.
-        // Uses inverted filters with join mode: frame must NOT match 0x7ff AND NOT match 0x1.
-        if let Err(e) = socket.set_join_filters(true) {
-            tracing::warn!("Failed to set join filters: {}", e);
-        }
-        let reject_filters = [
-            CanFilter::new_inverted(0x7ff, 0x7ff),
-            CanFilter::new_inverted(0x1, 0x7ff),
-        ];
-        if let Err(e) = socket.set_filters(&reject_filters) {
-            tracing::warn!("Failed to set CAN filters: {}", e);
-        } else {
-            tracing::info!("CAN reader: filtering out id=0x7ff and id=0x1");
         }
         let _ = init_tx.send(Ok(()));
 
@@ -172,20 +157,6 @@ fn can_reader_thread(
         if let Err(e) = socket.set_read_timeout(timeout) {
             let _ = init_tx.send(Err(anyhow::anyhow!("Failed to set read timeout: {}", e)));
             return;
-        }
-        // Filter out broadcast/sync frames (0x7ff, 0x1) that lose CAN arbitration
-        // and cause read_frame() to block for ~90ms waiting for bus access.
-        if let Err(e) = socket.set_join_filters(true) {
-            tracing::warn!("Failed to set join filters: {}", e);
-        }
-        let reject_filters = [
-            CanFilter::new_inverted(0x7ff, 0x7ff),
-            CanFilter::new_inverted(0x1, 0x7ff),
-        ];
-        if let Err(e) = socket.set_filters(&reject_filters) {
-            tracing::warn!("Failed to set CAN filters: {}", e);
-        } else {
-            tracing::info!("CAN reader: filtering out id=0x7ff and id=0x1");
         }
         let _ = init_tx.send(Ok(()));
 
@@ -426,6 +397,10 @@ const BUFFER_CATCHUP_THRESHOLD: usize = 2;
 /// overflowing the kernel CAN socket buffer (ENOBUFS / os error 105).
 const INTER_FRAME_DELAY: Duration = Duration::from_millis(1);
 
+/// Quiet period after writing a batch, giving servos a window to send
+/// responses on the bus without contending with outgoing commands.
+const POST_BATCH_QUIET: Duration = Duration::from_millis(15);
+
 /// Number of consecutive regular-cadence multi-frame batches required to activate buffering.
 const STREAMING_THRESHOLD: u32 = 15;
 
@@ -634,12 +609,15 @@ fn write_batch(batch: &[AnyCanFrame], write_frame: &mut impl FnMut(&AnyCanFrame)
             std::thread::sleep(INTER_FRAME_DELAY);
         }
     }
+    // Quiet period: stop transmitting so servos can send responses on the bus.
+    std::thread::sleep(POST_BATCH_QUIET);
     let batch_elapsed = batch_start.elapsed();
-    if batch_elapsed > Duration::from_millis(5) {
+    if batch_elapsed > Duration::from_millis(30) {
         tracing::warn!(
-            "CAN writer: write_batch took {:.1}ms ({} frames)",
+            "CAN writer: write_batch took {:.1}ms ({} frames, includes {}ms quiet)",
             batch_elapsed.as_secs_f64() * 1000.0,
-            batch.len()
+            batch.len(),
+            POST_BATCH_QUIET.as_millis(),
         );
     }
 }
