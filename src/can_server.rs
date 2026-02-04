@@ -8,7 +8,7 @@
 //! awaits. CAN-to-network writes are batched for throughput.
 
 use anyhow::Result;
-use socketcan::{EmbeddedFrame, Frame, Socket};
+use socketcan::{CanFilter, EmbeddedFrame, Frame, Socket, SocketOptions};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -59,6 +59,21 @@ fn can_reader_thread(
         if let Err(e) = socket.set_read_timeout(timeout) {
             let _ = init_tx.send(Err(anyhow::anyhow!("Failed to set read timeout: {}", e)));
             return;
+        }
+        // Filter out broadcast/sync frames (0x7ff, 0x1) that lose CAN arbitration
+        // and cause read_frame() to block for ~90ms waiting for bus access.
+        // Uses inverted filters with join mode: frame must NOT match 0x7ff AND NOT match 0x1.
+        if let Err(e) = socket.set_join_filters(true) {
+            tracing::warn!("Failed to set join filters: {}", e);
+        }
+        let reject_filters = [
+            CanFilter::new_inverted(0x7ff, 0x7ff),
+            CanFilter::new_inverted(0x1, 0x7ff),
+        ];
+        if let Err(e) = socket.set_filters(&reject_filters) {
+            tracing::warn!("Failed to set CAN filters: {}", e);
+        } else {
+            tracing::info!("CAN reader: filtering out id=0x7ff and id=0x1");
         }
         let _ = init_tx.send(Ok(()));
 
@@ -157,6 +172,20 @@ fn can_reader_thread(
         if let Err(e) = socket.set_read_timeout(timeout) {
             let _ = init_tx.send(Err(anyhow::anyhow!("Failed to set read timeout: {}", e)));
             return;
+        }
+        // Filter out broadcast/sync frames (0x7ff, 0x1) that lose CAN arbitration
+        // and cause read_frame() to block for ~90ms waiting for bus access.
+        if let Err(e) = socket.set_join_filters(true) {
+            tracing::warn!("Failed to set join filters: {}", e);
+        }
+        let reject_filters = [
+            CanFilter::new_inverted(0x7ff, 0x7ff),
+            CanFilter::new_inverted(0x1, 0x7ff),
+        ];
+        if let Err(e) = socket.set_filters(&reject_filters) {
+            tracing::warn!("Failed to set CAN filters: {}", e);
+        } else {
+            tracing::info!("CAN reader: filtering out id=0x7ff and id=0x1");
         }
         let _ = init_tx.send(Ok(()));
 
