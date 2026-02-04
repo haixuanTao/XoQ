@@ -8,7 +8,7 @@
 //! awaits. CAN-to-network writes are batched for throughput.
 
 use anyhow::Result;
-use socketcan::{EmbeddedFrame, Frame, Socket};
+use socketcan::{EmbeddedFrame, Frame, Socket, ERR_MASK_ALL};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -1115,7 +1115,7 @@ impl CanServer {
             // Enable CAN error frame reception to detect bus errors during gaps
             use socketcan::SocketOptions;
             socket
-                .set_error_mask(socketcan::ERR_MASK_ALL)
+                .set_error_mask(ERR_MASK_ALL)
                 .map_err(|e| anyhow::anyhow!("Failed to set error mask: {}", e))?;
             tracing::info!(
                 "CAN FD socket opened on {}, error frames enabled",
@@ -1161,7 +1161,7 @@ impl CanServer {
                 .map_err(|e| anyhow::anyhow!("Failed to set read timeout: {}", e))?;
             use socketcan::SocketOptions;
             socket
-                .set_error_mask(socketcan::ERR_MASK_ALL)
+                .set_error_mask(ERR_MASK_ALL)
                 .map_err(|e| anyhow::anyhow!("Failed to set error mask: {}", e))?;
             tracing::info!("CAN socket opened on {}, error frames enabled", interface);
             let socket = Arc::new(socket);
