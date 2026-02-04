@@ -38,7 +38,7 @@ fn can_reader_thread_fd(
                 let gap = last_read.elapsed();
                 let writes_now = write_count.load(Ordering::Relaxed);
                 let writes_during = writes_now - writes_at_gap_start;
-                if gap > Duration::from_millis(50) && writes_during > 0 {
+                if gap > Duration::from_millis(50) && writes_during >= 3 {
                     tracing::warn!(
                         "CAN response delay: {:.1}ms ({} timeouts, {} writes during gap)",
                         gap.as_secs_f64() * 1000.0,
@@ -102,7 +102,7 @@ fn can_reader_thread_std(
                 let gap = last_read.elapsed();
                 let writes_now = write_count.load(Ordering::Relaxed);
                 let writes_during = writes_now - writes_at_gap_start;
-                if gap > Duration::from_millis(50) && writes_during > 0 {
+                if gap > Duration::from_millis(50) && writes_during >= 3 {
                     tracing::warn!(
                         "CAN response delay: {:.1}ms ({} timeouts, {} writes during gap)",
                         gap.as_secs_f64() * 1000.0,
