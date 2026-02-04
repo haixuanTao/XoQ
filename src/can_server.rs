@@ -36,11 +36,11 @@ fn can_reader_thread_fd(
         match socket.read_frame() {
             Ok(frame) => {
                 let gap = last_read.elapsed();
-                if gap > Duration::from_millis(50) {
-                    let writes_now = write_count.load(Ordering::Relaxed);
-                    let writes_during = writes_now - writes_at_gap_start;
+                let writes_now = write_count.load(Ordering::Relaxed);
+                let writes_during = writes_now - writes_at_gap_start;
+                if gap > Duration::from_millis(50) && writes_during > 0 {
                     tracing::warn!(
-                        "CAN read gap: {:.1}ms ({} timeouts, {} writes during gap)",
+                        "CAN response delay: {:.1}ms ({} timeouts, {} writes during gap)",
                         gap.as_secs_f64() * 1000.0,
                         timeouts,
                         writes_during,
@@ -48,7 +48,7 @@ fn can_reader_thread_fd(
                 }
                 last_read = Instant::now();
                 timeouts = 0;
-                writes_at_gap_start = write_count.load(Ordering::Relaxed);
+                writes_at_gap_start = writes_now;
                 let any_frame = match frame {
                     socketcan::CanAnyFrame::Normal(f) => match CanFrame::try_from(f) {
                         Ok(cf) => AnyCanFrame::Can(cf),
@@ -100,11 +100,11 @@ fn can_reader_thread_std(
         match socket.read_frame() {
             Ok(frame) => {
                 let gap = last_read.elapsed();
-                if gap > Duration::from_millis(50) {
-                    let writes_now = write_count.load(Ordering::Relaxed);
-                    let writes_during = writes_now - writes_at_gap_start;
+                let writes_now = write_count.load(Ordering::Relaxed);
+                let writes_during = writes_now - writes_at_gap_start;
+                if gap > Duration::from_millis(50) && writes_during > 0 {
                     tracing::warn!(
-                        "CAN read gap: {:.1}ms ({} timeouts, {} writes during gap)",
+                        "CAN response delay: {:.1}ms ({} timeouts, {} writes during gap)",
                         gap.as_secs_f64() * 1000.0,
                         timeouts,
                         writes_during,
@@ -112,7 +112,7 @@ fn can_reader_thread_std(
                 }
                 last_read = Instant::now();
                 timeouts = 0;
-                writes_at_gap_start = write_count.load(Ordering::Relaxed);
+                writes_at_gap_start = writes_now;
                 let any_frame = match CanFrame::try_from(frame) {
                     Ok(cf) => AnyCanFrame::Can(cf),
                     Err(e) => {
