@@ -9,7 +9,6 @@ use socketcan::Socket;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::can::{CanFdFrame, CanFrame};
@@ -360,9 +359,9 @@ impl CanServer {
             tracing::info!("Client connected: {}", conn.remote_id());
 
             // Log connection type (direct vs relay)
-            if let Some(watcher) = self.endpoint.endpoint().conn_type(conn.remote_id().into()) {
+            if let Some(mut watcher) = self.endpoint.endpoint().conn_type(conn.remote_id().into()) {
                 let conn_type = watcher.get();
-                tracing::info!("Connection type: {:?}", conn_type);
+                tracing::warn!("Connection type: {:?}", conn_type);
             }
 
             if let Some((cancel, handle)) = current_conn.take() {
