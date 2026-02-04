@@ -8,7 +8,8 @@
 //! awaits. CAN-to-network writes are batched for throughput.
 
 use anyhow::Result;
-use socketcan::{EmbeddedFrame, Frame, Socket, ERR_MASK_ALL};
+use socketcan::id::ERR_MASK_ALL;
+use socketcan::{EmbeddedFrame, Frame, Socket};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
