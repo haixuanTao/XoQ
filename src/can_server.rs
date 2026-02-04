@@ -44,7 +44,7 @@ fn can_reader_thread(
     init_tx: std::sync::mpsc::SyncSender<Result<()>>,
     writer_busy: Arc<AtomicU64>,
 ) {
-    let timeout = Duration::from_millis(100);
+    let timeout = Duration::from_millis(10);
 
     if enable_fd {
         let socket = match socketcan::CanFdSocket::open(&interface) {
