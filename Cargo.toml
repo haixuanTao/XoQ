@@ -102,5 +102,14 @@ path = "examples/camera_server.rs"
 required-features = ["iroh"]
 
 [[example]]
+name = "moq_serial_server"
+path = "examples/moq_serial_server.rs"
+required-features = ["serial"]
+
+[[example]]
+name = "moq_serial_client"
+path = "examples/moq_serial_client.rs"
+
+[[example]]
 name = "moq_test"
 path = "examples/moq_test.rs"
