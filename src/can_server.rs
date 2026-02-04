@@ -8,7 +8,7 @@
 //! awaits. CAN-to-network writes are batched for throughput.
 
 use anyhow::Result;
-use socketcan::Socket;
+use socketcan::{EmbeddedFrame, Frame, Socket};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -71,17 +71,26 @@ fn can_reader_thread(
                 Ok(frame) => {
                     let read_elapsed = read_start.elapsed();
                     let now = Instant::now();
+                    let (frame_type, raw_id, data_len) = match &frame {
+                        socketcan::CanAnyFrame::Normal(f) => ("CAN", f.raw_id(), f.data().len()),
+                        socketcan::CanAnyFrame::Fd(f) => ("FD", f.raw_id(), f.data().len()),
+                        socketcan::CanAnyFrame::Remote(f) => ("RTR", f.raw_id(), f.data().len()),
+                        socketcan::CanAnyFrame::Error(f) => ("ERR", f.raw_id(), f.data().len()),
+                    };
                     if let Some(prev) = last_read_time {
                         let gap = now.duration_since(prev);
                         if gap > Duration::from_millis(50) {
                             let writer_writes_now = writer_busy.load(Ordering::Relaxed);
                             let writes_during_gap = writer_writes_now - writer_writes_at_gap_start;
                             tracing::warn!(
-                                "CAN reader: {:.1}ms gap between reads (read_frame blocked {:.1}ms), {} timeouts during gap, {} writer writes during gap",
+                                "CAN reader: {:.1}ms gap (read_frame blocked {:.1}ms), {} timeouts, {} writes during gap, first frame: {} id=0x{:x} len={}",
                                 gap.as_secs_f64() * 1000.0,
                                 read_elapsed.as_secs_f64() * 1000.0,
                                 consecutive_timeouts,
                                 writes_during_gap,
+                                frame_type,
+                                raw_id,
+                                data_len,
                             );
                         }
                     }
@@ -166,11 +175,13 @@ fn can_reader_thread(
                             let writer_writes_now = writer_busy.load(Ordering::Relaxed);
                             let writes_during_gap = writer_writes_now - writer_writes_at_gap_start;
                             tracing::warn!(
-                                "CAN reader: {:.1}ms gap between reads (read_frame blocked {:.1}ms), {} timeouts during gap, {} writer writes during gap",
+                                "CAN reader: {:.1}ms gap (read_frame blocked {:.1}ms), {} timeouts, {} writes during gap, first frame: CAN id=0x{:x} len={}",
                                 gap.as_secs_f64() * 1000.0,
                                 read_elapsed.as_secs_f64() * 1000.0,
                                 consecutive_timeouts,
                                 writes_during_gap,
+                                frame.raw_id(),
+                                frame.data().len(),
                             );
                         }
                     }
