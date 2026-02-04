@@ -34,193 +34,160 @@ pub struct CanServer {
     endpoint: Arc<crate::iroh::IrohServer>,
 }
 
-/// Reader thread: opens a socketcan socket and pushes frames into a tokio mpsc channel.
+/// Reader thread: reads frames from a shared CAN socket and pushes them into a tokio mpsc channel.
 ///
 /// Uses `blocking_send` so no tokio runtime is needed on this thread.
-fn can_reader_thread(
-    interface: String,
-    enable_fd: bool,
+fn can_reader_thread_fd(
+    socket: Arc<socketcan::CanFdSocket>,
     tx: tokio::sync::mpsc::Sender<AnyCanFrame>,
-    init_tx: std::sync::mpsc::SyncSender<Result<()>>,
     writer_busy: Arc<AtomicU64>,
 ) {
-    let timeout = Duration::from_millis(10);
-
-    if enable_fd {
-        let socket = match socketcan::CanFdSocket::open(&interface) {
-            Ok(s) => s,
-            Err(e) => {
-                let _ = init_tx.send(Err(anyhow::anyhow!(
-                    "Failed to open CAN FD reader socket on {}: {}",
-                    interface,
-                    e
-                )));
-                return;
-            }
-        };
-        if let Err(e) = socket.set_read_timeout(timeout) {
-            let _ = init_tx.send(Err(anyhow::anyhow!("Failed to set read timeout: {}", e)));
-            return;
-        }
-        let _ = init_tx.send(Ok(()));
-
-        let mut last_read_time: Option<Instant> = None;
-        let mut consecutive_timeouts: u64 = 0;
-        let mut writer_writes_at_gap_start: u64 = 0;
-        loop {
-            let read_start = Instant::now();
-            match socket.read_frame() {
-                Ok(frame) => {
-                    let read_elapsed = read_start.elapsed();
-                    let now = Instant::now();
-                    let (frame_type, raw_id, data_len) = match &frame {
-                        socketcan::CanAnyFrame::Normal(f) => ("CAN", f.raw_id(), f.data().len()),
-                        socketcan::CanAnyFrame::Fd(f) => ("FD", f.raw_id(), f.data().len()),
-                        socketcan::CanAnyFrame::Remote(f) => ("RTR", f.raw_id(), f.data().len()),
-                        socketcan::CanAnyFrame::Error(f) => ("ERR", f.raw_id(), f.data().len()),
-                    };
-                    if let Some(prev) = last_read_time {
-                        let gap = now.duration_since(prev);
-                        if gap > Duration::from_millis(50) {
-                            let writer_writes_now = writer_busy.load(Ordering::Relaxed);
-                            let writes_during_gap = writer_writes_now - writer_writes_at_gap_start;
-                            tracing::warn!(
-                                "CAN reader: {:.1}ms gap (read_frame blocked {:.1}ms), {} timeouts, {} writes during gap, first frame: {} id=0x{:x} len={}",
-                                gap.as_secs_f64() * 1000.0,
-                                read_elapsed.as_secs_f64() * 1000.0,
-                                consecutive_timeouts,
-                                writes_during_gap,
-                                frame_type,
-                                raw_id,
-                                data_len,
-                            );
-                        }
-                    }
-                    last_read_time = Some(now);
-                    consecutive_timeouts = 0;
-                    writer_writes_at_gap_start = writer_busy.load(Ordering::Relaxed);
-
-                    let any_frame = match frame {
-                        socketcan::CanAnyFrame::Normal(f) => match CanFrame::try_from(f) {
-                            Ok(cf) => AnyCanFrame::Can(cf),
-                            Err(e) => {
-                                tracing::warn!("CAN frame conversion error: {}", e);
-                                continue;
-                            }
-                        },
-                        socketcan::CanAnyFrame::Fd(f) => match CanFdFrame::try_from(f) {
-                            Ok(cf) => AnyCanFrame::CanFd(cf),
-                            Err(e) => {
-                                tracing::warn!("CAN FD frame conversion error: {}", e);
-                                continue;
-                            }
-                        },
-                        socketcan::CanAnyFrame::Remote(_) | socketcan::CanAnyFrame::Error(_) => {
-                            continue;
-                        }
-                    };
-                    let send_start = Instant::now();
-                    if tx.blocking_send(any_frame).is_err() {
-                        break; // Receiver dropped
-                    }
-                    let send_elapsed = send_start.elapsed();
-                    if send_elapsed > Duration::from_millis(1) {
+    let mut last_read_time: Option<Instant> = None;
+    let mut consecutive_timeouts: u64 = 0;
+    let mut writer_writes_at_gap_start: u64 = 0;
+    loop {
+        let read_start = Instant::now();
+        match socket.read_frame() {
+            Ok(frame) => {
+                let read_elapsed = read_start.elapsed();
+                let now = Instant::now();
+                let (frame_type, raw_id, data_len) = match &frame {
+                    socketcan::CanAnyFrame::Normal(f) => ("CAN", f.raw_id(), f.data().len()),
+                    socketcan::CanAnyFrame::Fd(f) => ("FD", f.raw_id(), f.data().len()),
+                    socketcan::CanAnyFrame::Remote(f) => ("RTR", f.raw_id(), f.data().len()),
+                    socketcan::CanAnyFrame::Error(f) => ("ERR", f.raw_id(), f.data().len()),
+                };
+                if let Some(prev) = last_read_time {
+                    let gap = now.duration_since(prev);
+                    if gap > Duration::from_millis(50) {
+                        let writer_writes_now = writer_busy.load(Ordering::Relaxed);
+                        let writes_during_gap = writer_writes_now - writer_writes_at_gap_start;
                         tracing::warn!(
-                            "CAN reader: blocking_send took {:.1}ms (channel backpressure)",
-                            send_elapsed.as_secs_f64() * 1000.0
+                            "CAN reader: {:.1}ms gap (read_frame blocked {:.1}ms), {} timeouts, {} writes during gap, first frame: {} id=0x{:x} len={}",
+                            gap.as_secs_f64() * 1000.0,
+                            read_elapsed.as_secs_f64() * 1000.0,
+                            consecutive_timeouts,
+                            writes_during_gap,
+                            frame_type,
+                            raw_id,
+                            data_len,
                         );
                     }
                 }
-                Err(e)
-                    if e.kind() == std::io::ErrorKind::WouldBlock
-                        || e.kind() == std::io::ErrorKind::TimedOut =>
-                {
-                    consecutive_timeouts += 1;
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!("CAN read error (ignoring): {}", e);
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-            }
-        }
-    } else {
-        let socket = match socketcan::CanSocket::open(&interface) {
-            Ok(s) => s,
-            Err(e) => {
-                let _ = init_tx.send(Err(anyhow::anyhow!(
-                    "Failed to open CAN reader socket on {}: {}",
-                    interface,
-                    e
-                )));
-                return;
-            }
-        };
-        if let Err(e) = socket.set_read_timeout(timeout) {
-            let _ = init_tx.send(Err(anyhow::anyhow!("Failed to set read timeout: {}", e)));
-            return;
-        }
-        let _ = init_tx.send(Ok(()));
+                last_read_time = Some(now);
+                consecutive_timeouts = 0;
+                writer_writes_at_gap_start = writer_busy.load(Ordering::Relaxed);
 
-        let mut last_read_time: Option<Instant> = None;
-        let mut consecutive_timeouts: u64 = 0;
-        let mut writer_writes_at_gap_start: u64 = 0;
-        loop {
-            let read_start = Instant::now();
-            match socket.read_frame() {
-                Ok(frame) => {
-                    let read_elapsed = read_start.elapsed();
-                    let now = Instant::now();
-                    if let Some(prev) = last_read_time {
-                        let gap = now.duration_since(prev);
-                        if gap > Duration::from_millis(50) {
-                            let writer_writes_now = writer_busy.load(Ordering::Relaxed);
-                            let writes_during_gap = writer_writes_now - writer_writes_at_gap_start;
-                            tracing::warn!(
-                                "CAN reader: {:.1}ms gap (read_frame blocked {:.1}ms), {} timeouts, {} writes during gap, first frame: CAN id=0x{:x} len={}",
-                                gap.as_secs_f64() * 1000.0,
-                                read_elapsed.as_secs_f64() * 1000.0,
-                                consecutive_timeouts,
-                                writes_during_gap,
-                                frame.raw_id(),
-                                frame.data().len(),
-                            );
-                        }
-                    }
-                    last_read_time = Some(now);
-                    consecutive_timeouts = 0;
-                    writer_writes_at_gap_start = writer_busy.load(Ordering::Relaxed);
-
-                    let any_frame = match CanFrame::try_from(frame) {
+                let any_frame = match frame {
+                    socketcan::CanAnyFrame::Normal(f) => match CanFrame::try_from(f) {
                         Ok(cf) => AnyCanFrame::Can(cf),
                         Err(e) => {
                             tracing::warn!("CAN frame conversion error: {}", e);
                             continue;
                         }
-                    };
-                    let send_start = Instant::now();
-                    if tx.blocking_send(any_frame).is_err() {
-                        break; // Receiver dropped
+                    },
+                    socketcan::CanAnyFrame::Fd(f) => match CanFdFrame::try_from(f) {
+                        Ok(cf) => AnyCanFrame::CanFd(cf),
+                        Err(e) => {
+                            tracing::warn!("CAN FD frame conversion error: {}", e);
+                            continue;
+                        }
+                    },
+                    socketcan::CanAnyFrame::Remote(_) | socketcan::CanAnyFrame::Error(_) => {
+                        continue;
                     }
-                    let send_elapsed = send_start.elapsed();
-                    if send_elapsed > Duration::from_millis(1) {
+                };
+                let send_start = Instant::now();
+                if tx.blocking_send(any_frame).is_err() {
+                    break; // Receiver dropped
+                }
+                let send_elapsed = send_start.elapsed();
+                if send_elapsed > Duration::from_millis(1) {
+                    tracing::warn!(
+                        "CAN reader: blocking_send took {:.1}ms (channel backpressure)",
+                        send_elapsed.as_secs_f64() * 1000.0
+                    );
+                }
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                consecutive_timeouts += 1;
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!("CAN read error (ignoring): {}", e);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+}
+
+/// Reader thread for standard CAN (non-FD) sockets.
+fn can_reader_thread_std(
+    socket: Arc<socketcan::CanSocket>,
+    tx: tokio::sync::mpsc::Sender<AnyCanFrame>,
+    writer_busy: Arc<AtomicU64>,
+) {
+    let mut last_read_time: Option<Instant> = None;
+    let mut consecutive_timeouts: u64 = 0;
+    let mut writer_writes_at_gap_start: u64 = 0;
+    loop {
+        let read_start = Instant::now();
+        match socket.read_frame() {
+            Ok(frame) => {
+                let read_elapsed = read_start.elapsed();
+                let now = Instant::now();
+                if let Some(prev) = last_read_time {
+                    let gap = now.duration_since(prev);
+                    if gap > Duration::from_millis(50) {
+                        let writer_writes_now = writer_busy.load(Ordering::Relaxed);
+                        let writes_during_gap = writer_writes_now - writer_writes_at_gap_start;
                         tracing::warn!(
-                            "CAN reader: blocking_send took {:.1}ms (channel backpressure)",
-                            send_elapsed.as_secs_f64() * 1000.0
+                            "CAN reader: {:.1}ms gap (read_frame blocked {:.1}ms), {} timeouts, {} writes during gap, first frame: CAN id=0x{:x} len={}",
+                            gap.as_secs_f64() * 1000.0,
+                            read_elapsed.as_secs_f64() * 1000.0,
+                            consecutive_timeouts,
+                            writes_during_gap,
+                            frame.raw_id(),
+                            frame.data().len(),
                         );
                     }
                 }
-                Err(e)
-                    if e.kind() == std::io::ErrorKind::WouldBlock
-                        || e.kind() == std::io::ErrorKind::TimedOut =>
-                {
-                    consecutive_timeouts += 1;
-                    continue;
+                last_read_time = Some(now);
+                consecutive_timeouts = 0;
+                writer_writes_at_gap_start = writer_busy.load(Ordering::Relaxed);
+
+                let any_frame = match CanFrame::try_from(frame) {
+                    Ok(cf) => AnyCanFrame::Can(cf),
+                    Err(e) => {
+                        tracing::warn!("CAN frame conversion error: {}", e);
+                        continue;
+                    }
+                };
+                let send_start = Instant::now();
+                if tx.blocking_send(any_frame).is_err() {
+                    break; // Receiver dropped
                 }
-                Err(e) => {
-                    tracing::warn!("CAN read error (ignoring): {}", e);
-                    std::thread::sleep(Duration::from_millis(10));
+                let send_elapsed = send_start.elapsed();
+                if send_elapsed > Duration::from_millis(1) {
+                    tracing::warn!(
+                        "CAN reader: blocking_send took {:.1}ms (channel backpressure)",
+                        send_elapsed.as_secs_f64() * 1000.0
+                    );
                 }
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                consecutive_timeouts += 1;
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!("CAN read error (ignoring): {}", e);
+                std::thread::sleep(Duration::from_millis(10));
             }
         }
     }
@@ -231,147 +198,127 @@ fn can_reader_thread(
 /// When [`JITTER_BUFFER_ENABLED`] is `true`, frames are buffered into batches and
 /// played out at a steady measured rate to absorb network jitter (follower arm).
 /// When `false`, frames are written immediately as they arrive (leader arm).
-fn can_writer_thread(
-    interface: String,
-    enable_fd: bool,
+/// Writer thread for CAN FD sockets using a shared socket.
+fn can_writer_thread_fd(
+    socket: Arc<socketcan::CanFdSocket>,
     jitter_buffer: bool,
     mut rx: tokio::sync::mpsc::Receiver<AnyCanFrame>,
-    init_tx: std::sync::mpsc::SyncSender<Result<()>>,
     writer_busy: Arc<AtomicU64>,
     write_ack_tx: tokio::sync::mpsc::Sender<()>,
 ) {
-    if enable_fd {
-        let socket = match socketcan::CanFdSocket::open(&interface) {
-            Ok(s) => s,
-            Err(e) => {
-                let _ = init_tx.send(Err(anyhow::anyhow!(
-                    "Failed to open CAN FD writer socket on {}: {}",
-                    interface,
-                    e
-                )));
-                return;
-            }
-        };
-        let _ = init_tx.send(Ok(()));
-
-        let writer_busy_ref = &writer_busy;
-        let ack_ref = &write_ack_tx;
-        let write_fn = |frame: &AnyCanFrame| {
-            let write_start = Instant::now();
-            for attempt in 0..4u32 {
-                let result = match frame {
-                    AnyCanFrame::Can(f) => match socketcan::CanFrame::try_from(f) {
-                        Ok(sf) => socket.write_frame(&sf).map(|_| ()),
-                        Err(e) => {
-                            tracing::warn!("CAN frame conversion error on write: {}", e);
-                            let _ = ack_ref.blocking_send(());
-                            return;
-                        }
-                    },
-                    AnyCanFrame::CanFd(f) => match socketcan::CanFdFrame::try_from(f) {
-                        Ok(sf) => socket.write_frame(&sf).map(|_| ()),
-                        Err(e) => {
-                            tracing::warn!("CAN FD frame conversion error on write: {}", e);
-                            let _ = ack_ref.blocking_send(());
-                            return;
-                        }
-                    },
-                };
-                if result.is_ok() {
-                    writer_busy_ref.fetch_add(1, Ordering::Relaxed);
-                    let elapsed = write_start.elapsed();
-                    if elapsed > Duration::from_millis(2) {
-                        tracing::warn!(
-                            "CAN writer: single frame write took {:.1}ms",
-                            elapsed.as_secs_f64() * 1000.0
-                        );
-                    }
-                    let _ = ack_ref.blocking_send(());
-                    return;
-                }
-                let err = result.unwrap_err();
-                if err.raw_os_error() == Some(105) && attempt < 3 {
-                    tracing::warn!("ENOBUFS retry {}/3", attempt + 1);
-                    std::thread::sleep(Duration::from_micros(100));
-                    continue;
-                }
-                tracing::warn!("CAN write error (dropping frame): {}", err);
-                let _ = ack_ref.blocking_send(());
-                return;
-            }
-        };
-
-        if jitter_buffer {
-            jitter_buffer_loop(rx, write_fn);
-        } else {
-            while let Some(frame) = rx.blocking_recv() {
-                write_fn(&frame);
-            }
-        }
-    } else {
-        let socket = match socketcan::CanSocket::open(&interface) {
-            Ok(s) => s,
-            Err(e) => {
-                let _ = init_tx.send(Err(anyhow::anyhow!(
-                    "Failed to open CAN writer socket on {}: {}",
-                    interface,
-                    e
-                )));
-                return;
-            }
-        };
-        let _ = init_tx.send(Ok(()));
-
-        let writer_busy_ref = &writer_busy;
-        let ack_ref = &write_ack_tx;
-        let write_fn = |frame: &AnyCanFrame| {
-            let write_start = Instant::now();
-            for attempt in 0..4u32 {
-                let result = match frame {
-                    AnyCanFrame::Can(f) => match socketcan::CanFrame::try_from(f) {
-                        Ok(sf) => socket.write_frame(&sf).map(|_| ()),
-                        Err(e) => {
-                            tracing::warn!("CAN frame conversion error on write: {}", e);
-                            let _ = ack_ref.blocking_send(());
-                            return;
-                        }
-                    },
-                    AnyCanFrame::CanFd(_) => {
-                        tracing::warn!("CAN FD frame on standard CAN socket, dropping");
+    let writer_busy_ref = &writer_busy;
+    let ack_ref = &write_ack_tx;
+    let write_fn = |frame: &AnyCanFrame| {
+        let write_start = Instant::now();
+        for attempt in 0..4u32 {
+            let result = match frame {
+                AnyCanFrame::Can(f) => match socketcan::CanFrame::try_from(f) {
+                    Ok(sf) => socket.write_frame(&sf).map(|_| ()),
+                    Err(e) => {
+                        tracing::warn!("CAN frame conversion error on write: {}", e);
                         let _ = ack_ref.blocking_send(());
                         return;
                     }
-                };
-                if result.is_ok() {
-                    writer_busy_ref.fetch_add(1, Ordering::Relaxed);
-                    let elapsed = write_start.elapsed();
-                    if elapsed > Duration::from_millis(2) {
-                        tracing::warn!(
-                            "CAN writer: single frame write took {:.1}ms",
-                            elapsed.as_secs_f64() * 1000.0
-                        );
+                },
+                AnyCanFrame::CanFd(f) => match socketcan::CanFdFrame::try_from(f) {
+                    Ok(sf) => socket.write_frame(&sf).map(|_| ()),
+                    Err(e) => {
+                        tracing::warn!("CAN FD frame conversion error on write: {}", e);
+                        let _ = ack_ref.blocking_send(());
+                        return;
                     }
-                    let _ = ack_ref.blocking_send(());
-                    return;
+                },
+            };
+            if result.is_ok() {
+                writer_busy_ref.fetch_add(1, Ordering::Relaxed);
+                let elapsed = write_start.elapsed();
+                if elapsed > Duration::from_millis(2) {
+                    tracing::warn!(
+                        "CAN writer: single frame write took {:.1}ms",
+                        elapsed.as_secs_f64() * 1000.0
+                    );
                 }
-                let err = result.unwrap_err();
-                if err.raw_os_error() == Some(105) && attempt < 3 {
-                    tracing::warn!("ENOBUFS retry {}/3", attempt + 1);
-                    std::thread::sleep(Duration::from_micros(100));
-                    continue;
-                }
-                tracing::warn!("CAN write error (dropping frame): {}", err);
                 let _ = ack_ref.blocking_send(());
                 return;
             }
-        };
-
-        if jitter_buffer {
-            jitter_buffer_loop(rx, write_fn);
-        } else {
-            while let Some(frame) = rx.blocking_recv() {
-                write_fn(&frame);
+            let err = result.unwrap_err();
+            if err.raw_os_error() == Some(105) && attempt < 3 {
+                tracing::warn!("ENOBUFS retry {}/3", attempt + 1);
+                std::thread::sleep(Duration::from_micros(100));
+                continue;
             }
+            tracing::warn!("CAN write error (dropping frame): {}", err);
+            let _ = ack_ref.blocking_send(());
+            return;
+        }
+    };
+
+    if jitter_buffer {
+        jitter_buffer_loop(rx, write_fn);
+    } else {
+        while let Some(frame) = rx.blocking_recv() {
+            write_fn(&frame);
+        }
+    }
+}
+
+/// Writer thread for standard CAN (non-FD) sockets using a shared socket.
+fn can_writer_thread_std(
+    socket: Arc<socketcan::CanSocket>,
+    jitter_buffer: bool,
+    mut rx: tokio::sync::mpsc::Receiver<AnyCanFrame>,
+    writer_busy: Arc<AtomicU64>,
+    write_ack_tx: tokio::sync::mpsc::Sender<()>,
+) {
+    let writer_busy_ref = &writer_busy;
+    let ack_ref = &write_ack_tx;
+    let write_fn = |frame: &AnyCanFrame| {
+        let write_start = Instant::now();
+        for attempt in 0..4u32 {
+            let result = match frame {
+                AnyCanFrame::Can(f) => match socketcan::CanFrame::try_from(f) {
+                    Ok(sf) => socket.write_frame(&sf).map(|_| ()),
+                    Err(e) => {
+                        tracing::warn!("CAN frame conversion error on write: {}", e);
+                        let _ = ack_ref.blocking_send(());
+                        return;
+                    }
+                },
+                AnyCanFrame::CanFd(_) => {
+                    tracing::warn!("CAN FD frame on standard CAN socket, dropping");
+                    let _ = ack_ref.blocking_send(());
+                    return;
+                }
+            };
+            if result.is_ok() {
+                writer_busy_ref.fetch_add(1, Ordering::Relaxed);
+                let elapsed = write_start.elapsed();
+                if elapsed > Duration::from_millis(2) {
+                    tracing::warn!(
+                        "CAN writer: single frame write took {:.1}ms",
+                        elapsed.as_secs_f64() * 1000.0
+                    );
+                }
+                let _ = ack_ref.blocking_send(());
+                return;
+            }
+            let err = result.unwrap_err();
+            if err.raw_os_error() == Some(105) && attempt < 3 {
+                tracing::warn!("ENOBUFS retry {}/3", attempt + 1);
+                std::thread::sleep(Duration::from_micros(100));
+                continue;
+            }
+            tracing::warn!("CAN write error (dropping frame): {}", err);
+            let _ = ack_ref.blocking_send(());
+            return;
+        }
+    };
+
+    if jitter_buffer {
+        jitter_buffer_loop(rx, write_fn);
+    } else {
+        while let Some(frame) = rx.blocking_recv() {
+            write_fn(&frame);
         }
     }
 }
@@ -967,37 +914,59 @@ impl CanServer {
         // reader reads it during gaps to see if writes were happening concurrently.
         let writer_busy = Arc::new(AtomicU64::new(0));
 
-        // Spawn reader thread
-        let (reader_init_tx, reader_init_rx) = std::sync::mpsc::sync_channel::<Result<()>>(1);
-        let iface_reader = interface.to_string();
-        let writer_busy_reader = Arc::clone(&writer_busy);
-        std::thread::Builder::new()
-            .name(format!("can-read-{}", interface))
-            .spawn(move || {
-                can_reader_thread(iface_reader, enable_fd, can_read_tx, reader_init_tx, writer_busy_reader);
-            })?;
-
         // Write-ACK channel: writer thread sends () after each CAN write completes.
-        // The net→CAN task waits for the ACK before reading the next frame from QUIC.
         let (write_ack_tx, write_ack_rx) = tokio::sync::mpsc::channel::<()>(1);
 
-        // Spawn writer thread
-        let (writer_init_tx, writer_init_rx) = std::sync::mpsc::sync_channel::<Result<()>>(1);
-        let iface_writer = interface.to_string();
-        let writer_busy_writer = Arc::clone(&writer_busy);
-        std::thread::Builder::new()
-            .name(format!("can-write-{}", interface))
-            .spawn(move || {
-                can_writer_thread(iface_writer, enable_fd, jitter_buffer, can_write_rx, writer_init_tx, writer_busy_writer, write_ack_tx);
-            })?;
+        // Open a single shared CAN socket for both reader and writer threads,
+        // matching what python-can does. Two separate sockets on the same interface
+        // cause a race condition where the reader misses frames.
+        if enable_fd {
+            let socket = socketcan::CanFdSocket::open(interface)
+                .map_err(|e| anyhow::anyhow!("Failed to open CAN FD socket on {}: {}", interface, e))?;
+            socket
+                .set_read_timeout(Duration::from_millis(10))
+                .map_err(|e| anyhow::anyhow!("Failed to set read timeout: {}", e))?;
+            let socket = Arc::new(socket);
 
-        // Wait for both threads to initialize (propagate socket open errors)
-        reader_init_rx
-            .recv()
-            .map_err(|_| anyhow::anyhow!("CAN reader thread died during init"))??;
-        writer_init_rx
-            .recv()
-            .map_err(|_| anyhow::anyhow!("CAN writer thread died during init"))??;
+            let socket_reader = Arc::clone(&socket);
+            let writer_busy_reader = Arc::clone(&writer_busy);
+            std::thread::Builder::new()
+                .name(format!("can-read-{}", interface))
+                .spawn(move || {
+                    can_reader_thread_fd(socket_reader, can_read_tx, writer_busy_reader);
+                })?;
+
+            let socket_writer = Arc::clone(&socket);
+            let writer_busy_writer = Arc::clone(&writer_busy);
+            std::thread::Builder::new()
+                .name(format!("can-write-{}", interface))
+                .spawn(move || {
+                    can_writer_thread_fd(socket_writer, jitter_buffer, can_write_rx, writer_busy_writer, write_ack_tx);
+                })?;
+        } else {
+            let socket = socketcan::CanSocket::open(interface)
+                .map_err(|e| anyhow::anyhow!("Failed to open CAN socket on {}: {}", interface, e))?;
+            socket
+                .set_read_timeout(Duration::from_millis(10))
+                .map_err(|e| anyhow::anyhow!("Failed to set read timeout: {}", e))?;
+            let socket = Arc::new(socket);
+
+            let socket_reader = Arc::clone(&socket);
+            let writer_busy_reader = Arc::clone(&writer_busy);
+            std::thread::Builder::new()
+                .name(format!("can-read-{}", interface))
+                .spawn(move || {
+                    can_reader_thread_std(socket_reader, can_read_tx, writer_busy_reader);
+                })?;
+
+            let socket_writer = Arc::clone(&socket);
+            let writer_busy_writer = Arc::clone(&writer_busy);
+            std::thread::Builder::new()
+                .name(format!("can-write-{}", interface))
+                .spawn(move || {
+                    can_writer_thread_std(socket_writer, jitter_buffer, can_write_rx, writer_busy_writer, write_ack_tx);
+                })?;
+        }
 
         // Start iroh server
         let mut builder = IrohServerBuilder::new();
