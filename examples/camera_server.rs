@@ -22,28 +22,28 @@ use xoq::MoqBuilder;
 
 // Platform-conditional camera imports
 #[cfg(feature = "camera")]
-use xoq::camera::{Camera, CameraOptions};
-#[cfg(feature = "camera")]
 use xoq::camera::list_cameras;
+#[cfg(feature = "camera")]
+use xoq::camera::{Camera, CameraOptions, RawFormat};
 
-#[cfg(feature = "camera-macos")]
-use xoq::camera_macos::Camera as CameraMacos;
 #[cfg(feature = "camera-macos")]
 use xoq::camera_macos::list_cameras as list_cameras_macos;
+#[cfg(feature = "camera-macos")]
+use xoq::camera_macos::Camera as CameraMacos;
 
 // NVENC imports (Linux)
-#[cfg(feature = "nvenc")]
-use xoq::camera::CameraOptions as NvencCameraOptions;
 #[cfg(feature = "nvenc")]
 use cudarc::driver::CudaContext;
 #[cfg(feature = "nvenc")]
 use nvidia_video_codec_sdk::{
     sys::nvEncodeAPI::{
-        NV_ENC_BUFFER_FORMAT, NV_ENC_CODEC_H264_GUID, NV_ENC_PRESET_P4_GUID,
-        NV_ENC_TUNING_INFO, NV_ENC_PIC_TYPE, NV_ENC_PIC_FLAGS,
+        NV_ENC_BUFFER_FORMAT, NV_ENC_CODEC_H264_GUID, NV_ENC_PIC_FLAGS, NV_ENC_PIC_TYPE,
+        NV_ENC_PRESET_P4_GUID, NV_ENC_TUNING_INFO,
     },
-    Bitstream, Buffer, Encoder, EncoderInitParams, EncodePictureParams, Session,
+    Bitstream, Buffer, EncodePictureParams, Encoder, EncoderInitParams, Session,
 };
+#[cfg(feature = "nvenc")]
+use xoq::camera::CameraOptions as NvencCameraOptions;
 
 // VideoToolbox imports (macOS)
 #[cfg(feature = "vtenc")]
@@ -157,7 +157,10 @@ fn parse_args() -> Option<(Vec<CameraConfig>, PathBuf)> {
             }
             "--moq" => {
                 // --moq [path] — next arg is path if it doesn't look like a flag or index
-                if i + 1 < args.len() && !args[i + 1].starts_with("--") && args[i + 1].parse::<u32>().is_err() {
+                if i + 1 < args.len()
+                    && !args[i + 1].starts_with("--")
+                    && args[i + 1].parse::<u32>().is_err()
+                {
                     moq_path = Some(args[i + 1].clone());
                     i += 2;
                 } else {
@@ -265,9 +268,13 @@ fn print_cameras() {
 
 fn encoder_name() -> &'static str {
     #[cfg(feature = "nvenc")]
-    { return "H.264 (NVENC)"; }
+    {
+        return "H.264 (NVENC)";
+    }
     #[cfg(feature = "vtenc")]
-    { return "H.264 (VideoToolbox)"; }
+    {
+        return "H.264 (VideoToolbox)";
+    }
     #[allow(unreachable_code)]
     "H.264"
 }
@@ -364,7 +371,10 @@ impl NvencEncoder {
         // Ultra-low-latency preset enables intra refresh (gradual refresh without IDR),
         // which must be disabled for cross-platform decoding compatibility.
         unsafe {
-            config.encodeCodecConfig.h264Config.set_enableIntraRefresh(0);
+            config
+                .encodeCodecConfig
+                .h264Config
+                .set_enableIntraRefresh(0);
             config.encodeCodecConfig.h264Config.idrPeriod = fps;
             config.encodeCodecConfig.h264Config.set_repeatSPSPPS(1);
         }
@@ -408,28 +418,17 @@ impl NvencEncoder {
     }
 
     fn encode_yuyv(&mut self, yuyv: &[u8], timestamp_us: u64) -> Result<Vec<u8>> {
-        if self.frame_count == 0 {
-            let nonzero = yuyv.iter().filter(|&&b| b != 0).count();
-            eprintln!(
-                "[nvenc] YUYV input: {} bytes, nonzero={}/{} first16={:?}",
-                yuyv.len(), nonzero, yuyv.len(),
-                &yuyv[..yuyv.len().min(16)],
-            );
-        }
         self.yuyv_to_nv12(yuyv);
         self.encode_nv12(timestamp_us)
     }
 
     fn encode_rgb(&mut self, rgb: &[u8], timestamp_us: u64) -> Result<Vec<u8>> {
-        if self.frame_count == 0 {
-            let nonzero = rgb.iter().filter(|&&b| b != 0).count();
-            eprintln!(
-                "[nvenc] RGB input: {} bytes, nonzero={}/{} first16={:?}",
-                rgb.len(), nonzero, rgb.len(),
-                &rgb[..rgb.len().min(16)],
-            );
-        }
         self.rgb_to_nv12(rgb);
+        self.encode_nv12(timestamp_us)
+    }
+
+    fn encode_grey(&mut self, grey: &[u8], timestamp_us: u64) -> Result<Vec<u8>> {
+        self.grey_to_nv12(grey);
         self.encode_nv12(timestamp_us)
     }
 
@@ -439,26 +438,6 @@ impl NvencEncoder {
                 .input_buffer
                 .lock()
                 .map_err(|e| anyhow::anyhow!("Failed to lock input: {:?}", e))?;
-            if self.frame_count == 0 {
-                let aligned_h = (self.height as usize + 15) & !15;
-                eprintln!(
-                    "[nvenc] buffer pitch={}, width={}, height={}, aligned_height={} ({})",
-                    lock.pitch(), self.width, self.height, aligned_h,
-                    if lock.pitch() == self.width { "no padding" } else { "PITCHED" },
-                );
-                // Log NV12 content before write
-                let y_nonzero = self.nv12_buffer[..self.width as usize * self.height as usize]
-                    .iter().filter(|&&b| b != 0).count();
-                let uv_start = (self.width * self.height) as usize;
-                let uv_nonzero = self.nv12_buffer[uv_start..]
-                    .iter().filter(|&&b| b != 0).count();
-                eprintln!(
-                    "[nvenc] NV12 buffer: Y nonzero={}/{}, UV nonzero={}/{}, Y first16={:?}",
-                    y_nonzero, self.width as usize * self.height as usize,
-                    uv_nonzero, self.nv12_buffer.len() - uv_start,
-                    &self.nv12_buffer[..16],
-                );
-            }
             unsafe { lock.write_nv12(&self.nv12_buffer, self.width, self.height) };
         }
 
@@ -547,6 +526,14 @@ impl NvencEncoder {
             }
         }
     }
+
+    fn grey_to_nv12(&mut self, grey: &[u8]) {
+        let y_size = (self.width as usize) * (self.height as usize);
+        // Y plane: copy directly
+        self.nv12_buffer[..y_size].copy_from_slice(&grey[..y_size]);
+        // UV plane: neutral chroma (128 = grey)
+        self.nv12_buffer[y_size..].fill(128);
+    }
 }
 
 // ============================================================================
@@ -561,24 +548,38 @@ async fn run_camera_server(config: CameraConfig) -> Result<()> {
         let result = if let Some(ref moq_path) = config.moq_path {
             if config.use_h264 {
                 #[cfg(all(feature = "nvenc", feature = "camera"))]
-                { run_camera_server_moq_h264_nvenc(&config, moq_path).await }
+                {
+                    run_camera_server_moq_h264_nvenc(&config, moq_path).await
+                }
                 #[cfg(all(feature = "vtenc", any(feature = "camera", feature = "camera-macos")))]
-                { run_camera_server_moq_h264_vtenc(&config, moq_path).await }
+                {
+                    run_camera_server_moq_h264_vtenc(&config, moq_path).await
+                }
                 #[cfg(not(any(
                     all(feature = "nvenc", feature = "camera"),
                     all(feature = "vtenc", any(feature = "camera", feature = "camera-macos"))
                 )))]
-                { anyhow::bail!("MoQ H.264 requires the 'nvenc' or 'vtenc' feature and a camera feature") }
+                {
+                    anyhow::bail!(
+                        "MoQ H.264 requires the 'nvenc' or 'vtenc' feature and a camera feature"
+                    )
+                }
             } else {
                 run_camera_server_moq(&config, moq_path).await
             }
         } else if config.use_h264 {
             #[cfg(feature = "nvenc")]
-            { run_camera_server_h264_nvenc(&config).await }
+            {
+                run_camera_server_h264_nvenc(&config).await
+            }
             #[cfg(feature = "vtenc")]
-            { run_camera_server_h264_vtenc(&config).await }
+            {
+                run_camera_server_h264_vtenc(&config).await
+            }
             #[cfg(not(any(feature = "nvenc", feature = "vtenc")))]
-            { anyhow::bail!("H.264 requires the 'nvenc' or 'vtenc' feature") }
+            {
+                anyhow::bail!("H.264 requires the 'nvenc' or 'vtenc' feature")
+            }
         } else {
             run_camera_server_jpeg(&config).await
         };
@@ -624,10 +625,7 @@ async fn run_camera_server_moq(config: &CameraConfig, moq_path: &str) -> Result<
 
     let camera = Arc::new(Mutex::new(camera));
 
-    let mut publisher = MoqBuilder::new()
-        .path(moq_path)
-        .connect_publisher()
-        .await?;
+    let mut publisher = MoqBuilder::new().path(moq_path).connect_publisher().await?;
 
     tracing::info!("[cam{}] MoQ path: {}", config.index, moq_path);
 
@@ -691,10 +689,7 @@ async fn run_camera_server_moq_h264_vtenc(config: &CameraConfig, moq_path: &str)
 
     let camera = Arc::new(Mutex::new(camera));
 
-    let mut publisher = MoqBuilder::new()
-        .path(moq_path)
-        .connect_publisher()
-        .await?;
+    let mut publisher = MoqBuilder::new().path(moq_path).connect_publisher().await?;
 
     tracing::info!("[cam{}] MoQ path: {} (H.264 CMAF)", config.index, moq_path);
 
@@ -726,13 +721,18 @@ async fn run_camera_server_moq_h264_vtenc(config: &CameraConfig, moq_path: &str)
         let duration = (90000 / config.fps) as u32;
 
         // Convert video_toolbox_sys NalUnits to xoq::cmaf NalUnits
-        let cmaf_nals: Vec<CmafNalUnit> = encoded.nals.iter().map(|n| CmafNalUnit {
-            data: n.data.clone(),
-            nal_type: n.nal_type,
-        }).collect();
+        let cmaf_nals: Vec<CmafNalUnit> = encoded
+            .nals
+            .iter()
+            .map(|n| CmafNalUnit {
+                data: n.data.clone(),
+                nal_type: n.nal_type,
+            })
+            .collect();
 
         // Feed NALs to CmafMuxer; when a segment is ready, send it
-        if let Some(segment) = muxer.add_frame(&cmaf_nals, pts, dts, duration, encoded.is_keyframe) {
+        if let Some(segment) = muxer.add_frame(&cmaf_nals, pts, dts, duration, encoded.is_keyframe)
+        {
             // Prepend init segment on keyframes for late-joiner support
             if encoded.is_keyframe {
                 if let Some(ref init) = init_segment {
@@ -757,7 +757,7 @@ async fn run_camera_server_moq_h264_vtenc(config: &CameraConfig, moq_path: &str)
 
 #[cfg(all(feature = "nvenc", feature = "camera"))]
 async fn run_camera_server_moq_h264_nvenc(config: &CameraConfig, moq_path: &str) -> Result<()> {
-    use xoq::cmaf::{CmafConfig, CmafMuxer, parse_annex_b};
+    use xoq::cmaf::{parse_annex_b, CmafConfig, CmafMuxer};
 
     let camera = Camera::open_with_options(
         config.index,
@@ -769,8 +769,7 @@ async fn run_camera_server_moq_h264_nvenc(config: &CameraConfig, moq_path: &str)
 
     let actual_width = camera.width();
     let actual_height = camera.height();
-    let mut use_yuyv = camera.is_yuyv();
-    let expected_yuyv_size = (actual_width * actual_height * 2) as usize;
+    let mut use_raw = camera.is_yuyv() || camera.is_grey();
 
     tracing::info!(
         "[cam{}] Opened: {}x{} ({}) - MoQ H.264/CMAF NVENC mode",
@@ -790,12 +789,13 @@ async fn run_camera_server_moq_h264_nvenc(config: &CameraConfig, moq_path: &str)
 
     let camera = Arc::new(Mutex::new(camera));
 
-    let mut publisher = MoqBuilder::new()
-        .path(moq_path)
-        .connect_publisher()
-        .await?;
+    let mut publisher = MoqBuilder::new().path(moq_path).connect_publisher().await?;
 
-    tracing::info!("[cam{}] MoQ path: {} (H.264 CMAF NVENC)", config.index, moq_path);
+    tracing::info!(
+        "[cam{}] MoQ path: {} (H.264 CMAF NVENC)",
+        config.index,
+        moq_path
+    );
 
     let mut track = publisher.create_track("video");
     let mut init_segment: Option<Vec<u8>> = None;
@@ -806,20 +806,20 @@ async fn run_camera_server_moq_h264_nvenc(config: &CameraConfig, moq_path: &str)
         let h264_data = {
             let mut cam = camera.lock().await;
 
-            if use_yuyv {
+            if use_raw {
                 let raw_frame = cam.capture_raw()?;
-                if raw_frame.data.len() != expected_yuyv_size {
-                    if frame_count == 0 {
-                        tracing::warn!(
-                            "[cam{}] YUYV buffer size mismatch: got {} expected {} — falling back to RGB path",
-                            cam_idx, raw_frame.data.len(), expected_yuyv_size
-                        );
+                match raw_frame.format {
+                    RawFormat::Yuyv => {
+                        encoder.encode_yuyv(&raw_frame.data, raw_frame.timestamp_us)?
                     }
-                    use_yuyv = false;
-                    let frame = cam.capture()?;
-                    encoder.encode_rgb(&frame.data, frame.timestamp_us)?
-                } else {
-                    encoder.encode_yuyv(&raw_frame.data, raw_frame.timestamp_us)?
+                    RawFormat::Grey => {
+                        encoder.encode_grey(&raw_frame.data, raw_frame.timestamp_us)?
+                    }
+                    _ => {
+                        use_raw = false;
+                        let frame = cam.capture()?;
+                        encoder.encode_rgb(&frame.data, frame.timestamp_us)?
+                    }
                 }
             } else {
                 let frame = cam.capture()?;
@@ -846,7 +846,8 @@ async fn run_camera_server_moq_h264_nvenc(config: &CameraConfig, moq_path: &str)
         let duration = (90000 / config.fps) as u32;
 
         // Feed NALs to CmafMuxer; when a segment is ready, send it
-        if let Some(segment) = muxer.add_frame(&parsed.nals, pts, dts, duration, parsed.is_keyframe) {
+        if let Some(segment) = muxer.add_frame(&parsed.nals, pts, dts, duration, parsed.is_keyframe)
+        {
             // Prepend init segment on keyframes for late-joiner support
             if parsed.is_keyframe {
                 if let Some(ref init) = init_segment {
@@ -969,8 +970,7 @@ async fn run_camera_server_h264_nvenc(config: &CameraConfig) -> Result<()> {
 
     let actual_width = camera.width();
     let actual_height = camera.height();
-    let mut use_yuyv = camera.is_yuyv();
-    let expected_yuyv_size = (actual_width * actual_height * 2) as usize;
+    let mut use_raw = camera.is_yuyv() || camera.is_grey();
 
     tracing::info!(
         "[cam{}] Opened: {}x{} ({}) - H.264/NVENC mode",
@@ -1026,24 +1026,20 @@ async fn run_camera_server_h264_nvenc(config: &CameraConfig) -> Result<()> {
                 let mut cam = camera.lock().await;
                 let mut enc = encoder.lock().await;
 
-                if use_yuyv {
+                if use_raw {
                     let raw_frame = cam.capture_raw()?;
-                    // Validate buffer size — V4L2 may report YUYV but provide
-                    // wrong-sized buffers for non-standard resolutions.
-                    if raw_frame.data.len() != expected_yuyv_size {
-                        if frame_count == 0 {
-                            tracing::warn!(
-                                "[cam{}] YUYV buffer size mismatch: got {} expected {} — falling back to RGB path",
-                                cam_idx, raw_frame.data.len(), expected_yuyv_size
-                            );
+                    match raw_frame.format {
+                        RawFormat::Yuyv => {
+                            enc.encode_yuyv(&raw_frame.data, raw_frame.timestamp_us)?
                         }
-                        use_yuyv = false;
-                        // This frame's raw data is unusable as YUYV; capture a
-                        // fresh frame through the decode path instead.
-                        let frame = cam.capture()?;
-                        enc.encode_rgb(&frame.data, frame.timestamp_us)?
-                    } else {
-                        enc.encode_yuyv(&raw_frame.data, raw_frame.timestamp_us)?
+                        RawFormat::Grey => {
+                            enc.encode_grey(&raw_frame.data, raw_frame.timestamp_us)?
+                        }
+                        _ => {
+                            use_raw = false;
+                            let frame = cam.capture()?;
+                            enc.encode_rgb(&frame.data, frame.timestamp_us)?
+                        }
                     }
                 } else {
                     let frame = cam.capture()?;
@@ -1055,7 +1051,10 @@ async fn run_camera_server_h264_nvenc(config: &CameraConfig) -> Result<()> {
                 let nal_type = h264_data.get(4).map(|b| b & 0x1F).unwrap_or(0);
                 tracing::info!(
                     "[cam{}] Frame {}: {} bytes, NAL type {}",
-                    cam_idx, frame_count, h264_data.len(), nal_type
+                    cam_idx,
+                    frame_count,
+                    h264_data.len(),
+                    nal_type
                 );
             }
 
@@ -1066,14 +1065,12 @@ async fn run_camera_server_h264_nvenc(config: &CameraConfig) -> Result<()> {
             header.extend_from_slice(&timestamp_us.to_le_bytes());
             header.extend_from_slice(&(h264_data.len() as u32).to_le_bytes());
 
-            let write_result = tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                async {
-                    send.write_all(&header).await?;
-                    send.write_all(&h264_data).await?;
-                    Ok::<(), std::io::Error>(())
-                },
-            ).await;
+            let write_result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                send.write_all(&header).await?;
+                send.write_all(&h264_data).await?;
+                Ok::<(), std::io::Error>(())
+            })
+            .await;
 
             match write_result {
                 Ok(Ok(())) => {}
@@ -1177,8 +1174,8 @@ async fn run_camera_server_h264_vtenc(config: &CameraConfig) -> Result<()> {
             if send.write_all(&header).await.is_err() || send.write_all(&h264_data).await.is_err() {
                 break;
             }
-            use tokio::time::Duration;
             use tokio::time::sleep;
+            use tokio::time::Duration;
             sleep(Duration::from_millis(30)).await; // Yield to allow other tasks to run
             frame_count += 1;
         }

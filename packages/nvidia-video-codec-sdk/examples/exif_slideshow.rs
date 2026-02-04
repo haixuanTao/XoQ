@@ -28,13 +28,10 @@ use exif::{In, Reader, Tag};
 use image::GenericImageView;
 use nvidia_video_codec_sdk::{
     sys::nvEncodeAPI::{
-        NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_ARGB,
-        NV_ENC_CODEC_H264_GUID,
-        NV_ENC_PRESET_P4_GUID,
-        NV_ENC_TUNING_INFO,
+        NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_ARGB, NV_ENC_CODEC_H264_GUID,
+        NV_ENC_PRESET_P4_GUID, NV_ENC_TUNING_INFO,
     },
-    Encoder,
-    EncoderInitParams,
+    Encoder, EncoderInitParams,
 };
 
 const WIDTH: u32 = 1280;
@@ -109,7 +106,7 @@ fn load_and_resize_image(path: &Path, target_width: u32, target_height: u32) -> 
             let idx = ((out_y * target_width + out_x) * 4) as usize;
 
             // NVENC ARGB is word-ordered, so bytes are [B, G, R, A] on little-endian
-            output[idx] = pixel[2];     // B
+            output[idx] = pixel[2]; // B
             output[idx + 1] = pixel[1]; // G
             output[idx + 2] = pixel[0]; // R
             output[idx + 3] = pixel[3]; // A
@@ -156,7 +153,11 @@ fn main() {
     println!("EXIF Slideshow Encoder");
     println!("======================");
     println!("Resolution: {}x{}", WIDTH, HEIGHT);
-    println!("Frames per image: {} ({:.1}s)", FRAMES_PER_IMAGE, FRAMES_PER_IMAGE as f32 / 30.0);
+    println!(
+        "Frames per image: {} ({:.1}s)",
+        FRAMES_PER_IMAGE,
+        FRAMES_PER_IMAGE as f32 / 30.0
+    );
     println!();
 
     // Find images
@@ -172,7 +173,10 @@ fn main() {
     println!("EXIF Data:");
     println!("──────────");
     for image_path in &images {
-        println!("{}:", image_path.file_name().unwrap_or_default().to_string_lossy());
+        println!(
+            "{}:",
+            image_path.file_name().unwrap_or_default().to_string_lossy()
+        );
         print_exif_data(image_path);
         println!();
     }
@@ -183,8 +187,13 @@ fn main() {
     let encoder = Encoder::initialize_with_cuda(cuda_ctx).expect("Failed to initialize encoder");
 
     // Verify H.264 support
-    let encode_guids = encoder.get_encode_guids().expect("Failed to get encode GUIDs");
-    assert!(encode_guids.contains(&NV_ENC_CODEC_H264_GUID), "H.264 not supported");
+    let encode_guids = encoder
+        .get_encode_guids()
+        .expect("Failed to get encode GUIDs");
+    assert!(
+        encode_guids.contains(&NV_ENC_CODEC_H264_GUID),
+        "H.264 not supported"
+    );
 
     // Configure encoder (use low-latency to avoid frame buffering)
     let tuning_info = NV_ENC_TUNING_INFO::NV_ENC_TUNING_INFO_LOW_LATENCY;
@@ -209,8 +218,12 @@ fn main() {
         .start_session(NV_ENC_BUFFER_FORMAT_ARGB, init_params)
         .expect("Failed to start encoder session");
 
-    let mut input_buffer = session.create_input_buffer().expect("Failed to create input buffer");
-    let mut output_bitstream = session.create_output_bitstream().expect("Failed to create output bitstream");
+    let mut input_buffer = session
+        .create_input_buffer()
+        .expect("Failed to create input buffer");
+    let mut output_bitstream = session
+        .create_output_bitstream()
+        .expect("Failed to create output bitstream");
 
     // Open output file
     let mut out_file = OpenOptions::new()
@@ -253,7 +266,9 @@ fn main() {
             let encoded_data = lock.data();
             total_bytes += encoded_data.len();
 
-            out_file.write_all(encoded_data).expect("Failed to write frame");
+            out_file
+                .write_all(encoded_data)
+                .expect("Failed to write frame");
 
             frame_count += 1;
 
@@ -277,10 +292,20 @@ fn main() {
     println!("Encoding complete!");
     println!("═══════════════════════════════════════════════════");
     println!("Total frames:  {}", frame_count);
-    println!("Total time:    {:.2}s ({:.1} fps)", total_time.as_secs_f32(), frame_count as f32 / total_time.as_secs_f32());
-    println!("Total size:    {:.2} MB", total_bytes as f32 / 1024.0 / 1024.0);
+    println!(
+        "Total time:    {:.2}s ({:.1} fps)",
+        total_time.as_secs_f32(),
+        frame_count as f32 / total_time.as_secs_f32()
+    );
+    println!(
+        "Total size:    {:.2} MB",
+        total_bytes as f32 / 1024.0 / 1024.0
+    );
     println!("Duration:      {:.1}s", frame_count as f32 / 30.0);
-    println!("Bitrate:       {:.2} Mbps", (total_bytes as f32 * 8.0) / (frame_count as f32 / 30.0) / 1_000_000.0);
+    println!(
+        "Bitrate:       {:.2} Mbps",
+        (total_bytes as f32 * 8.0) / (frame_count as f32 / 30.0) / 1_000_000.0
+    );
     println!("═══════════════════════════════════════════════════");
     println!();
     println!("Output written to: exif_slideshow.h264");

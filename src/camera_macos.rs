@@ -25,7 +25,7 @@
 use anyhow::Result;
 use objc2::rc::Retained;
 use objc2::runtime::Bool;
-use objc2::{msg_send, class};
+use objc2::{class, msg_send};
 use objc2_av_foundation::{
     AVCaptureDevice, AVCaptureDeviceInput, AVCaptureSession, AVCaptureVideoDataOutput,
     AVMediaTypeVideo,
@@ -276,7 +276,11 @@ impl Camera {
                 // List all devices and pick by index
                 let devices = list_av_devices()?;
                 if (index as usize) >= devices.len() {
-                    anyhow::bail!("Camera index {} out of range (found {})", index, devices.len());
+                    anyhow::bail!(
+                        "Camera index {} out of range (found {})",
+                        index,
+                        devices.len()
+                    );
                 }
                 devices.into_iter().nth(index as usize).unwrap()
             };
@@ -490,7 +494,7 @@ fn bgra_to_rgb(bgra: &[u8], width: u32, height: u32, bytes_per_row: usize) -> Ve
             if idx + 2 < bgra.len() {
                 rgb.push(bgra[idx + 2]); // R
                 rgb.push(bgra[idx + 1]); // G
-                rgb.push(bgra[idx]);     // B
+                rgb.push(bgra[idx]); // B
             }
         }
     }
@@ -535,8 +539,9 @@ unsafe fn create_capture_delegate() -> Result<Retained<NSObject>> {
     let protocol =
         AnyProtocol::get(protocol_name).ok_or_else(|| anyhow::anyhow!("Protocol not found"))?;
 
-    let mut builder = ClassBuilder::new(class_name, NSObject::class())
-        .ok_or_else(|| anyhow::anyhow!("Failed to create class builder (class may already exist)"))?;
+    let mut builder = ClassBuilder::new(class_name, NSObject::class()).ok_or_else(|| {
+        anyhow::anyhow!("Failed to create class builder (class may already exist)")
+    })?;
     builder.add_protocol(protocol);
     let delegate_class = builder.register();
 

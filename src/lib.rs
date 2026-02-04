@@ -164,8 +164,8 @@ pub use moq::{
 
 #[cfg(feature = "iroh")]
 pub use iroh::{
-    IrohClientBuilder, IrohConnection, IrohServer, IrohServerBuilder, IrohStream,
-    CAMERA_ALPN, CAMERA_ALPN_H264, CAMERA_ALPN_HEVC, CAMERA_ALPN_JPEG, CAMERA_ALPN_AV1, DEFAULT_ALPN,
+    IrohClientBuilder, IrohConnection, IrohServer, IrohServerBuilder, IrohStream, CAMERA_ALPN,
+    CAMERA_ALPN_AV1, CAMERA_ALPN_H264, CAMERA_ALPN_HEVC, CAMERA_ALPN_JPEG, DEFAULT_ALPN,
 };
 
 #[cfg(feature = "serial")]

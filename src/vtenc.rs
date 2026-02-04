@@ -65,67 +65,79 @@ impl VtEncoder {
         let tx_for_callback = tx_arc.clone();
 
         // Build compression session with callback
-        let session = CompressionSessionBuilder::new(
-            width as i32,
-            height as i32,
-            codecs::video::H264,
-        )
-        .hardware_accelerated(true)
-        .low_latency(true)
-        .real_time(true)
-        .bitrate(bitrate as i64)
-        .frame_rate(fps as f64)
-        .keyframe_interval(fps as i32)
-        .profile_level(unsafe {
-            video_toolbox_sys::compression::kVTProfileLevel_H264_High_AutoLevel
-        })
-        .build(move |_output_ref, _source_ref, status: OSStatus, _info_flags, sample_buffer_ptr| {
-            if status != 0 || sample_buffer_ptr.is_null() {
-                return;
-            }
-
-            let sample_buffer = sample_buffer_ptr as CMSampleBufferRef;
-            let local_extractor = NalExtractor::new();
-
-            unsafe {
-                // Check if keyframe
-                let is_keyframe = local_extractor.is_keyframe(sample_buffer);
-
-                // Extract NAL units
-                let nals = match local_extractor.extract_nal_units(sample_buffer) {
-                    Ok(n) => n,
-                    Err(_) => return,
-                };
-
-                // Extract SPS/PPS on keyframes
-                let (sps, pps) = if is_keyframe {
-                    if let Some(fmt_desc) = local_extractor.get_format_description(sample_buffer) {
-                        if let Ok(params) = local_extractor.extract_parameter_sets(fmt_desc) {
-                            (Some(params.sps), Some(params.pps))
-                        } else {
-                            (None, None)
+        let session =
+            CompressionSessionBuilder::new(width as i32, height as i32, codecs::video::H264)
+                .hardware_accelerated(true)
+                .low_latency(true)
+                .real_time(true)
+                .bitrate(bitrate as i64)
+                .frame_rate(fps as f64)
+                .keyframe_interval(fps as i32)
+                .profile_level(unsafe {
+                    video_toolbox_sys::compression::kVTProfileLevel_H264_High_AutoLevel
+                })
+                .build(
+                    move |_output_ref,
+                          _source_ref,
+                          status: OSStatus,
+                          _info_flags,
+                          sample_buffer_ptr| {
+                        if status != 0 || sample_buffer_ptr.is_null() {
+                            return;
                         }
-                    } else {
-                        (None, None)
-                    }
-                } else {
-                    (None, None)
-                };
 
-                if !nals.is_empty() || sps.is_some() {
-                    let frame = EncodedFrame {
-                        nals,
-                        sps,
-                        pps,
-                        is_keyframe,
-                    };
-                    if let Ok(guard) = tx_for_callback.lock() {
-                        let _ = guard.send(frame);
-                    }
-                }
-            }
-        })
-        .map_err(|status| anyhow::anyhow!("Failed to create VT compression session: OSStatus {}", status))?;
+                        let sample_buffer = sample_buffer_ptr as CMSampleBufferRef;
+                        let local_extractor = NalExtractor::new();
+
+                        unsafe {
+                            // Check if keyframe
+                            let is_keyframe = local_extractor.is_keyframe(sample_buffer);
+
+                            // Extract NAL units
+                            let nals = match local_extractor.extract_nal_units(sample_buffer) {
+                                Ok(n) => n,
+                                Err(_) => return,
+                            };
+
+                            // Extract SPS/PPS on keyframes
+                            let (sps, pps) = if is_keyframe {
+                                if let Some(fmt_desc) =
+                                    local_extractor.get_format_description(sample_buffer)
+                                {
+                                    if let Ok(params) =
+                                        local_extractor.extract_parameter_sets(fmt_desc)
+                                    {
+                                        (Some(params.sps), Some(params.pps))
+                                    } else {
+                                        (None, None)
+                                    }
+                                } else {
+                                    (None, None)
+                                }
+                            } else {
+                                (None, None)
+                            };
+
+                            if !nals.is_empty() || sps.is_some() {
+                                let frame = EncodedFrame {
+                                    nals,
+                                    sps,
+                                    pps,
+                                    is_keyframe,
+                                };
+                                if let Ok(guard) = tx_for_callback.lock() {
+                                    let _ = guard.send(frame);
+                                }
+                            }
+                        }
+                    },
+                )
+                .map_err(|status| {
+                    anyhow::anyhow!(
+                        "Failed to create VT compression session: OSStatus {}",
+                        status
+                    )
+                })?;
 
         Ok(VtEncoder {
             session,
@@ -198,7 +210,10 @@ impl VtEncoder {
             core_foundation_sys::base::CFRelease(pixel_buffer as _);
 
             if status != 0 {
-                anyhow::bail!("VTCompressionSessionEncodeFrame failed: OSStatus {}", status);
+                anyhow::bail!(
+                    "VTCompressionSessionEncodeFrame failed: OSStatus {}",
+                    status
+                );
             }
 
             // Force synchronous output
@@ -277,8 +292,7 @@ impl VtEncoder {
             };
 
             // Cast to CVImageBufferRef — same underlying CoreFoundation type
-            let cv_pixel_buffer =
-                pixel_buffer_ptr as video_toolbox_sys::cv_types::CVImageBufferRef;
+            let cv_pixel_buffer = pixel_buffer_ptr as video_toolbox_sys::cv_types::CVImageBufferRef;
 
             let status = VTCompressionSessionEncodeFrame(
                 self.session,
@@ -348,8 +362,7 @@ impl VtEncoder {
                 epoch: 0,
             };
 
-            let cv_pixel_buffer =
-                pixel_buffer_ptr as video_toolbox_sys::cv_types::CVImageBufferRef;
+            let cv_pixel_buffer = pixel_buffer_ptr as video_toolbox_sys::cv_types::CVImageBufferRef;
 
             let status = VTCompressionSessionEncodeFrame(
                 self.session,
@@ -402,10 +415,10 @@ impl VtEncoder {
             let rgb_idx = i * 3;
             let bgra_idx = i * 4;
             if rgb_idx + 2 < rgb.len() {
-                bgra[bgra_idx] = rgb[rgb_idx + 2];     // B
+                bgra[bgra_idx] = rgb[rgb_idx + 2]; // B
                 bgra[bgra_idx + 1] = rgb[rgb_idx + 1]; // G
-                bgra[bgra_idx + 2] = rgb[rgb_idx];     // R
-                bgra[bgra_idx + 3] = 255;              // A
+                bgra[bgra_idx + 2] = rgb[rgb_idx]; // R
+                bgra[bgra_idx + 3] = 255; // A
             }
         }
 

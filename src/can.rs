@@ -281,31 +281,13 @@ impl CanSocket {
                 thread::spawn(move || {
                     while let Ok(cmd) = read_cmd_rx.recv() {
                         match cmd {
-                            ReadCommand::Read => {
-                                match reader_socket.read_frame() {
-                                    Ok(frame) => match CanFrame::try_from(frame) {
-                                        Ok(cf) => {
-                                            if read_tx
-                                                .send(ReadResult::Frame(AnyCanFrame::Can(cf)))
-                                                .is_err()
-                                            {
-                                                break;
-                                            }
-                                        }
-                                        Err(e) => {
-                                            if read_tx
-                                                .send(ReadResult::Error(e.to_string()))
-                                                .is_err()
-                                            {
-                                                break;
-                                            }
-                                        }
-                                    },
-                                    Err(e)
-                                        if e.kind() == std::io::ErrorKind::WouldBlock
-                                            || e.kind() == std::io::ErrorKind::TimedOut =>
-                                    {
-                                        if read_tx.send(ReadResult::Timeout).is_err() {
+                            ReadCommand::Read => match reader_socket.read_frame() {
+                                Ok(frame) => match CanFrame::try_from(frame) {
+                                    Ok(cf) => {
+                                        if read_tx
+                                            .send(ReadResult::Frame(AnyCanFrame::Can(cf)))
+                                            .is_err()
+                                        {
                                             break;
                                         }
                                     }
@@ -314,8 +296,21 @@ impl CanSocket {
                                             break;
                                         }
                                     }
+                                },
+                                Err(e)
+                                    if e.kind() == std::io::ErrorKind::WouldBlock
+                                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                                {
+                                    if read_tx.send(ReadResult::Timeout).is_err() {
+                                        break;
+                                    }
                                 }
-                            }
+                                Err(e) => {
+                                    if read_tx.send(ReadResult::Error(e.to_string())).is_err() {
+                                        break;
+                                    }
+                                }
+                            },
                             ReadCommand::Stop => break,
                         }
                     }
@@ -572,7 +567,8 @@ impl CanWriter {
 
     /// Write a CAN FD frame to the socket.
     pub async fn write_fd_frame(&mut self, frame: &CanFdFrame) -> Result<()> {
-        self.write_any_frame(AnyCanFrame::CanFd(frame.clone())).await
+        self.write_any_frame(AnyCanFrame::CanFd(frame.clone()))
+            .await
     }
 
     /// Write any CAN frame to the socket.

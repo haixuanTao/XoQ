@@ -74,7 +74,10 @@ impl VideoCapture {
             return Ok((false, py.None()));
         }
 
-        let mut guard = self.inner.lock().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
         let frame_result = if let Some(client) = guard.as_mut() {
             match client.read_frame() {

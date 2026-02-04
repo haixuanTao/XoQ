@@ -113,6 +113,8 @@ pub enum RawFormat {
     Mjpeg,
     /// BGRA (32-bit) - macOS AVFoundation native format
     Bgra,
+    /// Grey (Y8, 1 byte per pixel) - grayscale cameras
+    Grey,
 }
 
 impl Frame {
@@ -164,6 +166,7 @@ pub struct Camera {
 enum CaptureFormat {
     Mjpeg,
     Yuyv,
+    Grey,
 }
 
 // Camera is Send because v4l types are Send
@@ -257,24 +260,10 @@ impl Camera {
         // resolution via internal scaling.
         let yuyv_ok = device_supports_resolution(device, yuyv, width, height);
 
-        if !yuyv_ok {
-            eprintln!(
-                "[camera] YUYV not advertised at {}x{} — skipping",
-                width, height
-            );
-        }
-
-        // Log available formats for diagnostics
-        if let Ok(formats) = device.enum_formats() {
-            let names: Vec<String> = formats.iter().map(|d| d.fourcc.to_string()).collect();
-            eprintln!("[camera] Device formats: {:?}", names);
-        }
-
         if prefer_yuyv && yuyv_ok {
             format.fourcc = yuyv;
             if let Ok(f) = device.set_format(&format) {
                 if f.fourcc == yuyv {
-                    eprintln!("[camera] Using YUYV {}x{} size={}", f.width, f.height, f.size);
                     return Ok((f, CaptureFormat::Yuyv));
                 }
             }
@@ -285,7 +274,6 @@ impl Camera {
         format.fourcc = mjpg;
         if let Ok(f) = device.set_format(&format) {
             if f.fourcc == mjpg {
-                eprintln!("[camera] Using MJPEG {}x{} size={}", f.width, f.height, f.size);
                 return Ok((f, CaptureFormat::Mjpeg));
             }
         }
@@ -295,7 +283,6 @@ impl Camera {
             format.fourcc = yuyv;
             if let Ok(f) = device.set_format(&format) {
                 if f.fourcc == yuyv {
-                    eprintln!("[camera] Using YUYV (fallback) {}x{} size={}", f.width, f.height, f.size);
                     return Ok((f, CaptureFormat::Yuyv));
                 }
             }
@@ -303,14 +290,19 @@ impl Camera {
 
         // Accept whatever the camera gives us
         let f = device.format()?;
-        eprintln!(
-            "[camera] Fallback format: {} {}x{} size={}",
-            f.fourcc, f.width, f.height, f.size
-        );
         if f.fourcc == yuyv {
             Ok((f, CaptureFormat::Yuyv))
         } else {
-            Ok((f, CaptureFormat::Mjpeg))
+            // Check for greyscale variants (GREY, Y8, Y800)
+            let grey = FourCC::new(b"GREY");
+            let is_grey = f.fourcc == grey
+                || f.fourcc == FourCC::new(b"Y8  ")
+                || f.fourcc == FourCC::new(b"Y800");
+            if is_grey {
+                Ok((f, CaptureFormat::Grey))
+            } else {
+                Ok((f, CaptureFormat::Mjpeg))
+            }
         }
     }
 
@@ -329,6 +321,7 @@ impl Camera {
         match self.format {
             CaptureFormat::Mjpeg => "MJPEG",
             CaptureFormat::Yuyv => "YUYV",
+            CaptureFormat::Grey => "GREY",
         }
     }
 
@@ -344,18 +337,11 @@ impl Camera {
                 Self::yuyv_to_rgb(data, self.width, self.height)
             }
             CaptureFormat::Yuyv => {
-                // Driver lied: buffer is too small for YUYV.
-                eprintln!(
-                    "[camera] YUYV buffer {} bytes < expected {} — switching to MJPEG",
-                    data.len(),
-                    expected_yuyv
-                );
                 self.format = CaptureFormat::Mjpeg;
-                Self::decode_auto(data, self.width, self.height)?
+                Self::mjpeg_to_rgb(data, self.width, self.height)?
             }
-            CaptureFormat::Mjpeg => {
-                Self::decode_auto(data, self.width, self.height)?
-            }
+            CaptureFormat::Grey => Self::grey_to_rgb(data, self.width, self.height),
+            CaptureFormat::Mjpeg => Self::mjpeg_to_rgb(data, self.width, self.height)?,
         };
 
         Ok(Frame {
@@ -376,14 +362,10 @@ impl Camera {
         let raw_format = match self.format {
             CaptureFormat::Yuyv if data.len() >= expected_yuyv => RawFormat::Yuyv,
             CaptureFormat::Yuyv => {
-                eprintln!(
-                    "[camera] YUYV buffer {} bytes < expected {} — switching to MJPEG",
-                    data.len(),
-                    expected_yuyv
-                );
                 self.format = CaptureFormat::Mjpeg;
                 RawFormat::Mjpeg
             }
+            CaptureFormat::Grey => RawFormat::Grey,
             CaptureFormat::Mjpeg => RawFormat::Mjpeg,
         };
 
@@ -401,33 +383,9 @@ impl Camera {
         self.format == CaptureFormat::Yuyv
     }
 
-    /// Try to decode a buffer as MJPEG first; if that fails and the size
-    /// matches grayscale (1 byte/pixel), treat as Y8 greyscale.
-    fn decode_auto(data: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
-        // Try MJPEG first
-        match Self::mjpeg_to_rgb(data, width, height) {
-            Ok(rgb) => return Ok(rgb),
-            Err(_) => {}
-        }
-
-        // Check if it's grayscale (exactly 1 byte per pixel)
-        let grey_size = (width as usize) * (height as usize);
-        if data.len() == grey_size {
-            eprintln!(
-                "[camera] Buffer {} bytes = {}x{} — treating as grayscale (Y8)",
-                data.len(),
-                width,
-                height
-            );
-            return Ok(Self::grey_to_rgb(data, width, height));
-        }
-
-        anyhow::bail!(
-            "Cannot decode buffer: {} bytes (not MJPEG, not YUYV={}, not GREY={})",
-            data.len(),
-            (width as usize) * (height as usize) * 2,
-            grey_size
-        )
+    /// Check if the camera is capturing in greyscale (Y8) format.
+    pub fn is_grey(&self) -> bool {
+        self.format == CaptureFormat::Grey
     }
 
     fn mjpeg_to_rgb(data: &[u8], _width: u32, _height: u32) -> Result<Vec<u8>> {

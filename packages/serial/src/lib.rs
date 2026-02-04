@@ -68,8 +68,13 @@ impl Serial {
             return Err(PyRuntimeError::new_err("Port is closed"));
         }
         let len = data.len();
-        let client = self.inner.lock().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        client.write(&data).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let client = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        client
+            .write(&data)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         Ok(len)
     }
 
@@ -91,7 +96,10 @@ impl Serial {
         }
 
         // Read from network
-        let client = self.inner.lock().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let client = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         let mut data = vec![0u8; size];
 
         let result = if let Some(t) = self.timeout {
@@ -127,7 +135,10 @@ impl Serial {
         }
 
         // Keep reading until we get a newline
-        let client = self.inner.lock().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let client = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         let mut temp = vec![0u8; 256];
 
         loop {
@@ -221,7 +232,10 @@ impl Serial {
         }
 
         // Keep reading until we find terminator
-        let client = self.inner.lock().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let client = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         let mut temp = vec![0u8; 256];
 
         loop {

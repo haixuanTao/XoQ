@@ -27,9 +27,7 @@ impl SyncSerialClient {
         let runtime = tokio::runtime::Runtime::new()?;
 
         let (send, recv, conn) = runtime.block_on(async {
-            let conn = IrohClientBuilder::new()
-                .connect_str(server_id)
-                .await?;
+            let conn = IrohClientBuilder::new().connect_str(server_id).await?;
             let stream = conn.open_stream().await?;
             let (send, recv) = stream.split();
             Ok::<_, anyhow::Error>((send, recv, conn))
@@ -69,7 +67,9 @@ impl SyncSerialClient {
             match tokio::time::timeout(timeout, async {
                 let mut recv = self.recv.lock().await;
                 recv.read(buf).await
-            }).await {
+            })
+            .await
+            {
                 Ok(Ok(n)) => Ok(n),
                 Ok(Err(e)) => Err(e.into()),
                 Err(_) => Ok(None), // Timeout

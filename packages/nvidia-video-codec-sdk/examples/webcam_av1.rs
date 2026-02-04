@@ -31,21 +31,13 @@ use std::{
 use cudarc::driver::CudaContext;
 use nvidia_video_codec_sdk::{
     sys::nvEncodeAPI::{
-        NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_ABGR,
-        NV_ENC_CODEC_AV1_GUID,
-        NV_ENC_PRESET_P4_GUID,
-        NV_ENC_TUNING_INFO,
+        NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_ABGR, NV_ENC_CODEC_AV1_GUID,
+        NV_ENC_PRESET_P4_GUID, NV_ENC_TUNING_INFO,
     },
-    Encoder,
-    EncoderInitParams,
+    Encoder, EncoderInitParams,
 };
 use v4l::{
-    buffer::Type,
-    io::mmap::Stream,
-    io::traits::CaptureStream,
-    video::Capture,
-    Device,
-    FourCC,
+    buffer::Type, io::mmap::Stream, io::traits::CaptureStream, video::Capture, Device, FourCC,
 };
 
 const WIDTH: u32 = 640;
@@ -121,14 +113,14 @@ fn yuyv_to_abgr(yuyv: &[u8], abgr: &mut [u8], width: u32, height: u32) {
             let abgr_idx0 = (y * width + x) * 4;
             let abgr_idx1 = (y * width + x + 1) * 4;
 
-            abgr[abgr_idx0] = r0;      // R
-            abgr[abgr_idx0 + 1] = g0;  // G
-            abgr[abgr_idx0 + 2] = b0;  // B
+            abgr[abgr_idx0] = r0; // R
+            abgr[abgr_idx0 + 1] = g0; // G
+            abgr[abgr_idx0 + 2] = b0; // B
             abgr[abgr_idx0 + 3] = 255; // A
 
-            abgr[abgr_idx1] = r1;      // R
-            abgr[abgr_idx1 + 1] = g1;  // G
-            abgr[abgr_idx1 + 2] = b1;  // B
+            abgr[abgr_idx1] = r1; // R
+            abgr[abgr_idx1 + 1] = g1; // G
+            abgr[abgr_idx1 + 2] = b1; // B
             abgr[abgr_idx1 + 3] = 255; // A
         }
     }
@@ -136,7 +128,9 @@ fn yuyv_to_abgr(yuyv: &[u8], abgr: &mut [u8], width: u32, height: u32) {
 
 fn main() {
     // Get video device from command line or use default
-    let device_path = env::args().nth(1).unwrap_or_else(|| "/dev/video0".to_string());
+    let device_path = env::args()
+        .nth(1)
+        .unwrap_or_else(|| "/dev/video0".to_string());
 
     println!("Webcam AV1 Encoding Example");
     println!("============================");
@@ -173,8 +167,7 @@ fn main() {
 
     // Initialize CUDA
     println!("Initializing CUDA...");
-    let cuda_ctx =
-        CudaContext::new(0).expect("Failed to create CUDA context. Is CUDA installed?");
+    let cuda_ctx = CudaContext::new(0).expect("Failed to create CUDA context. Is CUDA installed?");
 
     // Initialize encoder
     println!("Initializing NVENC...");
@@ -244,8 +237,7 @@ fn main() {
         .expect("Failed to create output bitstream");
 
     // Open output file
-    let mut out_file =
-        File::create("webcam_av1_output.ivf").expect("Failed to create output file");
+    let mut out_file = File::create("webcam_av1_output.ivf").expect("Failed to create output file");
 
     // Write IVF header
     write_ivf_header(&mut out_file, WIDTH, HEIGHT, 30).expect("Failed to write IVF header");
@@ -308,7 +300,8 @@ fn main() {
             let recent_times = &encode_times[encode_times.len().saturating_sub(30)..];
             let recent_sizes = &packet_sizes[packet_sizes.len().saturating_sub(30)..];
             let avg_latency: f32 = recent_times.iter().sum::<f32>() / recent_times.len() as f32;
-            let avg_size: f32 = recent_sizes.iter().sum::<usize>() as f32 / recent_sizes.len() as f32;
+            let avg_size: f32 =
+                recent_sizes.iter().sum::<usize>() as f32 / recent_sizes.len() as f32;
 
             println!(
                 "Frame {:>3}/{} | {:.1} fps | {:.2}ms | {:.1} KB",
@@ -325,7 +318,8 @@ fn main() {
 
     // Calculate overall statistics
     let avg_latency: f32 = encode_times.iter().sum::<f32>() / encode_times.len() as f32;
-    let avg_packet_size: f32 = packet_sizes.iter().sum::<usize>() as f32 / packet_sizes.len() as f32;
+    let avg_packet_size: f32 =
+        packet_sizes.iter().sum::<usize>() as f32 / packet_sizes.len() as f32;
     let total_size: usize = packet_sizes.iter().sum();
 
     println!();
@@ -338,8 +332,14 @@ fn main() {
     );
     println!("Avg latency:   {:.2} ms", avg_latency);
     println!("Avg packet:    {:.1} KB", avg_packet_size / 1024.0);
-    println!("Total size:    {:.2} MB", total_size as f32 / 1024.0 / 1024.0);
-    println!("Bitrate:       {:.2} Mbps", (total_size as f32 * 8.0) / total_time.as_secs_f32() / 1_000_000.0);
+    println!(
+        "Total size:    {:.2} MB",
+        total_size as f32 / 1024.0 / 1024.0
+    );
+    println!(
+        "Bitrate:       {:.2} Mbps",
+        (total_size as f32 * 8.0) / total_time.as_secs_f32() / 1_000_000.0
+    );
     println!("═══════════════════════════════════════════════════");
     println!();
     println!("Output written to: webcam_av1_output.ivf");

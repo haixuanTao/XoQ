@@ -129,7 +129,11 @@ impl Message {
                 "Arbitration ID 0x{:X} exceeds maximum 0x{:X} for {} ID",
                 arbitration_id,
                 max_id,
-                if is_extended_id { "extended" } else { "standard" }
+                if is_extended_id {
+                    "extended"
+                } else {
+                    "standard"
+                }
             )));
         }
 
@@ -205,7 +209,13 @@ impl Bus {
         kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<Self> {
         // These parameters are accepted for python-can compatibility but ignored for remote connections
-        let _ = (interface, bitrate, data_bitrate, receive_own_messages, kwargs);
+        let _ = (
+            interface,
+            bitrate,
+            data_bitrate,
+            receive_own_messages,
+            kwargs,
+        );
 
         let channel = channel.ok_or_else(|| PyValueError::new_err("channel is required"))?;
 
@@ -246,7 +256,10 @@ impl Bus {
         let _ = timeout; // TODO: implement send timeout
 
         // RemoteCanSocket methods are already blocking (have internal runtime)
-        let mut socket = self.socket.lock().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let mut socket = self
+            .socket
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
         let result = if msg.is_fd {
             let flags = xoq::CanFdFlags {
@@ -282,7 +295,10 @@ impl Bus {
         let start = Instant::now();
 
         // RemoteCanSocket methods are already blocking (have internal runtime)
-        let mut socket = self.socket.lock().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let mut socket = self
+            .socket
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
         // Set socket timeout if specified
         if let Some(t) = timeout {

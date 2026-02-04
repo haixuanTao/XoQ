@@ -51,9 +51,7 @@ impl SyncCameraClient {
     /// falls back to JPEG otherwise.
     pub fn connect_moq(path: &str) -> Result<Self> {
         let runtime = tokio::runtime::Runtime::new()?;
-        let client = runtime.block_on(
-            CameraClientBuilder::new().moq(path).connect(),
-        )?;
+        let client = runtime.block_on(CameraClientBuilder::new().moq(path).connect())?;
         Ok(Self {
             inner: client,
             runtime,
@@ -76,14 +74,10 @@ impl SyncCameraClient {
 
     fn reconnect(&mut self) -> Result<()> {
         let client = match &self.transport {
-            SyncTransport::Iroh(id) => {
-                self.runtime.block_on(CameraClient::connect(id))?
-            }
-            SyncTransport::Moq(path) => {
-                self.runtime.block_on(
-                    CameraClientBuilder::new().moq(path).connect(),
-                )?
-            }
+            SyncTransport::Iroh(id) => self.runtime.block_on(CameraClient::connect(id))?,
+            SyncTransport::Moq(path) => self
+                .runtime
+                .block_on(CameraClientBuilder::new().moq(path).connect())?,
         };
         self.inner = client;
         Ok(())

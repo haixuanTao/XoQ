@@ -60,7 +60,12 @@ fn parse_annex_b(data: &[u8]) -> Vec<(u8, Vec<u8>)> {
 
     while i < len {
         // Look for next start code
-        let found_start_code = if i + 3 < len && data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 0 && data[i + 3] == 1 {
+        let found_start_code = if i + 3 < len
+            && data[i] == 0
+            && data[i + 1] == 0
+            && data[i + 2] == 0
+            && data[i + 3] == 1
+        {
             Some(4)
         } else if i + 2 < len && data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
             Some(3)
@@ -131,7 +136,10 @@ fn annex_b_to_avcc(data: &[u8]) -> (Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>) {
 // ============================================================================
 
 /// Parse a CMAF init segment to extract SPS, PPS, width, and height from the avcC box.
-#[cfg_attr(not(any(feature = "videotoolbox", feature = "nvenc")), allow(dead_code))]
+#[cfg_attr(
+    not(any(feature = "videotoolbox", feature = "nvenc")),
+    allow(dead_code)
+)]
 fn parse_cmaf_init_segment(data: &[u8]) -> Result<(Vec<u8>, Vec<u8>, u32, u32)> {
     parse_cmaf_init_boxes(data)
         .ok_or_else(|| anyhow::anyhow!("avcC box not found in CMAF init segment"))
@@ -141,15 +149,20 @@ fn parse_cmaf_init_segment(data: &[u8]) -> Result<(Vec<u8>, Vec<u8>, u32, u32)> 
 fn parse_cmaf_init_boxes(data: &[u8]) -> Option<(Vec<u8>, Vec<u8>, u32, u32)> {
     let mut pos = 0;
     while pos + 8 <= data.len() {
-        let box_size = u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+        let box_size =
+            u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         let box_type = &data[pos + 4..pos + 8];
 
         if box_size == 0 || pos + box_size > data.len() {
             break;
         }
 
-        if box_type == b"moov" || box_type == b"trak" || box_type == b"mdia"
-           || box_type == b"minf" || box_type == b"stbl" {
+        if box_type == b"moov"
+            || box_type == b"trak"
+            || box_type == b"mdia"
+            || box_type == b"minf"
+            || box_type == b"stbl"
+        {
             if let Some(result) = parse_cmaf_init_boxes(&data[pos + 8..pos + box_size]) {
                 return Some(result);
             }
@@ -169,13 +182,19 @@ fn parse_cmaf_init_boxes(data: &[u8]) -> Option<(Vec<u8>, Vec<u8>, u32, u32)> {
             //   ... then 44 more bytes before nested boxes (total 78 bytes of data)
             let avc1_width = if pos + 34 <= data.len() {
                 u16::from_be_bytes([data[pos + 32], data[pos + 33]]) as u32
-            } else { 0 };
+            } else {
+                0
+            };
             let avc1_height = if pos + 36 <= data.len() {
                 u16::from_be_bytes([data[pos + 34], data[pos + 35]]) as u32
-            } else { 0 };
+            } else {
+                0
+            };
 
             if pos + 86 < pos + box_size {
-                if let Some((sps, pps, w, h)) = parse_cmaf_init_boxes(&data[pos + 86..pos + box_size]) {
+                if let Some((sps, pps, w, h)) =
+                    parse_cmaf_init_boxes(&data[pos + 86..pos + box_size])
+                {
                     // Use avc1 dimensions if avcc returned 0,0
                     let width = if w > 0 { w } else { avc1_width };
                     let height = if h > 0 { h } else { avc1_height };
@@ -249,13 +268,17 @@ fn parse_avcc_box(data: &[u8]) -> Option<(Vec<u8>, Vec<u8>, u32, u32)> {
 
 /// Parse a CMAF media segment to extract NAL unit data from the mdat box.
 /// Returns raw NAL unit byte vectors (without length prefixes).
-#[cfg_attr(not(any(feature = "videotoolbox", feature = "nvenc")), allow(dead_code))]
+#[cfg_attr(
+    not(any(feature = "videotoolbox", feature = "nvenc")),
+    allow(dead_code)
+)]
 fn parse_cmaf_media_segment(data: &[u8]) -> Result<Vec<Vec<u8>>> {
     let mut nal_units = Vec::new();
     let mut pos = 0;
 
     while pos + 8 <= data.len() {
-        let box_size = u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+        let box_size =
+            u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         let box_type = &data[pos + 4..pos + 8];
 
         if box_size == 0 || pos + box_size > data.len() {
@@ -416,7 +439,11 @@ impl CameraClientBuilder {
 
                     tracing::info!(
                         "Connected with {} encoding",
-                        if encoding == StreamEncoding::H264 { "H.264" } else { "JPEG" }
+                        if encoding == StreamEncoding::H264 {
+                            "H.264"
+                        } else {
+                            "JPEG"
+                        }
                     );
 
                     let stream = conn.open_stream().await?;
@@ -439,8 +466,11 @@ impl CameraClientBuilder {
                     });
                 }
                 Err(e) => {
-                    tracing::debug!("Failed to connect with ALPN {:?}: {}",
-                        String::from_utf8_lossy(alpn), e);
+                    tracing::debug!(
+                        "Failed to connect with ALPN {:?}: {}",
+                        String::from_utf8_lossy(alpn),
+                        e
+                    );
                     last_error = Some(e);
                 }
             }
@@ -449,32 +479,40 @@ impl CameraClientBuilder {
         Err(last_error.unwrap_or_else(|| anyhow::anyhow!("No ALPN protocols available")))
     }
 
-    async fn connect_moq_inner(path: &str, relay_url: Option<&str>, prefer_h264: bool) -> Result<CameraClientInner> {
+    async fn connect_moq_inner(
+        path: &str,
+        relay_url: Option<&str>,
+        prefer_h264: bool,
+    ) -> Result<CameraClientInner> {
         use crate::moq::MoqBuilder;
 
-        eprintln!("[xoq] MoQ connecting to '{}' (prefer_h264={})", path, prefer_h264);
+        tracing::debug!(
+            "[xoq] MoQ connecting to '{}' (prefer_h264={})",
+            path,
+            prefer_h264
+        );
 
         let mut builder = MoqBuilder::new().path(path);
         if let Some(url) = relay_url {
             builder = builder.relay(url);
         }
         let mut conn = builder.connect_subscriber().await?;
-        eprintln!("[xoq] MoQ connected to relay, subscribing to track...");
+        tracing::debug!("[xoq] MoQ connected to relay, subscribing to track...");
 
         // Try "video" (H.264 CMAF) track first if H.264 is preferred
         let (track, encoding) = if prefer_h264 {
             match conn.subscribe_track("video").await {
                 Ok(Some(t)) => {
-                    eprintln!("[xoq] Subscribed to H.264 CMAF 'video' track");
+                    tracing::info!("[xoq] Subscribed to H.264 CMAF 'video' track");
                     (t, StreamEncoding::H264)
                 }
                 _ => {
-                    eprintln!("[xoq] No 'video' track, falling back to 'camera' (JPEG)");
+                    tracing::debug!("[xoq] No 'video' track, falling back to 'camera' (JPEG)");
                     let t = conn
                         .subscribe_track("camera")
                         .await?
                         .ok_or_else(|| anyhow::anyhow!("No camera track found"))?;
-                    eprintln!("[xoq] Subscribed to JPEG 'camera' track");
+                    tracing::info!("[xoq] Subscribed to JPEG 'camera' track");
                     (t, StreamEncoding::Jpeg)
                 }
             }
@@ -659,7 +697,10 @@ impl CameraClient {
                         if frame.width != width || frame.height != height {
                             tracing::warn!(
                                 "Frame dimension mismatch: expected {}x{}, got {}x{}",
-                                width, height, frame.width, frame.height
+                                width,
+                                height,
+                                frame.width,
+                                frame.height
                             );
                         }
 
@@ -680,25 +721,13 @@ impl CameraClient {
                                             if retries > 200 {
                                                 anyhow::bail!("No frame available after retries");
                                             }
-                                            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                                            tokio::time::sleep(std::time::Duration::from_millis(5))
+                                                .await;
                                         }
                                     }
                                 };
 
                                 cmaf_reads += 1;
-                                // Log first few reads and box types for debugging
-                                if cmaf_reads <= 5 {
-                                    let box_type = if data.len() >= 8 {
-                                        String::from_utf8_lossy(&data[4..8]).to_string()
-                                    } else {
-                                        "???".to_string()
-                                    };
-                                    eprintln!(
-                                        "[xoq] CMAF read #{}: {} bytes, first box: '{}', hex: {:02x?}",
-                                        cmaf_reads, data.len(), box_type,
-                                        &data[..data.len().min(16)]
-                                    );
-                                }
 
                                 if !*cmaf_initialized {
                                     // Parse init segment (may be standalone or prepended to keyframe)
@@ -719,14 +748,20 @@ impl CameraClient {
                                             *cmaf_width = w;
                                             *cmaf_height = h;
 
-                                            eprintln!("[xoq] CMAF H.264 decoder initialized ({}x{})", w, h);
+                                            tracing::info!(
+                                                "[xoq] CMAF H.264 decoder initialized ({}x{})",
+                                                w,
+                                                h
+                                            );
 
                                             // Check if this data also contains media segments (late-joiner combined packet)
                                             match parse_cmaf_media_segment(&data) {
                                                 Ok(nal_units) if !nal_units.is_empty() => {
                                                     let mut h264_data = Vec::new();
                                                     for nal in &nal_units {
-                                                        h264_data.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+                                                        h264_data.extend_from_slice(&[
+                                                            0x00, 0x00, 0x00, 0x01,
+                                                        ]);
                                                         h264_data.extend_from_slice(nal);
                                                     }
                                                     let mut full = annex_b.clone();
@@ -734,7 +769,12 @@ impl CameraClient {
 
                                                     if let Some(dec) = decoder {
                                                         let mut dec = dec.lock().await;
-                                                        return Ok(dec.decode(&full, *cmaf_width, *cmaf_height, 0)?);
+                                                        return Ok(dec.decode(
+                                                            &full,
+                                                            *cmaf_width,
+                                                            *cmaf_height,
+                                                            0,
+                                                        )?);
                                                     }
                                                 }
                                                 _ => {
@@ -744,7 +784,7 @@ impl CameraClient {
                                         }
                                         Err(e) => {
                                             if cmaf_reads <= 10 {
-                                                eprintln!(
+                                                tracing::debug!(
                                                     "[xoq] CMAF read #{}: not init segment ({}) - waiting...",
                                                     cmaf_reads, e
                                                 );
@@ -774,7 +814,12 @@ impl CameraClient {
 
                                 if let Some(dec) = decoder {
                                     let mut dec = dec.lock().await;
-                                    return Ok(dec.decode(&h264_data, *cmaf_width, *cmaf_height, 0)?);
+                                    return Ok(dec.decode(
+                                        &h264_data,
+                                        *cmaf_width,
+                                        *cmaf_height,
+                                        0,
+                                    )?);
                                 } else {
                                     anyhow::bail!("H.264 decoder not initialized");
                                 }
@@ -812,8 +857,8 @@ impl CameraClient {
 #[cfg(feature = "nvenc")]
 mod nvdec {
     use super::*;
-    use cudarc::driver::CudaContext;
     use cudarc::driver::sys::CUresult;
+    use cudarc::driver::CudaContext;
     use nvidia_video_codec_sdk::sys::cuviddec::*;
     use nvidia_video_codec_sdk::sys::nvcuvid::*;
     use std::ffi::c_void;
@@ -904,7 +949,13 @@ mod nvdec {
             }
         }
 
-        pub fn decode(&mut self, h264_data: &[u8], width: u32, height: u32, timestamp: u64) -> Result<Frame> {
+        pub fn decode(
+            &mut self,
+            h264_data: &[u8],
+            width: u32,
+            height: u32,
+            timestamp: u64,
+        ) -> Result<Frame> {
             self.display_width = width;
             self.display_height = height;
             self.ensure_decoder()?;
@@ -938,7 +989,13 @@ mod nvdec {
                     timestamp_us: decoded.timestamp,
                 })
             } else {
-                anyhow::bail!("NvdecDecoder: no frame decoded (data_len={}, {}x{}, frame_count={})", h264_data.len(), width, height, self.decoded_frames.len());
+                anyhow::bail!(
+                    "NvdecDecoder: no frame decoded (data_len={}, {}x{}, frame_count={})",
+                    h264_data.len(),
+                    width,
+                    height,
+                    self.decoded_frames.len()
+                );
             }
         }
 
@@ -998,7 +1055,8 @@ mod nvdec {
             create_info.ChromaFormat = format.chroma_format;
             create_info.ulCreationFlags = 0;
             create_info.OutputFormat = cudaVideoSurfaceFormat::cudaVideoSurfaceFormat_NV12;
-            create_info.DeinterlaceMode = cudaVideoDeinterlaceMode::cudaVideoDeinterlaceMode_Adaptive;
+            create_info.DeinterlaceMode =
+                cudaVideoDeinterlaceMode::cudaVideoDeinterlaceMode_Adaptive;
             create_info.ulTargetWidth = format.coded_width as u64;
             create_info.ulTargetHeight = format.coded_height as u64;
             create_info.ulNumOutputSurfaces = 2;
@@ -1024,11 +1082,16 @@ mod nvdec {
                 decoder.display_height = (da.bottom - da.top) as u32;
             }
 
-            eprintln!(
+            tracing::debug!(
                 "[nvdec] sequence: coded={}x{}, display_area=({},{},{},{}), display={}x{}",
-                format.coded_width, format.coded_height,
-                da.left, da.top, da.right, da.bottom,
-                decoder.display_width, decoder.display_height,
+                format.coded_width,
+                format.coded_height,
+                da.left,
+                da.top,
+                da.right,
+                da.bottom,
+                decoder.display_width,
+                decoder.display_height,
             );
 
             format.min_num_decode_surfaces as i32
@@ -1098,11 +1161,12 @@ mod nvdec {
             // Copy Y plane
             let mut y_errors = 0u32;
             for y in 0..height {
-                let src = (dev_ptr + (y as u64) * (pitch as u64)) as cudarc::driver::sys::CUdeviceptr;
+                let src =
+                    (dev_ptr + (y as u64) * (pitch as u64)) as cudarc::driver::sys::CUdeviceptr;
                 let dst = unsafe { nv12_data.as_mut_ptr().add(y * width) as *mut c_void };
                 let r = unsafe { cudarc::driver::sys::cuMemcpyDtoH_v2(dst, src, width) };
                 if r != CUDA_SUCCESS && y_errors == 0 {
-                    eprintln!("[nvdec] cuMemcpyDtoH Y row {} failed: {:?}", y, r);
+                    tracing::error!("[nvdec] cuMemcpyDtoH Y row {} failed: {:?}", y, r);
                     y_errors += 1;
                 }
             }
@@ -1111,31 +1175,16 @@ mod nvdec {
             let uv_height = height / 2;
             let mut uv_errors = 0u32;
             for y in 0..uv_height {
-                let src = (dev_ptr + ((height + y) as u64) * (pitch as u64)) as cudarc::driver::sys::CUdeviceptr;
-                let dst = unsafe { nv12_data.as_mut_ptr().add(width * height + y * width) as *mut c_void };
+                let src = (dev_ptr + ((height + y) as u64) * (pitch as u64))
+                    as cudarc::driver::sys::CUdeviceptr;
+                let dst = unsafe {
+                    nv12_data.as_mut_ptr().add(width * height + y * width) as *mut c_void
+                };
                 let r = unsafe { cudarc::driver::sys::cuMemcpyDtoH_v2(dst, src, width) };
                 if r != CUDA_SUCCESS && uv_errors == 0 {
-                    eprintln!("[nvdec] cuMemcpyDtoH UV row {} failed: {:?}", y, r);
+                    tracing::error!("[nvdec] cuMemcpyDtoH UV row {} failed: {:?}", y, r);
                     uv_errors += 1;
                 }
-            }
-
-            // Validate NV12 data on first frame
-            static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-            if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                let y_nonzero = nv12_data[..width * height].iter().filter(|&&b| b != 0).count();
-                let uv_nonzero = nv12_data[width * height..].iter().filter(|&&b| b != 0).count();
-                let y_sample: Vec<u8> = nv12_data[..20.min(width)].to_vec();
-                let uv_sample: Vec<u8> = nv12_data[width * height..width * height + 20.min(width)].to_vec();
-                eprintln!(
-                    "[nvdec] coded={}x{}, pitch={}, Y_nonzero={}/{}, UV_nonzero={}/{}, Y_errs={}, UV_errs={}",
-                    width, height, pitch,
-                    y_nonzero, width * height,
-                    uv_nonzero, width * uv_height,
-                    y_errors, uv_errors,
-                );
-                eprintln!("[nvdec] Y[0..20]={:?}", y_sample);
-                eprintln!("[nvdec] UV[0..20]={:?}", uv_sample);
             }
 
             // Unmap
@@ -1235,7 +1284,8 @@ mod vtdec {
     #[link(name = "CoreVideo", kind = "framework")]
     extern "C" {
         fn CVPixelBufferLockBaseAddress(pixel_buffer: CVPixelBufferRef, lock_flags: u64) -> i32;
-        fn CVPixelBufferUnlockBaseAddress(pixel_buffer: CVPixelBufferRef, unlock_flags: u64) -> i32;
+        fn CVPixelBufferUnlockBaseAddress(pixel_buffer: CVPixelBufferRef, unlock_flags: u64)
+            -> i32;
         fn CVPixelBufferGetBaseAddress(pixel_buffer: CVPixelBufferRef) -> *mut c_void;
         fn CVPixelBufferGetWidth(pixel_buffer: CVPixelBufferRef) -> usize;
         fn CVPixelBufferGetHeight(pixel_buffer: CVPixelBufferRef) -> usize;
@@ -1275,7 +1325,13 @@ mod vtdec {
             })
         }
 
-        fn ensure_session(&mut self, sps: &[u8], pps: &[u8], width: u32, height: u32) -> Result<()> {
+        fn ensure_session(
+            &mut self,
+            sps: &[u8],
+            pps: &[u8],
+            width: u32,
+            height: u32,
+        ) -> Result<()> {
             // If SPS/PPS haven't changed and session exists, reuse it
             if !self.session.is_null() && self.sps == sps && self.pps == pps {
                 return Ok(());
@@ -1321,14 +1377,8 @@ mod vtdec {
                 let empty_pairs: Vec<(CFString, CFString)> = Vec::new();
                 let iosurface_value = CFDictionary::from_CFType_pairs(&empty_pairs);
 
-                let keys = vec![
-                    pixel_format_key.as_CFType(),
-                    iosurface_key.as_CFType(),
-                ];
-                let values = vec![
-                    pixel_format_value.as_CFType(),
-                    iosurface_value.as_CFType(),
-                ];
+                let keys = vec![pixel_format_key.as_CFType(), iosurface_key.as_CFType()];
+                let values = vec![pixel_format_value.as_CFType(), iosurface_value.as_CFType()];
 
                 let dest_attrs = CFDictionary::from_CFType_pairs(
                     &keys
@@ -1381,28 +1431,6 @@ mod vtdec {
             // Parse Annex B to extract NALs, SPS/PPS, and AVCC data
             let (avcc_data, sps, pps) = annex_b_to_avcc(h264_data);
 
-            if self.frame_count < 3 {
-                let nals = parse_annex_b(h264_data);
-                let nal_types: Vec<u8> = nals.iter().map(|(t, _)| *t).collect();
-                eprintln!(
-                    "[vtdec] frame {}: h264={} bytes, avcc={} bytes, NALs={:?}, sps={}, pps={}, {}x{}",
-                    self.frame_count, h264_data.len(), avcc_data.len(), nal_types,
-                    sps.as_ref().map(|s| s.len()).unwrap_or(0),
-                    pps.as_ref().map(|s| s.len()).unwrap_or(0),
-                    width, height,
-                );
-                if let Some(ref s) = sps {
-                    eprintln!("[vtdec] SPS ({} bytes): {:02x?}", s.len(), &s[..s.len().min(32)]);
-                }
-            }
-            // Dump first 3 H.264 frames for offline analysis
-            if self.frame_count < 3 {
-                let path = format!("/tmp/xoq_frame_{}.h264", self.frame_count);
-                if let Ok(()) = std::fs::write(&path, h264_data) {
-                    eprintln!("[vtdec] dumped {} bytes to {}", h264_data.len(), path);
-                }
-            }
-
             // Resolve current SPS/PPS: use newly parsed if available, else cached
             let current_sps = sps.unwrap_or_else(|| self.sps.clone());
             let current_pps = pps.unwrap_or_else(|| self.pps.clone());
@@ -1410,14 +1438,21 @@ mod vtdec {
             if current_sps.is_empty() || current_pps.is_empty() {
                 // No SPS/PPS yet and none in this frame - can't decode
                 if self.session.is_null() {
-                    anyhow::bail!("VtDecoder: no SPS/PPS available and no session initialized (frame {})", self.frame_count);
+                    anyhow::bail!(
+                        "VtDecoder: no SPS/PPS available and no session initialized (frame {})",
+                        self.frame_count
+                    );
                 }
             } else {
                 self.ensure_session(&current_sps, &current_pps, width, height)?;
             }
 
             if avcc_data.is_empty() {
-                anyhow::bail!("VtDecoder: frame {} has no slice data (only SPS/PPS), h264_data len={}", self.frame_count, h264_data.len());
+                anyhow::bail!(
+                    "VtDecoder: frame {} has no slice data (only SPS/PPS), h264_data len={}",
+                    self.frame_count,
+                    h264_data.len()
+                );
             }
 
             // Clear the frame slot
@@ -1505,15 +1540,12 @@ mod vtdec {
                 CFRelease(sample_buffer as CFTypeRef);
                 // avcc_buf (Box) dropped here, safe after sync decode
 
-                if self.frame_count < 3 {
-                    eprintln!(
-                        "[vtdec] decode status={}, info_flags=0x{:x} (frame {})",
-                        status, info_flags, self.frame_count
-                    );
-                }
-
                 if status != 0 {
-                    anyhow::bail!("VideoToolbox decode failed: status={}, info_flags=0x{:x}", status, info_flags);
+                    anyhow::bail!(
+                        "VideoToolbox decode failed: status={}, info_flags=0x{:x}",
+                        status,
+                        info_flags
+                    );
                 }
             }
 
@@ -1562,11 +1594,11 @@ mod vtdec {
         _duration: CMTime,
     ) {
         if status != 0 {
-            eprintln!("[vtdec] callback FAILED with status: {}", status);
+            tracing::error!("[vtdec] callback failed with status: {}", status);
             return;
         }
         if image_buffer.is_null() {
-            eprintln!("[vtdec] callback: null image buffer");
+            tracing::warn!("[vtdec] callback: null image buffer");
             return;
         }
 
@@ -1577,33 +1609,11 @@ mod vtdec {
             let width = CVPixelBufferGetWidth(image_buffer);
             let height = CVPixelBufferGetHeight(image_buffer);
             let bytes_per_row = CVPixelBufferGetBytesPerRow(image_buffer);
-            let pixel_format = CVPixelBufferGetPixelFormatType(image_buffer);
-
-            // Log first few frames for diagnostics
-            static VT_LOG_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-            if VT_LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3 {
-                let fmt_str = match pixel_format {
-                    0x42475241 => "BGRA",
-                    0x34323076 => "420v (NV12-biplanar)",
-                    0x34323066 => "420f (NV12-fullrange)",
-                    _ => "unknown",
-                };
-                eprintln!(
-                    "[vtdec] callback: {}x{}, bytes_per_row={}, format=0x{:08x} ({}), base_addr={:?}",
-                    width, height, bytes_per_row, pixel_format, fmt_str,
-                    base_address,
-                );
-                if !base_address.is_null() {
-                    let sample = std::slice::from_raw_parts(base_address as *const u8, 16.min(bytes_per_row));
-                    eprintln!("[vtdec] first 16 bytes: {:?}", sample);
-                }
-            }
+            let _pixel_format = CVPixelBufferGetPixelFormatType(image_buffer);
 
             if !base_address.is_null() && width > 0 && height > 0 {
-                let src = std::slice::from_raw_parts(
-                    base_address as *const u8,
-                    bytes_per_row * height,
-                );
+                let src =
+                    std::slice::from_raw_parts(base_address as *const u8, bytes_per_row * height);
 
                 // Convert BGRA to RGB
                 let mut rgb_data = Vec::with_capacity(width * height * 3);
@@ -1738,7 +1748,7 @@ mod tests {
         data.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]); // start code
         data.extend_from_slice(&[0x68, 0xCE, 0x38, 0x80]); // PPS (type 8)
         data.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]); // start code
-        data.extend_from_slice(&[0x65, 0x88, 0x84]);        // IDR (type 5)
+        data.extend_from_slice(&[0x65, 0x88, 0x84]); // IDR (type 5)
 
         let nals = parse_annex_b(&data);
         assert_eq!(nals.len(), 3);
@@ -1755,9 +1765,9 @@ mod tests {
         // 3-byte start codes
         let mut data = Vec::new();
         data.extend_from_slice(&[0x00, 0x00, 0x01]); // 3-byte start code
-        data.extend_from_slice(&[0x67, 0x42]);        // SPS
+        data.extend_from_slice(&[0x67, 0x42]); // SPS
         data.extend_from_slice(&[0x00, 0x00, 0x01]); // 3-byte start code
-        data.extend_from_slice(&[0x68, 0xCE]);        // PPS
+        data.extend_from_slice(&[0x68, 0xCE]); // PPS
 
         let nals = parse_annex_b(&data);
         assert_eq!(nals.len(), 2);
@@ -1780,7 +1790,7 @@ mod tests {
         data.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
         data.extend_from_slice(&[0x68, 0xCE, 0x38, 0x80]); // PPS
         data.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
-        data.extend_from_slice(&[0x65, 0x88, 0x84]);        // IDR
+        data.extend_from_slice(&[0x65, 0x88, 0x84]); // IDR
 
         let (avcc, sps, pps) = annex_b_to_avcc(&data);
 

@@ -12,13 +12,7 @@ mod session;
 
 pub use api::{EncodeAPI, ENCODE_API};
 pub use buffer::{
-    Bitstream,
-    BitstreamLock,
-    Buffer,
-    BufferLock,
-    EncoderInput,
-    EncoderOutput,
-    RegisteredResource,
+    Bitstream, BitstreamLock, Buffer, BufferLock, EncoderInput, EncoderOutput, RegisteredResource,
 };
 pub use encoder::{Encoder, EncoderInitParams};
 pub use result::{EncodeError, ErrorKind};

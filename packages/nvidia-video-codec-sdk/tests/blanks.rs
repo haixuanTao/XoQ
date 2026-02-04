@@ -1,20 +1,12 @@
 use std::{
-    collections::VecDeque,
-    fs::OpenOptions,
-    io::Write,
-    path::Path,
-    sync::Arc,
-    thread,
+    collections::VecDeque, fs::OpenOptions, io::Write, path::Path, sync::Arc, thread,
     time::Duration,
 };
 
 use cudarc::driver::CudaContext;
 use nvidia_video_codec_sdk::{
     sys::nvEncodeAPI::{GUID, NV_ENC_BUFFER_FORMAT, NV_ENC_CODEC_H264_GUID},
-    EncodeError,
-    Encoder,
-    EncoderInitParams,
-    ErrorKind,
+    EncodeError, Encoder, EncoderInitParams, ErrorKind,
 };
 
 fn encode_blanks<P: AsRef<Path>>(

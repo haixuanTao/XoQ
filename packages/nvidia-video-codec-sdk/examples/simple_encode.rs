@@ -16,13 +16,10 @@ use std::{fs::OpenOptions, io::Write};
 use cudarc::driver::CudaContext;
 use nvidia_video_codec_sdk::{
     sys::nvEncodeAPI::{
-        NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_ARGB,
-        NV_ENC_CODEC_H264_GUID,
-        NV_ENC_PRESET_P4_GUID,
-        NV_ENC_TUNING_INFO,
+        NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_ARGB, NV_ENC_CODEC_H264_GUID,
+        NV_ENC_PRESET_P4_GUID, NV_ENC_TUNING_INFO,
     },
-    Encoder,
-    EncoderInitParams,
+    Encoder, EncoderInitParams,
 };
 
 const WIDTH: u32 = 1280;
@@ -43,10 +40,10 @@ fn generate_frame(buf: &mut [u8], width: u32, height: u32, frame: u32, total_fra
             let green = ((y as f32 / height as f32) * 255.0) as u8;
             let blue = (time * 255.0) as u8;
 
-            buf[pixel] = blue;     // B
+            buf[pixel] = blue; // B
             buf[pixel + 1] = green; // G
-            buf[pixel + 2] = red;   // R
-            buf[pixel + 3] = 255;   // A
+            buf[pixel + 2] = red; // R
+            buf[pixel + 3] = 255; // A
         }
     }
 }

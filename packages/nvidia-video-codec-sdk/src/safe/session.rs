@@ -10,22 +10,12 @@ use std::fmt::Debug;
 use super::{api::ENCODE_API, encoder::Encoder, result::EncodeError};
 use crate::{
     sys::nvEncodeAPI::{
-        GUID,
-        NV_ENC_BUFFER_FORMAT,
-        NV_ENC_CODEC_AV1_GUID,
-        NV_ENC_CODEC_H264_GUID,
-        NV_ENC_CODEC_HEVC_GUID,
-        NV_ENC_CODEC_PIC_PARAMS,
-        NV_ENC_PIC_PARAMS,
-        NV_ENC_PIC_PARAMS_AV1,
-        NV_ENC_PIC_PARAMS_H264,
-        NV_ENC_PIC_PARAMS_HEVC,
-        NV_ENC_PIC_PARAMS_VER,
-        NV_ENC_PIC_STRUCT,
+        GUID, NV_ENC_BUFFER_FORMAT, NV_ENC_CODEC_AV1_GUID, NV_ENC_CODEC_H264_GUID,
+        NV_ENC_CODEC_HEVC_GUID, NV_ENC_CODEC_PIC_PARAMS, NV_ENC_PIC_PARAMS, NV_ENC_PIC_PARAMS_AV1,
+        NV_ENC_PIC_PARAMS_H264, NV_ENC_PIC_PARAMS_HEVC, NV_ENC_PIC_PARAMS_VER, NV_ENC_PIC_STRUCT,
         NV_ENC_PIC_TYPE,
     },
-    EncoderInput,
-    EncoderOutput,
+    EncoderInput, EncoderOutput,
 };
 
 /// An encoding session to create input/output buffers and encode frames.
