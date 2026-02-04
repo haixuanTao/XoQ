@@ -8,7 +8,7 @@
 //! awaits. CAN-to-network writes are batched for throughput.
 
 use anyhow::Result;
-use socketcan::{CanFilter, EmbeddedFrame, Frame, Socket, SocketOptions};
+use socketcan::{EmbeddedFrame, Frame, Socket};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -59,21 +59,6 @@ fn can_reader_thread(
         if let Err(e) = socket.set_read_timeout(timeout) {
             let _ = init_tx.send(Err(anyhow::anyhow!("Failed to set read timeout: {}", e)));
             return;
-        }
-        // Filter out broadcast/sync frames (0x7ff, 0x1) that lose CAN arbitration
-        // and cause read_frame() to block for ~90ms waiting for bus access.
-        // Uses inverted filters with join mode: frame must NOT match 0x7ff AND NOT match 0x1.
-        if let Err(e) = socket.set_join_filters(true) {
-            tracing::warn!("Failed to set join filters: {}", e);
-        }
-        let reject_filters = [
-            CanFilter::new_inverted(0x7ff, 0x7ff),
-            CanFilter::new_inverted(0x1, 0x7ff),
-        ];
-        if let Err(e) = socket.set_filters(&reject_filters) {
-            tracing::warn!("Failed to set CAN filters: {}", e);
-        } else {
-            tracing::info!("CAN reader: filtering out id=0x7ff and id=0x1");
         }
         let _ = init_tx.send(Ok(()));
 
@@ -172,20 +157,6 @@ fn can_reader_thread(
         if let Err(e) = socket.set_read_timeout(timeout) {
             let _ = init_tx.send(Err(anyhow::anyhow!("Failed to set read timeout: {}", e)));
             return;
-        }
-        // Filter out broadcast/sync frames (0x7ff, 0x1) that lose CAN arbitration
-        // and cause read_frame() to block for ~90ms waiting for bus access.
-        if let Err(e) = socket.set_join_filters(true) {
-            tracing::warn!("Failed to set join filters: {}", e);
-        }
-        let reject_filters = [
-            CanFilter::new_inverted(0x7ff, 0x7ff),
-            CanFilter::new_inverted(0x1, 0x7ff),
-        ];
-        if let Err(e) = socket.set_filters(&reject_filters) {
-            tracing::warn!("Failed to set CAN filters: {}", e);
-        } else {
-            tracing::info!("CAN reader: filtering out id=0x7ff and id=0x1");
         }
         let _ = init_tx.send(Ok(()));
 
@@ -981,9 +952,9 @@ impl CanServer {
     ) -> Result<Self> {
         // CAN→Network channel (small to avoid batching stale responses)
         let (can_read_tx, can_read_rx) = tokio::sync::mpsc::channel::<AnyCanFrame>(16);
-        // Network→CAN channel — sized to hold several control cycles (8 motors each)
-        // so network bursts after jitter don't drop frames before the jitter buffer sees them.
-        let (can_write_tx, can_write_rx) = tokio::sync::mpsc::channel::<AnyCanFrame>(128);
+        // Network→CAN channel — capacity 1 so backpressure propagates immediately
+        // to the client via QUIC flow control.
+        let (can_write_tx, can_write_rx) = tokio::sync::mpsc::channel::<AnyCanFrame>(1);
 
         // Shared counter: writer increments on each successful CAN write,
         // reader reads it during gaps to see if writes were happening concurrently.
@@ -1252,15 +1223,9 @@ async fn handle_connection(
                                                 frame.id(),
                                                 consumed
                                             );
-                                            match can_write_tx.try_send(frame) {
-                                                Ok(()) => {}
-                                                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                                                    tracing::warn!("CAN write channel full, dropping frame");
-                                                }
-                                                Err(_) => {
-                                                    tracing::error!("CAN writer thread died");
-                                                    break;
-                                                }
+                                            if can_write_tx.send(frame).await.is_err() {
+                                                tracing::error!("CAN writer thread died");
+                                                break;
                                             }
                                             pending.drain(..consumed);
                                         }
