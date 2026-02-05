@@ -324,9 +324,21 @@ impl SerialPortBuilder {
                 if let Some(t) = token {
                     builder = builder.token(&t);
                 }
-                let conn = builder.connect_duplex().await?;
+                let mut conn = builder.connect_duplex().await?;
+
+                // Create tracks once at setup (like moq_serial_client example)
+                let writer = conn.create_track("serial-in");
+                tracing::info!("MoQ: publishing on track 'serial-in'");
+
+                let reader = conn.subscribe_track("serial-out").await?.ok_or_else(|| {
+                    anyhow::anyhow!("MoQ: failed to subscribe to 'serial-out' track")
+                })?;
+                tracing::info!("MoQ: subscribed to track 'serial-out'");
+
                 Ok::<_, anyhow::Error>(ClientInner::Moq {
-                    conn: Arc::new(tokio::sync::Mutex::new(conn)),
+                    writer: Arc::new(Mutex::new(writer)),
+                    reader: Arc::new(Mutex::new(reader)),
+                    _conn: conn,
                 })
             })?,
         };
@@ -349,7 +361,9 @@ enum ClientInner {
         use_datagrams: bool,
     },
     Moq {
-        conn: Arc<tokio::sync::Mutex<crate::moq::MoqConnection>>,
+        writer: Arc<Mutex<crate::moq::MoqTrackWriter>>,
+        reader: Arc<Mutex<crate::moq::MoqTrackReader>>,
+        _conn: crate::moq::MoqConnection,
     },
 }
 
@@ -465,16 +479,21 @@ impl RemoteSerialPort {
                     use_datagrams,
                 } => {
                     if *use_datagrams {
+                        tracing::warn!(
+                            "send_datagram: {} bytes, max_size={:?}",
+                            data.len(),
+                            conn.max_datagram_size()
+                        );
                         conn.send_datagram(Bytes::copy_from_slice(data))?;
+                        tracing::warn!("send_datagram: OK");
                     } else {
                         let mut s = stream.lock().await;
                         s.write(data).await?;
                     }
                 }
-                ClientInner::Moq { conn } => {
-                    let mut c = conn.lock().await;
-                    let mut track = c.create_track("serial");
-                    track.write(data.to_vec());
+                ClientInner::Moq { writer, .. } => {
+                    let mut w = writer.lock().await;
+                    w.write(data.to_vec());
                 }
             }
             Ok::<_, anyhow::Error>(())
@@ -501,17 +520,12 @@ impl RemoteSerialPort {
                         let mut s = stream.lock().await;
                         s.read(buf).await
                     }
-                    ClientInner::Moq { conn } => {
-                        let mut c = conn.lock().await;
-                        if let Some(reader) = c.subscribe_track("serial").await? {
-                            let mut reader = reader;
-                            if let Some(data) = reader.read().await? {
-                                let n = std::cmp::min(data.len(), buf.len());
-                                buf[..n].copy_from_slice(&data[..n]);
-                                Ok(Some(n))
-                            } else {
-                                Ok(None)
-                            }
+                    ClientInner::Moq { reader, .. } => {
+                        let mut r = reader.lock().await;
+                        if let Some(data) = r.read().await? {
+                            let n = std::cmp::min(data.len(), buf.len());
+                            buf[..n].copy_from_slice(&data[..n]);
+                            Ok(Some(n))
                         } else {
                             Ok(None)
                         }

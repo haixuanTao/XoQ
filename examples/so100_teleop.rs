@@ -25,26 +25,37 @@ const SERVO_IDS: [u8; 5] = [1, 2, 3, 4, 5];
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env().add_directive("info".parse()?),
+            tracing_subscriber::EnvFilter::from_default_env().add_directive("debug".parse()?),
         )
         .init();
 
     let args: Vec<String> = env::args().collect();
-    if args.len() < 3 {
-        println!("Usage: so100_teleop <local-serial-port> <remote-server-id>");
-        println!("\nExample:");
+    let use_moq = args.iter().any(|a| a == "--moq");
+    // Filter out the --moq flag for positional arg parsing
+    let positional: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
+
+    if positional.len() < 3 {
+        println!("Usage: so100_teleop <local-serial-port> <remote-server-id-or-moq-path> [--moq]");
+        println!("\nExamples:");
+        println!("  # Iroh P2P (default):");
         println!("  cargo run --example so100_teleop --features \"iroh,serial\" -- /dev/ttyUSB0 <server-id>");
+        println!("  # MOQ relay:");
+        println!("  cargo run --example so100_teleop --features \"iroh,serial\" -- /dev/ttyUSB0 anon/xoq-test --moq");
         println!("\nThis reads from the local leader arm and sends to the remote follower arm.");
         return Ok(());
     }
 
-    let local_port = &args[1];
-    let remote_id = &args[2];
+    let local_port = positional[1];
+    let remote_id = positional[2];
 
     println!("SO100 Teleoperation");
     println!("===================");
-    println!("Leader (local):   {}", local_port);
+    println!("Leader (local):    {}", local_port);
     println!("Follower (remote): {}", remote_id);
+    println!(
+        "Transport:         {}",
+        if use_moq { "MOQ relay" } else { "iroh P2P" }
+    );
     println!();
 
     // Open local serial port for leader arm
@@ -54,14 +65,22 @@ fn main() -> Result<()> {
         .open()?;
 
     // Open remote serial port for follower arm
-    // Use datagrams for writes: each servo command is sent as a separate QUIC datagram,
-    // avoiding stream coalescing that batches multiple commands into one packet.
-    // Responses still use the reliable stream.
     println!("Connecting to remote follower arm...");
-    let follower_port = xoq::serialport::new(remote_id)
-        .timeout(Duration::from_millis(1000))
-        .use_datagrams(true)
-        .open()?;
+    let follower_port = if use_moq {
+        // MOQ relay: tracks already preserve message boundaries, no batching issue
+        println!("Using MOQ relay transport");
+        xoq::serialport::new(remote_id)
+            .with_moq("https://cdn.moq.dev")
+            .timeout(Duration::from_millis(1000))
+            .open()?
+    } else {
+        // Iroh P2P with datagrams for writes to avoid stream coalescing
+        println!("Using iroh P2P transport");
+        xoq::serialport::new(remote_id)
+            .timeout(Duration::from_millis(1000))
+            .use_datagrams(true)
+            .open()?
+    };
 
     // Create controllers
     let mut leader = Sts3215Controller::new()
