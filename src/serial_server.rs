@@ -1,7 +1,6 @@
 //! Serial server - bridges local serial port to remote clients over iroh P2P.
 
 use anyhow::Result;
-use bytes::Bytes;
 use iroh::Watcher;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -171,7 +170,6 @@ impl Server {
 
         let serial_read_rx = self.serial_read_rx.clone();
         let serial_write_tx = self.serial_write_tx.clone();
-        let serial_write_tx_dgram = self.serial_write_tx.clone();
 
         // Drain any stale data from the channel before starting
         // This prevents old data from confusing a reconnecting client
@@ -186,16 +184,11 @@ impl Server {
             }
         }
 
-        // Wrap connection in Arc so datagram tasks can share it
-        let conn = Arc::new(conn);
-
         // Use connection's cancellation token for graceful shutdown (ensures lock is released)
         let cancel_token = conn.cancellation_token();
 
         // Spawn task: serial -> network (event-driven via channel)
-        // Sends via both stream and datagram so clients using either mode get data.
         let cancel_clone = cancel_token.clone();
-        let conn_clone = conn.clone();
         let serial_to_net = tokio::spawn(async move {
             tracing::debug!("Serial->Network bridge task started");
             let mut rx = serial_read_rx.lock().await;
@@ -209,17 +202,13 @@ impl Server {
                         match data {
                             Some(data) => {
                                 tracing::debug!("Serial -> Network: {} bytes", data.len());
-                                // Send via stream (for stream-mode clients)
                                 if let Err(e) = send.write_all(&data).await {
-                                    tracing::debug!("Network stream write error: {}", e);
+                                    tracing::debug!("Network write error: {}", e);
                                     break;
                                 }
+                                // quinn's flush() is a no-op — yield to let
+                                // connection task send the data immediately
                                 tokio::task::yield_now().await;
-                                // Also send via datagram (for datagram-mode clients).
-                                // Errors here are non-fatal (client may not use datagrams).
-                                if let Err(e) = conn_clone.send_datagram(Bytes::copy_from_slice(&data)) {
-                                    tracing::trace!("Datagram send (non-fatal): {}", e);
-                                }
                             }
                             None => break,
                         }
@@ -227,40 +216,10 @@ impl Server {
                 }
             }
             tracing::debug!("Serial->Network bridge task ended");
+            // Lock is automatically released here when rx guard is dropped
         });
 
-        // Spawn task: datagram -> serial (for datagram-mode clients)
-        let cancel_clone2 = cancel_token.clone();
-        let conn_clone2 = conn.clone();
-        let dgram_to_serial = tokio::spawn(async move {
-            tracing::debug!("Datagram->Serial bridge task started");
-            loop {
-                tokio::select! {
-                    _ = cancel_clone2.cancelled() => {
-                        tracing::debug!("Datagram->Serial task cancelled");
-                        break;
-                    }
-                    result = conn_clone2.recv_datagram() => {
-                        match result {
-                            Ok(data) => {
-                                tracing::debug!("Datagram -> Serial: {} bytes", data.len());
-                                if serial_write_tx_dgram.send(data.to_vec()).is_err() {
-                                    tracing::error!("Serial writer thread died (datagram path)");
-                                    break;
-                                }
-                            }
-                            Err(e) => {
-                                tracing::debug!("Datagram recv ended: {}", e);
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            tracing::debug!("Datagram->Serial bridge task ended");
-        });
-
-        // Main task: stream -> serial
+        // Main task: network -> serial
         let mut buf = vec![0u8; 1024];
         loop {
             match recv.read(&mut buf).await {
@@ -292,9 +251,8 @@ impl Server {
 
         // Signal graceful shutdown instead of abort (allows lock to be released)
         cancel_token.cancel();
-        // Wait for tasks to finish and release locks
+        // Wait for task to finish and release the lock
         let _ = serial_to_net.await;
-        let _ = dgram_to_serial.await;
         Ok(())
     }
 }

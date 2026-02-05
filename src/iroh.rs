@@ -76,10 +76,7 @@ impl congestion::ControllerFactory for NoopControllerFactory {
 /// - keep_alive: 1s
 fn low_latency_transport_config() -> TransportConfig {
     let mut config = TransportConfig::default();
-    // Set to 150ms to match real WiFi round-trip with power-save batching.
-    // Too low (10ms) causes aggressive PTO probes every ~8ms, wasting bandwidth
-    // and keeping smoothed_rtt artificially low via fast probe ACKs.
-    config.initial_rtt(Duration::from_millis(150));
+    config.initial_rtt(Duration::from_millis(10));
     config.keep_alive_interval(Some(Duration::from_secs(1)));
 
     // Request peer to ACK immediately (every packet, max 1ms delay)
@@ -91,9 +88,6 @@ fn low_latency_transport_config() -> TransportConfig {
     // Disable congestion control — never block poll_transmit due to cwnd.
     // Safe on trusted LANs; avoids 100-200ms stalls when a single packet is lost.
     config.congestion_controller_factory(Arc::new(NoopControllerFactory));
-
-    // Enable QUIC datagrams (unreliable, unordered) for latency-sensitive data.
-    config.datagram_receive_buffer_size(Some(65535));
 
     config
 }
