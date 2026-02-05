@@ -19,7 +19,6 @@
 use anyhow::Result;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
 use crate::can_types::wire;
@@ -245,16 +244,10 @@ impl CanSocketBuilder {
                     _conn: conn,
                 })
             })?,
-            Transport::Moq { relay, token } => runtime.block_on(async {
-                let mut builder = crate::moq::MoqBuilder::new()
-                    .relay(&relay)
-                    .path(&self.server_id);
-                if let Some(t) = token {
-                    builder = builder.token(&t);
-                }
-                let conn = builder.connect_duplex().await?;
+            Transport::Moq { relay, token: _ } => runtime.block_on(async {
+                let stream = crate::moq::MoqStream::connect_to(&relay, &self.server_id).await?;
                 Ok::<_, anyhow::Error>(ClientInner::Moq {
-                    conn: Arc::new(tokio::sync::Mutex::new(conn)),
+                    stream: Arc::new(tokio::sync::Mutex::new(stream)),
                 })
             })?,
         };
@@ -279,7 +272,7 @@ enum ClientInner {
         _conn: IrohConnection,
     },
     Moq {
-        conn: Arc<tokio::sync::Mutex<crate::moq::MoqConnection>>,
+        stream: Arc<tokio::sync::Mutex<crate::moq::MoqStream>>,
     },
 }
 
@@ -390,10 +383,9 @@ impl RemoteCanSocket {
                     // task pack the data into a UDP packet before we return
                     tokio::time::sleep(std::time::Duration::from_micros(100)).await;
                 }
-                ClientInner::Moq { conn } => {
-                    let mut c = conn.lock().await;
-                    let mut track = c.create_track("can");
-                    track.write(data.to_vec());
+                ClientInner::Moq { stream } => {
+                    let mut s = stream.lock().await;
+                    s.write(data.to_vec());
                 }
             }
             Ok::<_, anyhow::Error>(())
@@ -440,15 +432,10 @@ impl RemoteCanSocket {
                             None => Ok(None),
                         }
                     }
-                    ClientInner::Moq { conn } => {
-                        let mut c = conn.lock().await;
-                        if let Some(reader) = c.subscribe_track("can").await? {
-                            let mut reader = reader;
-                            if let Some(data) = reader.read().await? {
-                                Ok(Some(data.to_vec()))
-                            } else {
-                                Ok(None)
-                            }
+                    ClientInner::Moq { stream } => {
+                        let mut s = stream.lock().await;
+                        if let Some(data) = s.read().await? {
+                            Ok(Some(data.to_vec()))
                         } else {
                             Ok(None)
                         }
@@ -554,10 +541,9 @@ impl CanBusSocket for RemoteCanSocket {
                     // quinn's flush() is a no-op — yield to let connection task send
                     tokio::time::sleep(std::time::Duration::from_micros(100)).await;
                 }
-                ClientInner::Moq { conn } => {
-                    let mut c = conn.lock().await;
-                    let mut track = c.create_track("can");
-                    track.write(encoded.to_vec());
+                ClientInner::Moq { stream } => {
+                    let mut s = stream.lock().await;
+                    s.write(encoded.to_vec());
                 }
             }
             Ok::<_, anyhow::Error>(())
@@ -586,15 +572,10 @@ impl CanBusSocket for RemoteCanSocket {
                             None => Ok(None),
                         }
                     }
-                    ClientInner::Moq { conn } => {
-                        let mut c = conn.lock().await;
-                        if let Some(reader) = c.subscribe_track("can").await? {
-                            let mut reader = reader;
-                            if let Some(data) = reader.read().await? {
-                                Ok(Some(data.to_vec()))
-                            } else {
-                                Ok(None)
-                            }
+                    ClientInner::Moq { stream } => {
+                        let mut s = stream.lock().await;
+                        if let Some(data) = s.read().await? {
+                            Ok(Some(data.to_vec()))
                         } else {
                             Ok(None)
                         }

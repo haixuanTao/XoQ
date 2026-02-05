@@ -151,55 +151,6 @@ impl Default for MoqBuilder {
     }
 }
 
-/// Wait for a broadcast to appear (checking existing first, then waiting for announcements)
-/// and subscribe to a track on it.
-async fn wait_and_subscribe_track(
-    origin: &mut moq_lite::OriginConsumer,
-    track_name: &str,
-) -> Result<Option<MoqTrackReader>> {
-    eprintln!("[xoq] Waiting for track '{}'...", track_name);
-
-    let broadcast = if let Some(bc) = origin.consume_broadcast("") {
-        eprintln!("[xoq] Found existing broadcast for track '{}'", track_name);
-        bc
-    } else {
-        eprintln!("[xoq] No broadcast yet, waiting for announcement...");
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                match origin.announced().await {
-                    Some((_path, Some(bc))) => break Ok(bc),
-                    Some((_path, None)) => continue, // unannounce, skip
-                    None => {
-                        break Err(anyhow::anyhow!(
-                            "Origin closed while waiting for track '{}'",
-                            track_name
-                        ))
-                    }
-                }
-            }
-        })
-        .await
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "Timed out waiting for track '{}' after 10s. \
-                 Is the other side publishing to this path?",
-                track_name
-            )
-        })??
-    };
-
-    eprintln!(
-        "[xoq] Found broadcast, subscribing to track '{}'",
-        track_name
-    );
-    let track_info = moq_lite::Track {
-        name: track_name.to_string(),
-        priority: 0,
-    };
-    let track = broadcast.subscribe_track(&track_info);
-    Ok(Some(MoqTrackReader { track }))
-}
-
 /// A duplex MoQ connection that can publish and subscribe
 pub struct MoqConnection {
     _session: Session,
@@ -223,9 +174,23 @@ impl MoqConnection {
         }
     }
 
-    /// Subscribe to a track, waiting for the broadcast to appear via announcements.
+    /// Subscribe to a track if the broadcast is already available.
+    ///
+    /// Returns an error if no broadcast is found. AnnounceInit is already processed
+    /// by the time connect() returns, so this checks immediately.
     pub async fn subscribe_track(&mut self, track_name: &str) -> Result<Option<MoqTrackReader>> {
-        wait_and_subscribe_track(&mut self.subscribe_origin, track_name).await
+        if let Some(broadcast) = self.subscribe_origin.consume_broadcast("") {
+            let track_info = moq_lite::Track {
+                name: track_name.to_string(),
+                priority: 0,
+            };
+            let track = broadcast.subscribe_track(&track_info);
+            return Ok(Some(MoqTrackReader { track }));
+        }
+        Err(anyhow::anyhow!(
+            "No broadcast found for track '{}'. Publisher may not be running yet.",
+            track_name
+        ))
     }
 
     /// Get the subscribe origin for manual handling
@@ -268,9 +233,32 @@ pub struct MoqSubscriber {
 }
 
 impl MoqSubscriber {
-    /// Subscribe to a track, waiting for the broadcast to appear via announcements.
+    /// Try to subscribe to a track without waiting.
+    ///
+    /// Returns `Some(reader)` if the broadcast is already available (from AnnounceInit),
+    /// or `None` if no broadcast has been announced yet.
+    pub fn try_subscribe_track(&mut self, track_name: &str) -> Option<MoqTrackReader> {
+        let broadcast = self.origin.consume_broadcast("")?;
+        let track_info = moq_lite::Track {
+            name: track_name.to_string(),
+            priority: 0,
+        };
+        let track = broadcast.subscribe_track(&track_info);
+        Some(MoqTrackReader { track })
+    }
+
+    /// Subscribe to a track if the broadcast is already available.
+    ///
+    /// Returns an error if no broadcast is found. AnnounceInit is already processed
+    /// by the time connect() returns, so this checks immediately.
     pub async fn subscribe_track(&mut self, track_name: &str) -> Result<Option<MoqTrackReader>> {
-        wait_and_subscribe_track(&mut self.origin, track_name).await
+        if let Some(reader) = self.try_subscribe_track(track_name) {
+            return Ok(Some(reader));
+        }
+        Err(anyhow::anyhow!(
+            "No broadcast found for track '{}'. Publisher may not be running yet.",
+            track_name
+        ))
     }
 
     /// Get the origin for manual handling
@@ -361,9 +349,15 @@ impl MoqStream {
     }
 
     /// Connect as client to a specific relay.
+    ///
+    /// Publishes immediately on `path/c2s`, then reconnects the subscriber in a
+    /// loop until the server's broadcast appears on `path/s2c`. Each reconnection
+    /// gets a fresh `AnnounceInit` snapshot from the relay, which is the only
+    /// reliable discovery mechanism.
     pub async fn connect_to(relay: &str, path: &str) -> Result<Self> {
         eprintln!("[xoq] MoqStream client connecting to {}/{}...", relay, path);
 
+        // 1. Connect publisher and start pushing data immediately
         let mut publisher = MoqBuilder::new()
             .relay(relay)
             .path(&format!("{}/c2s", path))
@@ -372,16 +366,32 @@ impl MoqStream {
         let writer = publisher.create_track("data");
         eprintln!("[xoq] MoqStream client publishing on {}/c2s", path);
 
-        let mut subscriber = MoqBuilder::new()
-            .relay(relay)
-            .path(&format!("{}/s2c", path))
-            .connect_subscriber()
-            .await?;
-        let reader = subscriber
-            .subscribe_track("data")
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("No data track on {}/s2c", path))?;
-        eprintln!("[xoq] MoqStream client subscribed to {}/s2c", path);
+        // 2. Reconnect subscriber until the other side's broadcast appears
+        let sub_path = format!("{}/s2c", path);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let (subscriber, reader) = loop {
+            let mut sub = MoqBuilder::new()
+                .relay(relay)
+                .path(&sub_path)
+                .connect_subscriber()
+                .await?;
+            if let Some(reader) = sub.try_subscribe_track("data") {
+                eprintln!("[xoq] MoqStream client subscribed to {}/s2c", path);
+                break (sub, reader);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(anyhow::anyhow!(
+                    "Timed out waiting for server to publish on {}/s2c. Is the server running?",
+                    path
+                ));
+            }
+            eprintln!(
+                "[xoq] MoqStream client: no broadcast yet on {}/s2c, reconnecting...",
+                path
+            );
+            drop(sub);
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        };
 
         Ok(Self {
             writer,
@@ -397,9 +407,14 @@ impl MoqStream {
     }
 
     /// Accept as server at a specific relay.
+    ///
+    /// Publishes immediately on `path/s2c`, then reconnects the subscriber in a
+    /// loop until the client's broadcast appears on `path/c2s`. Each reconnection
+    /// gets a fresh `AnnounceInit` snapshot from the relay.
     pub async fn accept_at(relay: &str, path: &str) -> Result<Self> {
         eprintln!("[xoq] MoqStream server connecting to {}/{}...", relay, path);
 
+        // 1. Connect publisher and start pushing data immediately
         let mut publisher = MoqBuilder::new()
             .relay(relay)
             .path(&format!("{}/s2c", path))
@@ -408,16 +423,32 @@ impl MoqStream {
         let writer = publisher.create_track("data");
         eprintln!("[xoq] MoqStream server publishing on {}/s2c", path);
 
-        let mut subscriber = MoqBuilder::new()
-            .relay(relay)
-            .path(&format!("{}/c2s", path))
-            .connect_subscriber()
-            .await?;
-        let reader = subscriber
-            .subscribe_track("data")
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("No data track on {}/c2s", path))?;
-        eprintln!("[xoq] MoqStream server subscribed to {}/c2s", path);
+        // 2. Reconnect subscriber until the other side's broadcast appears
+        let sub_path = format!("{}/c2s", path);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let (subscriber, reader) = loop {
+            let mut sub = MoqBuilder::new()
+                .relay(relay)
+                .path(&sub_path)
+                .connect_subscriber()
+                .await?;
+            if let Some(reader) = sub.try_subscribe_track("data") {
+                eprintln!("[xoq] MoqStream server subscribed to {}/c2s", path);
+                break (sub, reader);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(anyhow::anyhow!(
+                    "Timed out waiting for client to publish on {}/c2s. Is the client running?",
+                    path
+                ));
+            }
+            eprintln!(
+                "[xoq] MoqStream server: no broadcast yet on {}/c2s, reconnecting...",
+                path
+            );
+            drop(sub);
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        };
 
         Ok(Self {
             writer,
