@@ -359,94 +359,97 @@ impl MoqStream {
 
     /// Connect as client to a specific relay.
     pub async fn connect_to(relay: &str, path: &str) -> Result<Self> {
-        let mut conn = MoqBuilder::new()
-            .relay(relay)
-            .path(path)
-            .connect_duplex()
-            .await?;
-
-        // Publish our track first, then subscribe.
-        // The server waits for our announcement before publishing its own,
-        // so our track must be announced first.
-        let writer = conn.create_track("data-up");
-        tracing::info!("MoqStream client: publishing 'data-up'");
-
-        tracing::info!("MoqStream client: waiting for 'data-down'...");
-        let reader = Self::wait_for_track(&mut conn.subscribe_origin, "data-down").await?;
-        tracing::info!("MoqStream client: connected");
-
-        Ok(Self {
-            writer,
-            reader,
-            _conn: conn,
-        })
+        Self::open(relay, path, "data-up", "data-down").await
     }
 
     /// Accept as server. Publishes "data-down", subscribes to "data-up".
-    ///
-    /// Waits for a client to connect (no timeout).
     pub async fn accept(path: &str) -> Result<Self> {
         Self::accept_at("https://cdn.moq.dev", path).await
     }
 
     /// Accept as server at a specific relay.
     pub async fn accept_at(relay: &str, path: &str) -> Result<Self> {
-        let mut conn = MoqBuilder::new()
-            .relay(relay)
-            .path(path)
-            .connect_duplex()
-            .await?;
+        Self::open(relay, path, "data-down", "data-up").await
+    }
 
-        // Wait for client's track FIRST (no timeout — server waits forever).
-        // This ensures we're subscribed before the client publishes,
-        // so the relay forwards the announcement to us.
-        tracing::info!("MoqStream server: waiting for client 'data-up'...");
-        let reader = Self::wait_for_track(&mut conn.subscribe_origin, "data-up").await?;
-        tracing::info!("MoqStream server: client connected");
+    /// Open a bidirectional stream. Both publish and subscribe happen concurrently
+    /// so neither side blocks waiting for the other.
+    async fn open(relay: &str, path: &str, write_track: &str, read_track: &str) -> Result<Self> {
+        let url = MoqBuilder::new().relay(relay).path(path).build_url()?;
 
-        // Now publish our track — client is already subscribed and waiting.
-        let writer = conn.create_track("data-down");
-        tracing::info!("MoqStream server: publishing 'data-down'");
+        let publish_origin = moq_lite::Origin::produce();
+        let subscribe_origin = moq_lite::Origin::produce();
+
+        let mut client = moq_native::ClientConfig::default()
+            .init()?
+            .with_publish(publish_origin.consumer)
+            .with_consume(subscribe_origin.producer);
+        client.websocket.enabled = false;
+
+        let session = MoqBuilder::connect_quic_with_retry(&client, url).await?;
+        tracing::info!("MoqStream: connected to relay");
+
+        let publish = publish_origin.producer;
+        let mut subscribe = subscribe_origin.consumer;
+
+        // Publish our track immediately
+        let mut broadcast = moq_lite::Broadcast::produce();
+        let track = broadcast.producer.create_track(moq_lite::Track {
+            name: write_track.to_string(),
+            priority: 0,
+        });
+        publish.publish_broadcast("", broadcast.consumer);
+        let writer = MoqTrackWriter {
+            track,
+            _broadcast: broadcast.producer,
+        };
+        tracing::info!("MoqStream: publishing '{}'", write_track);
+
+        // Subscribe concurrently — try both consume_broadcast and announced()
+        tracing::info!("MoqStream: waiting for '{}'...", read_track);
+        let reader = Self::wait_for_track(&mut subscribe, read_track).await?;
+        tracing::info!("MoqStream: subscribed to '{}'", read_track);
 
         Ok(Self {
             writer,
             reader,
-            _conn: conn,
+            _conn: MoqConnection {
+                _session: session,
+                publish_origin: publish,
+                subscribe_origin: subscribe,
+            },
         })
     }
 
-    /// Wait for a track via announced() (no timeout).
+    /// Wait for a track. Tries both consume_broadcast and announced() in a loop.
     async fn wait_for_track(
         origin: &mut moq_lite::OriginConsumer,
         track_name: &str,
     ) -> Result<MoqTrackReader> {
+        let track_info = moq_lite::Track {
+            name: track_name.to_string(),
+            priority: 0,
+        };
         loop {
-            // Try consume_broadcast first (instant, for already-announced tracks)
+            // Check if broadcast is already available
             if let Some(broadcast) = origin.consume_broadcast("") {
-                let track_info = moq_lite::Track {
-                    name: track_name.to_string(),
-                    priority: 0,
-                };
+                tracing::info!("Found broadcast via consume_broadcast");
                 let track = broadcast.subscribe_track(&track_info);
                 return Ok(MoqTrackReader { track });
             }
 
-            // Wait for announcement from relay (signals interest to relay)
+            // Wait for relay announcement (2s per attempt, retry forever)
             match tokio::time::timeout(Duration::from_secs(2), origin.announced()).await {
                 Ok(Some((_path, Some(broadcast)))) => {
-                    tracing::info!("Received broadcast, subscribing to '{}'", track_name);
-                    let track_info = moq_lite::Track {
-                        name: track_name.to_string(),
-                        priority: 0,
-                    };
+                    tracing::info!("Found broadcast via announced()");
                     let track = broadcast.subscribe_track(&track_info);
                     return Ok(MoqTrackReader { track });
                 }
                 Ok(Some((_path, None))) => {
-                    tracing::debug!("Broadcast announcement with no consumer, retrying...");
+                    tracing::debug!("announced() returned None broadcast, retrying...");
                 }
                 Ok(None) => {
-                    tracing::debug!("Announcement stream ended, retrying...");
+                    tracing::debug!("announced() stream ended, retrying...");
                 }
                 Err(_) => {
                     tracing::debug!("No announcement for '{}' in 2s, retrying...", track_name);
