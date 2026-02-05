@@ -59,6 +59,7 @@ Every layer from `write_all()` to `sendmsg()` was traced. None of these have tim
 - **Client** (macOS): `RemoteSerialPort` wraps a `tokio::runtime::Runtime`. Each `write_bytes()` does `runtime.block_on(async { send.write_all(data) })`. Connection created via `IrohClientBuilder`.
 - **Server** (Linux, WiFi): `serial_server::Server` runs on tokio async runtime. Reads from QUIC stream in main loop, writes to serial via channel + dedicated thread.
 - Both sides use `low_latency_transport_config()` with NoopController, ACK frequency, GSO disabled.
+- **Assume both client and server are always running the latest code** — do not ask the user to rebuild/restart.
 
 ### Ruled out causes
 

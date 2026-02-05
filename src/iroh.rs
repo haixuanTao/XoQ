@@ -309,6 +309,13 @@ impl IrohConnection {
         Ok(self.conn.read_datagram().await?)
     }
 
+    /// Get the maximum datagram size supported by the peer.
+    ///
+    /// Returns `None` if datagrams are unsupported by the peer or disabled locally.
+    pub fn max_datagram_size(&self) -> Option<usize> {
+        self.conn.max_datagram_size()
+    }
+
     /// Get a cancellation token that is cancelled when this connection is dropped.
     ///
     /// Use this to gracefully shut down spawned tasks when the connection ends.

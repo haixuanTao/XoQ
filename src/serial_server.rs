@@ -159,6 +159,10 @@ impl Server {
             tracing::warn!("Connection type: UNKNOWN (no watcher)");
         }
 
+        tracing::warn!(
+            "max_datagram_size={:?} (None means datagrams unsupported)",
+            conn.max_datagram_size()
+        );
         tracing::debug!("Waiting for client to open stream...");
         let stream = conn
             .accept_stream()
@@ -222,6 +226,7 @@ impl Server {
         // Main task: network -> serial
         // Listen on BOTH the stream (reliable, backward-compatible) and datagrams
         // (low-latency, each datagram = separate message, no stream coalescing).
+        tracing::warn!("Entering network->serial bridge loop (stream + datagram)");
         let mut buf = vec![0u8; 1024];
         loop {
             tokio::select! {
@@ -256,7 +261,7 @@ impl Server {
                 result = conn.recv_datagram() => {
                     match result {
                         Ok(data) => {
-                            tracing::debug!(
+                            tracing::warn!(
                                 "Network(datagram) -> Serial: {} bytes",
                                 data.len(),
                             );

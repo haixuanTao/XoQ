@@ -479,13 +479,7 @@ impl RemoteSerialPort {
                     use_datagrams,
                 } => {
                     if *use_datagrams {
-                        tracing::warn!(
-                            "send_datagram: {} bytes, max_size={:?}",
-                            data.len(),
-                            conn.max_datagram_size()
-                        );
                         conn.send_datagram(Bytes::copy_from_slice(data))?;
-                        tracing::warn!("send_datagram: OK");
                     } else {
                         let mut s = stream.lock().await;
                         s.write(data).await?;
