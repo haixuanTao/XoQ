@@ -324,8 +324,9 @@ impl MoqTrackReader {
 
 /// A simple bidirectional stream over MoQ.
 ///
-/// Hides the track/broadcast/announcement complexity behind a simple
-/// `write()`/`read()` interface. Uses two MoQ tracks internally (one per direction).
+/// Uses two separate connections (one publisher, one subscriber) on different
+/// sub-paths. Each path has exactly one publisher and one subscriber, so the
+/// relay has no ambiguity about routing.
 ///
 /// # Example
 ///
@@ -348,122 +349,86 @@ impl MoqTrackReader {
 pub struct MoqStream {
     writer: MoqTrackWriter,
     reader: MoqTrackReader,
-    _conn: MoqConnection,
+    _publisher: MoqPublisher,
+    _subscriber: MoqSubscriber,
 }
 
 impl MoqStream {
-    /// Connect as client. Publishes "data-up", subscribes to "data-down".
+    /// Connect as client. Publishes on `path/c2s`, subscribes to `path/s2c`.
     pub async fn connect(path: &str) -> Result<Self> {
         Self::connect_to("https://cdn.moq.dev", path).await
     }
 
     /// Connect as client to a specific relay.
     pub async fn connect_to(relay: &str, path: &str) -> Result<Self> {
-        Self::open(relay, path, "data-up", "data-down").await
+        eprintln!("[xoq] MoqStream client connecting to {}/{}...", relay, path);
+
+        let mut publisher = MoqBuilder::new()
+            .relay(relay)
+            .path(&format!("{}/c2s", path))
+            .connect_publisher()
+            .await?;
+        let writer = publisher.create_track("data");
+        eprintln!("[xoq] MoqStream client publishing on {}/c2s", path);
+
+        let mut subscriber = MoqBuilder::new()
+            .relay(relay)
+            .path(&format!("{}/s2c", path))
+            .connect_subscriber()
+            .await?;
+        let reader = subscriber
+            .subscribe_track("data")
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("No data track on {}/s2c", path))?;
+        eprintln!("[xoq] MoqStream client subscribed to {}/s2c", path);
+
+        Ok(Self {
+            writer,
+            reader,
+            _publisher: publisher,
+            _subscriber: subscriber,
+        })
     }
 
-    /// Accept as server. Publishes "data-down", subscribes to "data-up".
+    /// Accept as server. Publishes on `path/s2c`, subscribes to `path/c2s`.
     pub async fn accept(path: &str) -> Result<Self> {
         Self::accept_at("https://cdn.moq.dev", path).await
     }
 
     /// Accept as server at a specific relay.
     pub async fn accept_at(relay: &str, path: &str) -> Result<Self> {
-        Self::open(relay, path, "data-down", "data-up").await
-    }
+        eprintln!("[xoq] MoqStream server connecting to {}/{}...", relay, path);
 
-    /// Open a bidirectional stream. Both publish and subscribe happen concurrently
-    /// so neither side blocks waiting for the other.
-    async fn open(relay: &str, path: &str, write_track: &str, read_track: &str) -> Result<Self> {
-        let url = MoqBuilder::new().relay(relay).path(path).build_url()?;
+        let mut publisher = MoqBuilder::new()
+            .relay(relay)
+            .path(&format!("{}/s2c", path))
+            .connect_publisher()
+            .await?;
+        let writer = publisher.create_track("data");
+        eprintln!("[xoq] MoqStream server publishing on {}/s2c", path);
 
-        let publish_origin = moq_lite::Origin::produce();
-        let subscribe_origin = moq_lite::Origin::produce();
-
-        let mut client = moq_native::ClientConfig::default()
-            .init()?
-            .with_publish(publish_origin.consumer)
-            .with_consume(subscribe_origin.producer);
-        client.websocket.enabled = false;
-
-        let session = MoqBuilder::connect_quic_with_retry(&client, url).await?;
-        tracing::info!("MoqStream: connected to relay");
-
-        let publish = publish_origin.producer;
-        let mut subscribe = subscribe_origin.consumer;
-
-        // Publish our track immediately
-        let mut broadcast = moq_lite::Broadcast::produce();
-        let track = broadcast.producer.create_track(moq_lite::Track {
-            name: write_track.to_string(),
-            priority: 0,
-        });
-        publish.publish_broadcast("", broadcast.consumer);
-        let writer = MoqTrackWriter {
-            track,
-            _broadcast: broadcast.producer,
-        };
-        tracing::info!("MoqStream: publishing '{}'", write_track);
-
-        // Subscribe concurrently — try both consume_broadcast and announced()
-        tracing::info!("MoqStream: waiting for '{}'...", read_track);
-        let reader = Self::wait_for_track(&mut subscribe, read_track).await?;
-        tracing::info!("MoqStream: subscribed to '{}'", read_track);
+        let mut subscriber = MoqBuilder::new()
+            .relay(relay)
+            .path(&format!("{}/c2s", path))
+            .connect_subscriber()
+            .await?;
+        let reader = subscriber
+            .subscribe_track("data")
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("No data track on {}/c2s", path))?;
+        eprintln!("[xoq] MoqStream server subscribed to {}/c2s", path);
 
         Ok(Self {
             writer,
             reader,
-            _conn: MoqConnection {
-                _session: session,
-                publish_origin: publish,
-                subscribe_origin: subscribe,
-            },
+            _publisher: publisher,
+            _subscriber: subscriber,
         })
     }
 
-    /// Wait for a track. Tries both consume_broadcast and announced() in a loop.
-    async fn wait_for_track(
-        origin: &mut moq_lite::OriginConsumer,
-        track_name: &str,
-    ) -> Result<MoqTrackReader> {
-        let track_info = moq_lite::Track {
-            name: track_name.to_string(),
-            priority: 0,
-        };
-        loop {
-            // Check if broadcast is already available
-            if let Some(broadcast) = origin.consume_broadcast("") {
-                tracing::info!("Found broadcast via consume_broadcast");
-                let track = broadcast.subscribe_track(&track_info);
-                return Ok(MoqTrackReader { track });
-            }
-
-            // Wait for relay announcement (2s per attempt, retry forever)
-            match tokio::time::timeout(Duration::from_secs(2), origin.announced()).await {
-                Ok(Some((_path, Some(broadcast)))) => {
-                    tracing::info!("Found broadcast via announced()");
-                    let track = broadcast.subscribe_track(&track_info);
-                    return Ok(MoqTrackReader { track });
-                }
-                Ok(Some((_path, None))) => {
-                    tracing::debug!("announced() returned None broadcast, retrying...");
-                }
-                Ok(None) => {
-                    tracing::debug!("announced() stream ended, retrying...");
-                }
-                Err(_) => {
-                    tracing::debug!("No announcement for '{}' in 2s, retrying...", track_name);
-                }
-            }
-        }
-    }
-
-    /// Split into writer, reader, and connection handle.
-    ///
-    /// Use this when you need concurrent read/write from different tasks.
-    /// The connection handle must be kept alive.
-    pub fn split(self) -> (MoqTrackWriter, MoqTrackReader, MoqConnection) {
-        (self.writer, self.reader, self._conn)
+    /// Split into writer, reader, and handles that must be kept alive.
+    pub fn split(self) -> (MoqTrackWriter, MoqTrackReader, MoqPublisher, MoqSubscriber) {
+        (self.writer, self.reader, self._publisher, self._subscriber)
     }
 
     /// Write data.

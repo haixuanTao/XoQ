@@ -71,7 +71,7 @@ async fn run_moq_server(port_name: &str, baud_rate: u32, moq_path: &str) -> Resu
     tracing::info!("Client connected!");
 
     // Split for concurrent read/write from different tasks
-    let (mut moq_writer, mut moq_reader, _conn) = stream.split();
+    let (mut moq_writer, mut moq_reader, _pub, _sub) = stream.split();
 
     // Spawn task: network -> serial
     let net_to_serial = tokio::spawn(async move {
