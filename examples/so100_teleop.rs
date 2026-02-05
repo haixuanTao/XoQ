@@ -54,9 +54,13 @@ fn main() -> Result<()> {
         .open()?;
 
     // Open remote serial port for follower arm
+    // Use datagrams for writes: each servo command is sent as a separate QUIC datagram,
+    // avoiding stream coalescing that batches multiple commands into one packet.
+    // Responses still use the reliable stream.
     println!("Connecting to remote follower arm...");
     let follower_port = xoq::serialport::new(remote_id)
         .timeout(Duration::from_millis(1000))
+        .use_datagrams(true)
         .open()?;
 
     // Create controllers

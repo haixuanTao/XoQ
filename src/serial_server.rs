@@ -220,31 +220,56 @@ impl Server {
         });
 
         // Main task: network -> serial
+        // Listen on BOTH the stream (reliable, backward-compatible) and datagrams
+        // (low-latency, each datagram = separate message, no stream coalescing).
         let mut buf = vec![0u8; 1024];
         loop {
-            match recv.read(&mut buf).await {
-                Ok(Some(n)) if n > 0 => {
-                    tracing::debug!(
-                        "Network -> Serial: {} bytes: {:?}",
-                        n,
-                        String::from_utf8_lossy(&buf[..n])
-                    );
-                    if serial_write_tx.send(buf[..n].to_vec()).is_err() {
-                        tracing::error!("Serial writer thread died");
-                        break;
+            tokio::select! {
+                // Stream data (reliable, backward-compatible path)
+                result = recv.read(&mut buf) => {
+                    match result {
+                        Ok(Some(n)) if n > 0 => {
+                            tracing::debug!(
+                                "Network(stream) -> Serial: {} bytes",
+                                n,
+                            );
+                            if serial_write_tx.send(buf[..n].to_vec()).is_err() {
+                                tracing::error!("Serial writer thread died");
+                                break;
+                            }
+                        }
+                        Ok(Some(_)) => {
+                            // 0 bytes from network - keep waiting
+                            continue;
+                        }
+                        Ok(None) => {
+                            tracing::info!("Client disconnected (stream closed)");
+                            break;
+                        }
+                        Err(e) => {
+                            tracing::error!("Network read error: {}", e);
+                            break;
+                        }
                     }
                 }
-                Ok(Some(_)) => {
-                    // 0 bytes from network - keep waiting
-                    continue;
-                }
-                Ok(None) => {
-                    tracing::info!("Client disconnected (stream closed)");
-                    break;
-                }
-                Err(e) => {
-                    tracing::error!("Network read error: {}", e);
-                    break;
+                // Datagram data (low-latency path, each datagram is a separate message)
+                result = conn.recv_datagram() => {
+                    match result {
+                        Ok(data) => {
+                            tracing::debug!(
+                                "Network(datagram) -> Serial: {} bytes",
+                                data.len(),
+                            );
+                            if serial_write_tx.send(data.to_vec()).is_err() {
+                                tracing::error!("Serial writer thread died");
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("Datagram recv error: {}", e);
+                            break;
+                        }
+                    }
                 }
             }
         }
