@@ -174,37 +174,33 @@ impl MoqConnection {
         }
     }
 
-    /// Wait for an announced broadcast and subscribe to a track (with timeout)
+    /// Subscribe to a track by polling `consume_broadcast` directly.
+    ///
+    /// This bypasses the broadcast announcement mechanism (which may not work
+    /// reliably with all relays) and instead polls for the broadcast to appear.
     pub async fn subscribe_track(&mut self, track_name: &str) -> Result<Option<MoqTrackReader>> {
-        tracing::info!(
-            "Waiting for broadcast announcement (track: {})...",
-            track_name
-        );
+        tracing::info!("Polling for track '{}'...", track_name);
 
-        let announced =
-            tokio::time::timeout(Duration::from_secs(10), self.subscribe_origin.announced())
-                .await
-                .map_err(|_| {
-                    anyhow::anyhow!(
-                        "Timed out waiting for broadcast announcement after 10s. \
-             Is the server publishing to this path?"
-                    )
-                })?;
-
-        if let Some((_path, Some(broadcast))) = announced {
-            tracing::info!(
-                "Received broadcast announcement, subscribing to track '{}'",
-                track_name
-            );
-            let track_info = moq_lite::Track {
-                name: track_name.to_string(),
-                priority: 0,
-            };
-            let track = broadcast.subscribe_track(&track_info);
-            return Ok(Some(MoqTrackReader { track }));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(broadcast) = self.subscribe_origin.consume_broadcast("") {
+                tracing::info!("Found broadcast, subscribing to track '{}'", track_name);
+                let track_info = moq_lite::Track {
+                    name: track_name.to_string(),
+                    priority: 0,
+                };
+                let track = broadcast.subscribe_track(&track_info);
+                return Ok(Some(MoqTrackReader { track }));
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(anyhow::anyhow!(
+                    "Timed out waiting for track '{}' after 10s. \
+                     Is the other side publishing to this path?",
+                    track_name
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        tracing::warn!("Broadcast announcement returned None");
-        Ok(None)
     }
 
     /// Get the subscribe origin for manual handling
@@ -247,36 +243,33 @@ pub struct MoqSubscriber {
 }
 
 impl MoqSubscriber {
-    /// Wait for an announced broadcast and subscribe to a track (with timeout)
+    /// Subscribe to a track by polling `consume_broadcast` directly.
     pub async fn subscribe_track(&mut self, track_name: &str) -> Result<Option<MoqTrackReader>> {
-        eprintln!(
-            "[xoq] Waiting for broadcast announcement (track: '{}')...",
-            track_name
-        );
+        eprintln!("[xoq] Polling for track '{}'...", track_name);
 
-        let announced = tokio::time::timeout(Duration::from_secs(10), self.origin.announced())
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "Timed out waiting for broadcast announcement after 10s. \
-             Is the server publishing to this path?"
-                )
-            })?;
-
-        if let Some((path, Some(broadcast))) = announced {
-            eprintln!(
-                "[xoq] Broadcast announced (path: '{}'), subscribing to track '{}'",
-                path, track_name
-            );
-            let track_info = moq_lite::Track {
-                name: track_name.to_string(),
-                priority: 0,
-            };
-            let track = broadcast.subscribe_track(&track_info);
-            return Ok(Some(MoqTrackReader { track }));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(broadcast) = self.origin.consume_broadcast("") {
+                eprintln!(
+                    "[xoq] Found broadcast, subscribing to track '{}'",
+                    track_name
+                );
+                let track_info = moq_lite::Track {
+                    name: track_name.to_string(),
+                    priority: 0,
+                };
+                let track = broadcast.subscribe_track(&track_info);
+                return Ok(Some(MoqTrackReader { track }));
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(anyhow::anyhow!(
+                    "Timed out waiting for track '{}' after 10s. \
+                     Is the other side publishing to this path?",
+                    track_name
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        eprintln!("[xoq] Broadcast announcement returned None");
-        Ok(None)
     }
 
     /// Get the origin for manual handling

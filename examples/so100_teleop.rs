@@ -30,23 +30,21 @@ fn main() -> Result<()> {
         .init();
 
     let args: Vec<String> = env::args().collect();
-    let use_moq = args.iter().any(|a| a == "--moq");
-    // Filter out the --moq flag for positional arg parsing
-    let positional: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
-
-    if positional.len() < 3 {
-        println!("Usage: so100_teleop <local-serial-port> <remote-server-id-or-moq-path> [--moq]");
+    if args.len() < 3 {
+        println!("Usage: so100_teleop <local-serial-port> <remote-id>");
         println!("\nExamples:");
-        println!("  # Iroh P2P (default):");
+        println!("  # Iroh P2P (auto-detected: no '/' in ID):");
         println!("  cargo run --example so100_teleop --features \"iroh,serial\" -- /dev/ttyUSB0 <server-id>");
-        println!("  # MOQ relay:");
-        println!("  cargo run --example so100_teleop --features \"iroh,serial\" -- /dev/ttyUSB0 anon/xoq-test --moq");
+        println!("  # MOQ relay (auto-detected: path contains '/'):");
+        println!("  cargo run --example so100_teleop --features \"iroh,serial\" -- /dev/ttyUSB0 anon/xoq-test");
         println!("\nThis reads from the local leader arm and sends to the remote follower arm.");
         return Ok(());
     }
 
-    let local_port = positional[1];
-    let remote_id = positional[2];
+    let local_port = &args[1];
+    let remote_id = &args[2];
+    // Auto-detect transport: MOQ paths contain '/', iroh node IDs don't
+    let use_moq = remote_id.contains('/');
 
     println!("SO100 Teleoperation");
     println!("===================");
