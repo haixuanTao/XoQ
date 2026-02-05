@@ -89,14 +89,12 @@ impl Client {
         self.write(data.as_bytes()).await
     }
 
-    /// Read data from the remote serial port
+    /// Read data from the remote serial port.
+    ///
+    /// Always reads from the stream, even in datagram mode. Datagrams are
+    /// unreliable and not suitable for request-response protocols (like Dynamixel)
+    /// that need every byte. The server sends responses via both stream and datagram.
     pub async fn read(&self, buf: &mut [u8]) -> Result<Option<usize>> {
-        if self.use_datagrams {
-            let data = self.conn.recv_datagram().await?;
-            let n = std::cmp::min(data.len(), buf.len());
-            buf[..n].copy_from_slice(&data[..n]);
-            return Ok(Some(n));
-        }
         let mut recv = self.recv.lock().await;
         Ok(recv.read(buf).await?)
     }
@@ -499,20 +497,9 @@ impl RemoteSerialPort {
         let result = self.runtime.block_on(async {
             tokio::time::timeout(timeout, async {
                 match &self.client {
-                    ClientInner::Iroh {
-                        stream,
-                        conn,
-                        use_datagrams,
-                    } => {
-                        if *use_datagrams {
-                            let data = conn.recv_datagram().await?;
-                            let n = std::cmp::min(data.len(), buf.len());
-                            buf[..n].copy_from_slice(&data[..n]);
-                            Ok(Some(n))
-                        } else {
-                            let mut s = stream.lock().await;
-                            s.read(buf).await
-                        }
+                    ClientInner::Iroh { stream, .. } => {
+                        let mut s = stream.lock().await;
+                        s.read(buf).await
                     }
                     ClientInner::Moq { conn } => {
                         let mut c = conn.lock().await;
