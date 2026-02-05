@@ -25,7 +25,7 @@ const SERVO_IDS: [u8; 5] = [1, 2, 3, 4, 5];
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env().add_directive("trace".parse()?),
+            tracing_subscriber::EnvFilter::from_default_env().add_directive("info".parse()?),
         )
         .init();
 
@@ -53,11 +53,10 @@ fn main() -> Result<()> {
         .timeout(Duration::from_millis(1000))
         .open()?;
 
-    // Open remote serial port for follower arm (using QUIC datagrams for low latency)
-    println!("Connecting to remote follower arm (datagram mode)...");
+    // Open remote serial port for follower arm
+    println!("Connecting to remote follower arm...");
     let follower_port = xoq::serialport::new(remote_id)
         .timeout(Duration::from_millis(1000))
-        .use_datagrams(true)
         .open()?;
 
     // Create controllers

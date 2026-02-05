@@ -76,7 +76,10 @@ impl congestion::ControllerFactory for NoopControllerFactory {
 /// - keep_alive: 1s
 fn low_latency_transport_config() -> TransportConfig {
     let mut config = TransportConfig::default();
-    config.initial_rtt(Duration::from_millis(10));
+    // Set to 150ms to match real WiFi round-trip with power-save batching.
+    // Too low (10ms) causes aggressive PTO probes every ~8ms, wasting bandwidth
+    // and keeping smoothed_rtt artificially low via fast probe ACKs.
+    config.initial_rtt(Duration::from_millis(150));
     config.keep_alive_interval(Some(Duration::from_secs(1)));
 
     // Request peer to ACK immediately (every packet, max 1ms delay)
