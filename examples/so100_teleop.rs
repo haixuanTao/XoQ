@@ -17,12 +17,18 @@ use anyhow::Result;
 use rustypot::servo::feetech::sts3215::Sts3215Controller;
 use std::env;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// SO100 servo IDs (5-DOF arm)
 const SERVO_IDS: [u8; 5] = [1, 2, 3, 4, 5];
 
 fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env().add_directive("trace".parse()?),
+        )
+        .init();
+
     let args: Vec<String> = env::args().collect();
     if args.len() < 3 {
         println!("Usage: so100_teleop <local-serial-port> <remote-server-id>");
@@ -47,10 +53,11 @@ fn main() -> Result<()> {
         .timeout(Duration::from_millis(1000))
         .open()?;
 
-    // Open remote serial port for follower arm
-    println!("Connecting to remote follower arm...");
+    // Open remote serial port for follower arm (using QUIC datagrams for low latency)
+    println!("Connecting to remote follower arm (datagram mode)...");
     let follower_port = xoq::serialport::new(remote_id)
         .timeout(Duration::from_millis(1000))
+        .use_datagrams(true)
         .open()?;
 
     // Create controllers
@@ -102,19 +109,43 @@ fn main() -> Result<()> {
     })?;
 
     // Teleoperation loop
+    let mut loop_count: u64 = 0;
     while running.load(std::sync::atomic::Ordering::SeqCst) {
+        let t0 = Instant::now();
+
         // Read positions from leader
-        match leader.sync_read_present_position(&SERVO_IDS) {
+        let read_result = leader.sync_read_present_position(&SERVO_IDS);
+        let t_read = t0.elapsed();
+
+        match read_result {
             Ok(positions) => {
                 // Send positions to follower
+                let t1 = Instant::now();
                 if let Err(e) = follower.sync_write_goal_position(&SERVO_IDS, &positions) {
                     println!("Follower write error: {}", e);
                 }
+                let t_write = t1.elapsed();
+
+                if t_read > Duration::from_millis(15) || t_write > Duration::from_millis(5) {
+                    println!(
+                        "[{}] SLOW  read={:.1}ms  write={:.1}ms",
+                        loop_count,
+                        t_read.as_secs_f64() * 1000.0,
+                        t_write.as_secs_f64() * 1000.0,
+                    );
+                }
             }
             Err(e) => {
-                println!("Leader read error: {}", e);
+                println!(
+                    "[{}] Leader read error (took {:.1}ms): {}",
+                    loop_count,
+                    t_read.as_secs_f64() * 1000.0,
+                    e
+                );
             }
         }
+
+        loop_count += 1;
 
         // Small delay to prevent overwhelming the bus
         thread::sleep(Duration::from_millis(10));

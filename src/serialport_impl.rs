@@ -17,6 +17,7 @@
 //! ```
 
 use anyhow::Result;
+use bytes::Bytes;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -27,13 +28,27 @@ use crate::iroh::{IrohClientBuilder, IrohConnection};
 pub struct Client {
     send: Arc<Mutex<iroh::endpoint::SendStream>>,
     recv: Arc<Mutex<iroh::endpoint::RecvStream>>,
-    _conn: IrohConnection,
+    conn: Arc<IrohConnection>,
+    use_datagrams: bool,
 }
 
 impl Client {
     /// Connect to a remote serial bridge server
     pub async fn connect(server_id: &str) -> Result<Self> {
-        tracing::debug!("Connecting to server: {}", server_id);
+        Self::connect_with_options(server_id, false).await
+    }
+
+    /// Connect with datagram mode option.
+    ///
+    /// When `use_datagrams` is true, write/read use QUIC unreliable datagrams
+    /// instead of streams. This bypasses ACK-based flow control and retransmission,
+    /// ideal for latency-sensitive data like servo positions.
+    pub async fn connect_with_options(server_id: &str, use_datagrams: bool) -> Result<Self> {
+        tracing::debug!(
+            "Connecting to server: {} (datagrams={})",
+            server_id,
+            use_datagrams
+        );
         let conn = IrohClientBuilder::new()
             .connect_str(server_id)
             .await
@@ -50,12 +65,17 @@ impl Client {
         Ok(Self {
             send: Arc::new(Mutex::new(send)),
             recv: Arc::new(Mutex::new(recv)),
-            _conn: conn,
+            conn: Arc::new(conn),
+            use_datagrams,
         })
     }
 
     /// Write data to the remote serial port
     pub async fn write(&self, data: &[u8]) -> Result<()> {
+        if self.use_datagrams {
+            self.conn.send_datagram(Bytes::copy_from_slice(data))?;
+            return Ok(());
+        }
         let mut send = self.send.lock().await;
         send.write_all(data).await?;
         drop(send);
@@ -71,6 +91,12 @@ impl Client {
 
     /// Read data from the remote serial port
     pub async fn read(&self, buf: &mut [u8]) -> Result<Option<usize>> {
+        if self.use_datagrams {
+            let data = self.conn.recv_datagram().await?;
+            let n = std::cmp::min(data.len(), buf.len());
+            buf[..n].copy_from_slice(&data[..n]);
+            return Ok(Some(n));
+        }
         let mut recv = self.recv.lock().await;
         Ok(recv.read(buf).await?)
     }
@@ -209,6 +235,7 @@ pub struct SerialPortBuilder {
     port_name: String,
     timeout: Duration,
     transport: Transport,
+    use_datagrams: bool,
 }
 
 impl SerialPortBuilder {
@@ -218,6 +245,7 @@ impl SerialPortBuilder {
             port_name: port.to_string(),
             timeout: Duration::from_secs(1),
             transport: Transport::default(),
+            use_datagrams: false,
         }
     }
 
@@ -261,9 +289,20 @@ impl SerialPortBuilder {
         self
     }
 
+    /// Use QUIC unreliable datagrams instead of streams for data transfer.
+    ///
+    /// Datagrams bypass ACK-based flow control, retransmission, and ordering.
+    /// Ideal for latency-sensitive data (e.g., servo positions) where the latest
+    /// value supersedes older ones. Only works with iroh transport.
+    pub fn use_datagrams(mut self, enabled: bool) -> Self {
+        self.use_datagrams = enabled;
+        self
+    }
+
     /// Open the connection to the remote serial port.
     pub fn open(self) -> Result<RemoteSerialPort> {
         let runtime = tokio::runtime::Runtime::new()?;
+        let use_datagrams = self.use_datagrams;
 
         let client = match self.transport {
             Transport::Iroh { alpn } => runtime.block_on(async {
@@ -273,9 +312,11 @@ impl SerialPortBuilder {
                 }
                 let conn = builder.connect_str(&self.port_name).await?;
                 let stream = conn.open_stream().await?;
+                let conn = Arc::new(conn);
                 Ok::<_, anyhow::Error>(ClientInner::Iroh {
                     stream: Arc::new(Mutex::new(stream)),
-                    _conn: conn,
+                    conn,
+                    use_datagrams,
                 })
             })?,
             Transport::Moq { relay, token } => runtime.block_on(async {
@@ -306,7 +347,8 @@ impl SerialPortBuilder {
 enum ClientInner {
     Iroh {
         stream: Arc<Mutex<crate::iroh::IrohStream>>,
-        _conn: IrohConnection,
+        conn: Arc<IrohConnection>,
+        use_datagrams: bool,
     },
     Moq {
         conn: Arc<tokio::sync::Mutex<crate::moq::MoqConnection>>,
@@ -419,9 +461,17 @@ impl RemoteSerialPort {
     pub fn write_bytes(&mut self, data: &[u8]) -> Result<usize> {
         self.runtime.block_on(async {
             match &self.client {
-                ClientInner::Iroh { stream, .. } => {
-                    let mut s = stream.lock().await;
-                    s.write(data).await?;
+                ClientInner::Iroh {
+                    stream,
+                    conn,
+                    use_datagrams,
+                } => {
+                    if *use_datagrams {
+                        conn.send_datagram(Bytes::copy_from_slice(data))?;
+                    } else {
+                        let mut s = stream.lock().await;
+                        s.write(data).await?;
+                    }
                 }
                 ClientInner::Moq { conn } => {
                     let mut c = conn.lock().await;
@@ -449,9 +499,20 @@ impl RemoteSerialPort {
         let result = self.runtime.block_on(async {
             tokio::time::timeout(timeout, async {
                 match &self.client {
-                    ClientInner::Iroh { stream, .. } => {
-                        let mut s = stream.lock().await;
-                        s.read(buf).await
+                    ClientInner::Iroh {
+                        stream,
+                        conn,
+                        use_datagrams,
+                    } => {
+                        if *use_datagrams {
+                            let data = conn.recv_datagram().await?;
+                            let n = std::cmp::min(data.len(), buf.len());
+                            buf[..n].copy_from_slice(&data[..n]);
+                            Ok(Some(n))
+                        } else {
+                            let mut s = stream.lock().await;
+                            s.read(buf).await
+                        }
                     }
                     ClientInner::Moq { conn } => {
                         let mut c = conn.lock().await;

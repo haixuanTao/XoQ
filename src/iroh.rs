@@ -3,6 +3,7 @@
 //! Provides a builder API for creating P2P connections using iroh.
 
 use anyhow::Result;
+use bytes::Bytes;
 use iroh::endpoint::{AckFrequencyConfig, Connection, TransportConfig, VarInt};
 use iroh::{Endpoint, EndpointAddr, PublicKey, RelayMode, SecretKey};
 use std::path::PathBuf;
@@ -87,6 +88,9 @@ fn low_latency_transport_config() -> TransportConfig {
     // Disable congestion control — never block poll_transmit due to cwnd.
     // Safe on trusted LANs; avoids 100-200ms stalls when a single packet is lost.
     config.congestion_controller_factory(Arc::new(NoopControllerFactory));
+
+    // Enable QUIC datagrams (unreliable, unordered) for latency-sensitive data.
+    config.datagram_receive_buffer_size(Some(65535));
 
     config
 }
@@ -288,6 +292,20 @@ impl IrohConnection {
     /// Get the underlying connection for advanced usage
     pub fn connection(&self) -> &Connection {
         &self.conn
+    }
+
+    /// Send an unreliable datagram over the connection.
+    ///
+    /// Datagrams bypass QUIC streams, ACK-based flow control, and retransmission.
+    /// Ideal for latency-sensitive data where the latest value supersedes older ones.
+    pub fn send_datagram(&self, data: Bytes) -> Result<()> {
+        self.conn.send_datagram(data)?;
+        Ok(())
+    }
+
+    /// Receive an unreliable datagram from the connection.
+    pub async fn recv_datagram(&self) -> Result<Bytes> {
+        Ok(self.conn.read_datagram().await?)
     }
 
     /// Get a cancellation token that is cancelled when this connection is dropped.
