@@ -111,6 +111,47 @@ pub mod opencv;
 #[cfg(any(feature = "camera-remote", all(feature = "camera", feature = "iroh")))]
 pub mod camera_client;
 
+// Audio device abstraction (cpal)
+#[cfg(feature = "audio")]
+pub mod audio;
+
+// macOS audio with Voice Processing IO (AEC, noise suppression, AGC)
+#[cfg(feature = "audio-macos")]
+pub mod audio_macos;
+
+// Audio server (requires audio + iroh)
+#[cfg(all(feature = "audio", feature = "iroh"))]
+pub mod audio_server;
+
+// Audio client (sounddevice-compatible API)
+#[cfg(feature = "audio-remote")]
+pub mod sounddevice_impl;
+
+// Sync audio client (blocking API with internal runtime)
+#[cfg(feature = "audio-remote")]
+pub mod audio_client;
+
+/// `sounddevice`-compatible module for remote audio streams.
+///
+/// This module provides a drop-in compatible API similar to the `sounddevice` package.
+///
+/// # Example
+///
+/// ```no_run
+/// use xoq::sounddevice;
+///
+/// let mut stream = sounddevice::new("server-endpoint-id")
+///     .sample_rate(48000)
+///     .channels(1)
+///     .open()?;
+/// let frame = stream.read_chunk()?;
+/// # Ok::<(), anyhow::Error>(())
+/// ```
+#[cfg(feature = "audio-remote")]
+pub mod sounddevice {
+    pub use crate::sounddevice_impl::{new, AudioStreamBuilder, RemoteAudioStream, Transport};
+}
+
 // Platform-independent CAN types (always available)
 pub mod can_types;
 
@@ -173,6 +214,9 @@ pub use iroh::{
     CAMERA_ALPN_AV1, CAMERA_ALPN_H264, CAMERA_ALPN_HEVC, CAMERA_ALPN_JPEG, DEFAULT_ALPN,
 };
 
+#[cfg(all(feature = "audio", feature = "iroh"))]
+pub use audio_server::AUDIO_ALPN;
+
 #[cfg(feature = "serial")]
 pub use serial::{
     baud, list_ports, DataBits, Parity, PortType, SerialConfig, SerialPort, SerialPortInfo,
@@ -234,6 +278,24 @@ pub use moq_can_server::MoqCanServer;
 // Remote CAN client (cross-platform)
 #[cfg(feature = "can-remote")]
 pub use socketcan::{CanClient, RemoteCanSocket};
+
+// Audio types
+#[cfg(feature = "audio")]
+pub use audio::{
+    AudioConfig, AudioDevice, AudioDeviceInfo, AudioFrame, AudioInput, AudioOutput, SampleFormat,
+};
+
+#[cfg(feature = "audio-macos")]
+pub use audio_macos::AudioVoiceIO;
+
+#[cfg(all(feature = "audio", feature = "iroh"))]
+pub use audio_server::{AudioServer, AudioServerBuilder};
+
+#[cfg(feature = "audio-remote")]
+pub use audio_client::SyncAudioClient;
+
+#[cfg(feature = "audio-remote")]
+pub use sounddevice::{AudioStreamBuilder, RemoteAudioStream};
 
 // Re-export token generation
 pub use moq_token;

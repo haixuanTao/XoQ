@@ -5,13 +5,11 @@ Camera viewer: connects to xoq camera server and displays video.
 Setup:
     pip install opencv-python numpy
 
-    # Build and install xoq cv2 extension (with VideoToolbox H.264 decoding)
-    cd packages/cv2
-    maturin develop --features videotoolbox --release
+    # Build and install xoq cv2 extension
+    cd packages/cv2 && maturin develop --features videotoolbox --release
 
-    # Install xoq meta-package
-    cd packages/xoq
-    pip install -e .
+    # Install xoq meta-package (patches import cv2 automatically)
+    cd packages/xoq && pip install -e .
 
     # Start camera server (in another terminal)
     cargo run --example camera_server --features iroh,vtenc -- 0 --h264
@@ -26,8 +24,7 @@ Usage:
 import sys
 import time
 
-import xoq_cv2  # xoq remote camera
-import cv2  # opencv-python for display
+import cv2
 
 MAX_RETRIES = 3
 RETRY_DELAY = 1.0  # seconds
@@ -58,7 +55,7 @@ def main():
     cap = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            cap = xoq_cv2.VideoCapture(source, transport)
+            cap = cv2.VideoCapture(source, transport=transport)
             break
         except RuntimeError as e:
             if attempt < MAX_RETRIES:
@@ -76,6 +73,8 @@ def main():
     print("Connected! Press 'q' to quit.")
 
     frame_count = 0
+    fps_start = time.time()
+    fps_count = 0
 
     while True:
         ret, frame = cap.read()
@@ -88,9 +87,15 @@ def main():
             break
 
         frame_count += 1
-        if frame_count % 300 == 0:
+        fps_count += 1
+        now = time.time()
+        elapsed = now - fps_start
+        if elapsed >= 1.0:
+            fps = fps_count / elapsed
             h, w = frame.shape[:2]
-            print(f"  {frame_count} frames ({w}x{h})")
+            print(f"  {fps:.1f} FPS ({w}x{h}, {frame_count} frames)")
+            fps_start = now
+            fps_count = 0
 
     cap.release()
     cv2.destroyAllWindows()

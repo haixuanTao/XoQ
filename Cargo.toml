@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "packages/serial", "packages/cv2", "packages/can"]
+members = [".", "packages/serial", "packages/cv2", "packages/can", "packages/sounddevice"]
 
 [package]
 name = "xoq"
@@ -24,10 +24,15 @@ vtenc = ["camera-macos", "dep:video-toolbox-sys", "dep:core-foundation", "dep:co
 videotoolbox = ["camera-remote", "dep:video-toolbox-sys", "dep:core-foundation", "dep:core-foundation-sys", "dep:core-media-sys", "dep:libc"]
 # Local CAN support (Linux only, requires socketcan)
 can = ["dep:socketcan", "dep:libc"]
+# Audio support (requires cpal for local audio I/O)
+audio = ["dep:cpal"]
+# macOS audio with Voice Processing IO (AEC, noise suppression, AGC)
+audio-macos = ["audio"]
 # Remote client features (cross-platform, no hardware deps)
 serial-remote = ["iroh"]
 camera-remote = ["iroh", "image"]
 can-remote = ["iroh"]
+audio-remote = ["iroh", "audio"]
 
 [dependencies]
 moq-transport = "0.12"
@@ -38,6 +43,7 @@ serialport = { version = "4", optional = true }
 v4l = { version = "0.14", optional = true }
 image = { version = "0.25", optional = true }
 socketcan = { version = "3.5", optional = true }
+cpal = { version = "0.15", optional = true }
 libc = { version = "0.2", optional = true }
 moq-native = { version = "0.12", default-features = false, features = ["ring"] }
 web-transport-quinn = "0.3"
@@ -139,4 +145,14 @@ path = "examples/moq_test.rs"
 name = "iroh_latency_test"
 path = "examples/iroh_latency_test.rs"
 required-features = ["iroh"]
+
+[[example]]
+name = "audio_server"
+path = "examples/audio_server.rs"
+required-features = ["iroh", "audio"]
+
+[[example]]
+name = "audio_client"
+path = "examples/audio_client.rs"
+required-features = ["audio-remote"]
 

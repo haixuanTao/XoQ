@@ -1,0 +1,17 @@
+[package]
+name = "xoq-sounddevice"
+version = "0.3.4"
+edition = "2021"
+description = "Drop-in replacement for sounddevice - remote audio over P2P"
+license = "Apache-2.0"
+repository = "https://github.com/haixuantao/xoq"
+
+[lib]
+name = "xoq_sounddevice"
+crate-type = ["cdylib"]
+
+[dependencies]
+xoq = { path = "../..", features = ["audio-remote"] }
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py38"] }
+numpy = "0.22"
+anyhow = "1"

@@ -21,6 +21,7 @@ PACKAGES = {
     "serial": ROOT / "packages/serial/src/lib.rs",
     "can": ROOT / "packages/can/src/lib.rs",
     "cv2": ROOT / "packages/cv2/src/lib.rs",
+    "sounddevice": ROOT / "packages/sounddevice/src/lib.rs",
 }
 
 

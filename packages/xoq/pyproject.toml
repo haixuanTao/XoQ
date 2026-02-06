@@ -34,3 +34,9 @@ opencv = [
 serial = [
     "xoq-serial>=0.3.4",
 ]
+
+[tool.hatch.build.targets.wheel.force-include]
+"_xoq_cv2.pth" = "_xoq_cv2.pth"
+
+[tool.hatch.build.targets.editable.force-include]
+"_xoq_cv2.pth" = "_xoq_cv2.pth"
