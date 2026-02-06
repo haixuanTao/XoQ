@@ -116,8 +116,8 @@ jobs:
 
           echo "Configured: $configured, Passed: $passed"
 
-          # Fail only if ALL configured tests failed (and at least one was configured)
-          if [ "$configured" -gt 0 ] && [ "$passed" -eq 0 ]; then
-            echo "All configured connectivity tests failed!"
+          # Fail if any configured test failed
+          if [ "$configured" -gt 0 ] && [ "$passed" -lt "$configured" ]; then
+            echo "Some connectivity tests failed ($passed/$configured passed)"
             exit 1
           fi
