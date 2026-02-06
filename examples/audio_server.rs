@@ -69,7 +69,8 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let mut builder = AudioServerBuilder::new();
+    // Use persistent identity by default (stable endpoint ID across restarts)
+    let mut builder = AudioServerBuilder::new().iroh_with_identity(".xoq_audio_server_key");
     let mut i = 1;
 
     while i < args.len() {
