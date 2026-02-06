@@ -534,8 +534,11 @@ impl CameraClientBuilder {
             encoding,
             #[cfg(any(feature = "nvenc", feature = "videotoolbox"))]
             decoder,
+            #[cfg(any(feature = "nvenc", feature = "videotoolbox"))]
             cmaf_initialized: false,
+            #[cfg(any(feature = "nvenc", feature = "videotoolbox"))]
             cmaf_width: 0,
+            #[cfg(any(feature = "nvenc", feature = "videotoolbox"))]
             cmaf_height: 0,
         })
     }
@@ -561,8 +564,11 @@ enum CameraClientInner {
         encoding: StreamEncoding,
         #[cfg(any(feature = "nvenc", feature = "videotoolbox"))]
         decoder: Option<Arc<Mutex<H264Decoder>>>,
+        #[cfg(any(feature = "nvenc", feature = "videotoolbox"))]
         cmaf_initialized: bool,
+        #[cfg(any(feature = "nvenc", feature = "videotoolbox"))]
         cmaf_width: u32,
+        #[cfg(any(feature = "nvenc", feature = "videotoolbox"))]
         cmaf_height: u32,
     },
 }
@@ -660,9 +666,12 @@ impl CameraClient {
                 encoding,
                 #[cfg(any(feature = "nvenc", feature = "videotoolbox"))]
                 decoder,
-                cmaf_initialized: _,
-                cmaf_width: _,
-                cmaf_height: _,
+                #[cfg(any(feature = "nvenc", feature = "videotoolbox"))]
+                cmaf_initialized,
+                #[cfg(any(feature = "nvenc", feature = "videotoolbox"))]
+                cmaf_width,
+                #[cfg(any(feature = "nvenc", feature = "videotoolbox"))]
+                cmaf_height,
                 ..
             } => {
                 match encoding {

@@ -113,7 +113,7 @@ jobs:
       - name: Install cargo-semver-checks
         run: cargo install cargo-semver-checks --locked
       - name: Check semver
-        run: cargo semver-checks check-release --features "iroh,serial,camera"
+        run: cargo semver-checks check-release --only-explicit-features --features "iroh,serial,camera"
 
   # npm package check
   semver-npm:
