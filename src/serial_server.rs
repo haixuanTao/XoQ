@@ -152,7 +152,7 @@ impl Server {
 
     async fn handle_connection(&self, conn: IrohConnection) -> Result<()> {
         // Log connection type (direct vs relay)
-        if let Some(mut watcher) = self.endpoint.endpoint().conn_type(conn.remote_id().into()) {
+        if let Some(mut watcher) = self.endpoint.endpoint().conn_type(conn.remote_id()) {
             let conn_type = watcher.get();
             tracing::info!("Connection type: {:?}", conn_type);
         } else {

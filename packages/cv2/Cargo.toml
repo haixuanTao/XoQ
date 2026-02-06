@@ -11,7 +11,7 @@ name = "xoq_cv2"
 crate-type = ["cdylib"]
 
 [features]
-default = ["videotoolbox"]
+default = []
 videotoolbox = ["xoq/videotoolbox"]
 nvenc = ["xoq/nvenc"]
 

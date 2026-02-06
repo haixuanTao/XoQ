@@ -660,9 +660,9 @@ impl CameraClient {
                 encoding,
                 #[cfg(any(feature = "nvenc", feature = "videotoolbox"))]
                 decoder,
-                cmaf_initialized,
-                cmaf_width,
-                cmaf_height,
+                cmaf_initialized: _,
+                cmaf_width: _,
+                cmaf_height: _,
                 ..
             } => {
                 match encoding {

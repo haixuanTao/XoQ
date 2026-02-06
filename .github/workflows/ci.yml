@@ -140,10 +140,16 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            all_features: "iroh,serial,camera"
+            camera_feature: "camera"
           - os: macos-latest
             target: x86_64-apple-darwin
+            all_features: "iroh,serial,camera-macos"
+            camera_feature: "camera-macos"
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            all_features: "iroh,serial"
+            camera_feature: ""
 
     steps:
       - uses: actions/checkout@v4
@@ -173,13 +179,14 @@ jobs:
       - name: Build (serial)
         run: cargo build --features serial --verbose
 
-      # Build with camera feature
+      # Build with camera feature (Linux: V4L2, macOS: AVFoundation, Windows: skip)
       - name: Build (camera)
-        run: cargo build --features camera --verbose
+        if: matrix.camera_feature != ''
+        run: cargo build --features ${{ matrix.camera_feature }} --verbose
 
       # Build with all features
       - name: Build (all features)
-        run: cargo build --features "iroh,serial,camera" --verbose
+        run: cargo build --features "${{ matrix.all_features }}" --verbose
 
       # Build examples
       - name: Build examples
@@ -187,7 +194,7 @@ jobs:
 
       # Run tests
       - name: Run tests
-        run: cargo test --features "iroh,serial,camera" --verbose
+        run: cargo test --features "${{ matrix.all_features }}" --verbose
 
   # Build Python packages
   python:
@@ -224,10 +231,10 @@ jobs:
         working-directory: packages/serial
         run: maturin build --release
 
-      # Build xoq-opencv
+      # Build xoq-opencv (videotoolbox feature is macOS-only)
       - name: Build xoq-opencv
         working-directory: packages/cv2
-        run: maturin build --release
+        run: maturin build --release ${{ matrix.os == 'macos-latest' && '--features videotoolbox' || '' }}
 
       # Build xoq-can
       - name: Build xoq-can
@@ -266,6 +273,13 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            all_features: "iroh,serial,camera"
+          - os: macos-latest
+            all_features: "iroh,serial,camera-macos"
+          - os: windows-latest
+            all_features: "iroh,serial"
 
     steps:
       - uses: actions/checkout@v4
@@ -281,7 +295,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libudev-dev libv4l-dev
 
       - name: Build release
-        run: cargo build --release --features "iroh,serial,camera"
+        run: cargo build --release --features "${{ matrix.all_features }}"
 
       - name: Build release examples
         run: cargo build --release --examples --features "iroh,serial"

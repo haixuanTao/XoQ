@@ -52,10 +52,11 @@ fn device_supports_resolution(device: &Device, fourcc: FourCC, width: u32, heigh
             FrameSizeEnum::Stepwise(s) => {
                 let w_ok = width >= s.min_width
                     && width <= s.max_width
-                    && (s.step_width == 0 || (width - s.min_width) % s.step_width == 0);
+                    && (s.step_width == 0 || (width - s.min_width).is_multiple_of(s.step_width));
                 let h_ok = height >= s.min_height
                     && height <= s.max_height
-                    && (s.step_height == 0 || (height - s.min_height) % s.step_height == 0);
+                    && (s.step_height == 0
+                        || (height - s.min_height).is_multiple_of(s.step_height));
                 if w_ok && h_ok {
                     return true;
                 }
@@ -469,8 +470,8 @@ pub fn list_cameras() -> Result<Vec<CameraInfo>> {
         let path = entry.path();
 
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if name.starts_with("video") {
-                if let Ok(index) = name[5..].parse::<u32>() {
+            if let Some(suffix) = name.strip_prefix("video") {
+                if let Ok(index) = suffix.parse::<u32>() {
                     // Try to get device info
                     let device_name = if let Ok(device) = Device::with_path(&path) {
                         device

@@ -328,7 +328,7 @@ impl MoqTrackReader {
 /// let mut stream = MoqStream::connect_to_insecure("https://relay:4443", "anon/test").await?;
 ///
 /// // Both sides:
-/// stream.write(b"hello");
+/// stream.write("hello");
 /// let data = stream.read().await?;
 /// # Ok(())
 /// # }
