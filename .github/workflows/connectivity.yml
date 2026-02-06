@@ -10,6 +10,10 @@ on:
     # Every 6 hours
     - cron: '0 */6 * * *'
 
+concurrency:
+  group: connectivity
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -33,7 +37,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev libv4l-dev
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev libv4l-dev libasound2-dev
 
       - name: Create virtualenv
         run: python -m venv .venv && echo "$PWD/.venv/bin" >> $GITHUB_PATH
@@ -51,6 +55,10 @@ jobs:
 
       - name: Build xoq-can
         working-directory: packages/can
+        run: maturin develop --release
+
+      - name: Build xoq-sounddevice
+        working-directory: packages/sounddevice
         run: maturin develop --release
 
       # Run each test class separately so one failure doesn't block others
@@ -78,6 +86,14 @@ jobs:
           XOQ_CAN_SERVER_ID: ${{ secrets.XOQ_CAN_SERVER_ID }}
         run: pytest tests/test_connectivity.py::TestCanConnectivity -v
 
+      - name: Test audio connectivity
+        id: test_audio
+        if: always()
+        continue-on-error: true
+        env:
+          XOQ_AUDIO_SERVER_ID: ${{ secrets.XOQ_AUDIO_SERVER_ID }}
+        run: pytest tests/test_connectivity.py::TestAudioConnectivity -v
+
       - name: Summary
         if: always()
         run: |
@@ -89,10 +105,12 @@ jobs:
           serial_status="${{ steps.test_serial.outcome }}"
           camera_status="${{ steps.test_camera.outcome }}"
           can_status="${{ steps.test_can.outcome }}"
+          audio_status="${{ steps.test_audio.outcome }}"
 
           [ "$serial_status" = "success" ] && echo "| Serial (SO100) | :white_check_mark: Pass |" >> $GITHUB_STEP_SUMMARY || echo "| Serial (SO100) | :x: $serial_status |" >> $GITHUB_STEP_SUMMARY
           [ "$camera_status" = "success" ] && echo "| Camera | :white_check_mark: Pass |" >> $GITHUB_STEP_SUMMARY || echo "| Camera | :x: $camera_status |" >> $GITHUB_STEP_SUMMARY
           [ "$can_status" = "success" ] && echo "| CAN (openarm) | :white_check_mark: Pass |" >> $GITHUB_STEP_SUMMARY || echo "| CAN (openarm) | :x: $can_status |" >> $GITHUB_STEP_SUMMARY
+          [ "$audio_status" = "success" ] && echo "| Audio | :white_check_mark: Pass |" >> $GITHUB_STEP_SUMMARY || echo "| Audio | :x: $audio_status |" >> $GITHUB_STEP_SUMMARY
 
       - name: Check results
         if: always()
@@ -112,6 +130,10 @@ jobs:
           if [ -n "${{ secrets.XOQ_CAN_SERVER_ID }}" ]; then
             configured=$((configured + 1))
             [ "${{ steps.test_can.outcome }}" = "success" ] && passed=$((passed + 1))
+          fi
+          if [ -n "${{ secrets.XOQ_AUDIO_SERVER_ID }}" ]; then
+            configured=$((configured + 1))
+            [ "${{ steps.test_audio.outcome }}" = "success" ] && passed=$((passed + 1))
           fi
 
           echo "Configured: $configured, Passed: $passed"

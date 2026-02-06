@@ -448,13 +448,21 @@ async fn handle_connection(
     can_write_tx: tokio::sync::mpsc::Sender<AnyCanFrame>,
     cancel: CancellationToken,
 ) -> (Result<()>, tokio::sync::mpsc::Receiver<AnyCanFrame>) {
-    let stream = match conn.accept_stream().await {
-        Ok(s) => s,
-        Err(e) => {
-            return (
-                Err(anyhow::anyhow!("Failed to accept stream: {}", e)),
-                can_read_rx,
-            );
+    let stream = tokio::select! {
+        result = conn.accept_stream() => {
+            match result {
+                Ok(s) => s,
+                Err(e) => {
+                    return (
+                        Err(anyhow::anyhow!("Failed to accept stream: {}", e)),
+                        can_read_rx,
+                    );
+                }
+            }
+        }
+        _ = cancel.cancelled() => {
+            tracing::info!("Connection cancelled while waiting for stream");
+            return (Ok(()), can_read_rx);
         }
     };
 

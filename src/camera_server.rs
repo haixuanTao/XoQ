@@ -233,8 +233,38 @@ impl CameraServer {
                 let camera = self.camera.clone();
                 let quality = self.jpeg_quality;
 
+                let mut active_cancel: Option<tokio_util::sync::CancellationToken> = None;
+                let mut active_task: Option<tokio::task::JoinHandle<()>> = None;
+
                 loop {
-                    Self::run_iroh_once(&server, &camera, quality).await?;
+                    let conn = server
+                        .accept()
+                        .await?
+                        .ok_or_else(|| anyhow::anyhow!("Server closed"))?;
+
+                    tracing::info!("Client connected: {}", conn.remote_id());
+
+                    // Cancel previous connection if still active
+                    if let Some(cancel) = active_cancel.take() {
+                        tracing::info!("Disconnecting previous client");
+                        cancel.cancel();
+                    }
+                    if let Some(task) = active_task.take() {
+                        let _ = task.await;
+                    }
+
+                    let cancel = tokio_util::sync::CancellationToken::new();
+                    active_cancel = Some(cancel.clone());
+
+                    let cam = camera.clone();
+                    active_task = Some(tokio::spawn(async move {
+                        if let Err(e) =
+                            Self::handle_iroh_connection(conn, &cam, quality, cancel).await
+                        {
+                            tracing::error!("Connection error: {}", e);
+                        }
+                        tracing::info!("Client disconnected");
+                    }));
                 }
             }
             CameraServerInner::Moq { track, .. } => {
@@ -263,7 +293,14 @@ impl CameraServer {
     pub async fn run_once(&mut self) -> Result<()> {
         match &self.inner {
             CameraServerInner::Iroh { server, .. } => {
-                Self::run_iroh_once(server, &self.camera, self.jpeg_quality).await
+                let conn = server
+                    .accept()
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("Server closed"))?;
+
+                tracing::info!("Client connected: {}", conn.remote_id());
+                let cancel = tokio_util::sync::CancellationToken::new();
+                Self::handle_iroh_connection(conn, &self.camera, self.jpeg_quality, cancel).await
             }
             CameraServerInner::Moq { .. } => {
                 anyhow::bail!("run_once not supported for MoQ transport (use run instead)")
@@ -271,47 +308,55 @@ impl CameraServer {
         }
     }
 
-    async fn run_iroh_once(
-        server: &crate::iroh::IrohServer,
+    async fn handle_iroh_connection(
+        conn: crate::iroh::IrohConnection,
         camera: &Arc<Mutex<Camera>>,
         quality: u8,
+        cancel: tokio_util::sync::CancellationToken,
     ) -> Result<()> {
-        let conn = server
-            .accept()
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Server closed"))?;
-
-        tracing::info!("Client connected: {}", conn.remote_id());
-
-        let stream = conn.accept_stream().await?;
+        let stream = tokio::select! {
+            result = conn.accept_stream() => {
+                result.map_err(|e| anyhow::anyhow!("Failed to accept stream: {}", e))?
+            }
+            _ = cancel.cancelled() => {
+                tracing::info!("Connection cancelled while waiting for stream");
+                return Ok(());
+            }
+        };
         let (mut send, _recv) = stream.split();
 
         loop {
-            let frame = {
-                let mut cam = camera.lock().await;
-                cam.capture()?
-            };
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    tracing::info!("Connection cancelled (new client connecting)");
+                    break;
+                }
+                frame_result = async {
+                    let mut cam = camera.lock().await;
+                    cam.capture()
+                } => {
+                    let frame = frame_result?;
+                    let jpeg = frame.to_jpeg(quality)?;
 
-            let jpeg = frame.to_jpeg(quality)?;
+                    // Header: width (4) + height (4) + timestamp (8) + length (4) = 20 bytes
+                    let mut header = Vec::with_capacity(20);
+                    header.extend_from_slice(&frame.width.to_le_bytes());
+                    header.extend_from_slice(&frame.height.to_le_bytes());
+                    header.extend_from_slice(&frame.timestamp_us.to_le_bytes());
+                    header.extend_from_slice(&(jpeg.len() as u32).to_le_bytes());
 
-            // Header: width (4) + height (4) + timestamp (8) + length (4) = 20 bytes
-            let mut header = Vec::with_capacity(20);
-            header.extend_from_slice(&frame.width.to_le_bytes());
-            header.extend_from_slice(&frame.height.to_le_bytes());
-            header.extend_from_slice(&frame.timestamp_us.to_le_bytes()); // u64 = 8 bytes
-            header.extend_from_slice(&(jpeg.len() as u32).to_le_bytes());
-
-            if let Err(e) = send.write_all(&header).await {
-                tracing::debug!("Write error: {}", e);
-                break;
-            }
-            if let Err(e) = send.write_all(&jpeg).await {
-                tracing::debug!("Write error: {}", e);
-                break;
+                    if let Err(e) = send.write_all(&header).await {
+                        tracing::debug!("Write error: {}", e);
+                        break;
+                    }
+                    if let Err(e) = send.write_all(&jpeg).await {
+                        tracing::debug!("Write error: {}", e);
+                        break;
+                    }
+                }
             }
         }
 
-        tracing::info!("Client disconnected");
         Ok(())
     }
 }
