@@ -108,6 +108,9 @@ impl Server {
     pub async fn run(&self) -> Result<()> {
         tracing::info!("Serial bridge server running. ID: {}", self.server_id);
 
+        let mut active_cancel: Option<tokio_util::sync::CancellationToken> = None;
+        let mut active_task: Option<tokio::task::JoinHandle<()>> = None;
+
         loop {
             // Accept connection
             let conn = match self.endpoint.accept().await? {
@@ -117,12 +120,37 @@ impl Server {
 
             tracing::info!("Client connected: {}", conn.remote_id());
 
-            // Handle this connection
-            if let Err(e) = self.handle_connection(conn).await {
-                tracing::error!("Connection error: {}", e);
+            // Cancel previous connection if still active
+            if let Some(cancel) = active_cancel.take() {
+                tracing::info!("Disconnecting previous client");
+                cancel.cancel();
+            }
+            if let Some(task) = active_task.take() {
+                let _ = task.await;
             }
 
-            tracing::info!("Client disconnected");
+            // Create a cancel token for this connection
+            let cancel = tokio_util::sync::CancellationToken::new();
+            active_cancel = Some(cancel.clone());
+
+            // Spawn connection handler so we can accept new connections immediately
+            let serial_read_rx = self.serial_read_rx.clone();
+            let serial_write_tx = self.serial_write_tx.clone();
+            let endpoint = self.endpoint.clone();
+            active_task = Some(tokio::spawn(async move {
+                if let Err(e) = Self::handle_connection_inner(
+                    conn,
+                    serial_read_rx,
+                    serial_write_tx,
+                    &endpoint,
+                    cancel,
+                )
+                .await
+                {
+                    tracing::error!("Connection error: {}", e);
+                }
+                tracing::info!("Client disconnected");
+            }));
         }
     }
 
@@ -141,7 +169,16 @@ impl Server {
 
             tracing::info!("Client connected: {}", conn.remote_id());
 
-            if let Err(e) = self.handle_connection(conn).await {
+            let cancel = tokio_util::sync::CancellationToken::new();
+            if let Err(e) = Self::handle_connection_inner(
+                conn,
+                self.serial_read_rx.clone(),
+                self.serial_write_tx.clone(),
+                &self.endpoint,
+                cancel,
+            )
+            .await
+            {
                 tracing::error!("Connection error: {}", e);
             }
 
@@ -150,9 +187,15 @@ impl Server {
         }
     }
 
-    async fn handle_connection(&self, conn: IrohConnection) -> Result<()> {
+    async fn handle_connection_inner(
+        conn: IrohConnection,
+        serial_read_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<Vec<u8>>>>,
+        serial_write_tx: std::sync::mpsc::Sender<Vec<u8>>,
+        endpoint: &crate::iroh::IrohServer,
+        external_cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<()> {
         // Log connection type (direct vs relay)
-        if let Some(mut watcher) = self.endpoint.endpoint().conn_type(conn.remote_id()) {
+        if let Some(mut watcher) = endpoint.endpoint().conn_type(conn.remote_id()) {
             let conn_type = watcher.get();
             tracing::info!("Connection type: {:?}", conn_type);
         } else {
@@ -164,16 +207,18 @@ impl Server {
             conn.max_datagram_size()
         );
         tracing::debug!("Waiting for client to open stream...");
-        let stream = conn
-            .accept_stream()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to accept stream: {}", e))?;
+        let stream = tokio::select! {
+            result = conn.accept_stream() => {
+                result.map_err(|e| anyhow::anyhow!("Failed to accept stream: {}", e))?
+            }
+            _ = external_cancel.cancelled() => {
+                tracing::info!("Connection cancelled while waiting for stream");
+                return Ok(());
+            }
+        };
         tracing::debug!("Stream accepted, starting bridge");
         // Split the stream so reads and writes don't block each other
         let (mut send, mut recv) = stream.split();
-
-        let serial_read_rx = self.serial_read_rx.clone();
-        let serial_write_tx = self.serial_write_tx.clone();
 
         // Drain any stale data from the channel before starting
         // This prevents old data from confusing a reconnecting client
@@ -188,18 +233,23 @@ impl Server {
             }
         }
 
-        // Use connection's cancellation token for graceful shutdown (ensures lock is released)
+        // Merge connection's own cancel token with the external one
         let cancel_token = conn.cancellation_token();
 
         // Spawn task: serial -> network (event-driven via channel)
         let cancel_clone = cancel_token.clone();
+        let external_clone = external_cancel.clone();
         let serial_to_net = tokio::spawn(async move {
             tracing::debug!("Serial->Network bridge task started");
             let mut rx = serial_read_rx.lock().await;
             loop {
                 tokio::select! {
                     _ = cancel_clone.cancelled() => {
-                        tracing::debug!("Serial->Network task cancelled");
+                        tracing::debug!("Serial->Network task cancelled (conn dropped)");
+                        break;
+                    }
+                    _ = external_clone.cancelled() => {
+                        tracing::debug!("Serial->Network task cancelled (new client)");
                         break;
                     }
                     data = rx.recv() => {
@@ -230,6 +280,10 @@ impl Server {
         let mut buf = vec![0u8; 1024];
         loop {
             tokio::select! {
+                _ = external_cancel.cancelled() => {
+                    tracing::info!("Connection cancelled (new client connecting)");
+                    break;
+                }
                 // Stream data (reliable, backward-compatible path)
                 result = recv.read(&mut buf) => {
                     match result {
