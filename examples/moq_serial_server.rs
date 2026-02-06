@@ -1,11 +1,13 @@
-//! MoQ serial bridge server - uses MoQ relay instead of iroh P2P
+//! MoQ serial bridge server
 //!
-//! Usage: moq_serial_server <port> [baud_rate] [moq_path]
-//! Example: moq_serial_server /dev/ttyUSB0 115200 anon/xoq-serial
+//! Usage: moq_serial_server <port> [baud_rate] [relay_url] [moq_path]
+//! Example: moq_serial_server /dev/ttyUSB0 1000000 https://172.18.133.111:4443 anon/xoq-serial
 
 use anyhow::Result;
 use std::env;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -19,8 +21,8 @@ async fn main() -> Result<()> {
 
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
-        println!("Usage: moq_serial_server <port> [baud_rate] [moq_path]");
-        println!("Example: moq_serial_server /dev/ttyUSB0 115200 anon/xoq-serial");
+        println!("Usage: moq_serial_server <port> [baud_rate] [relay_url] [moq_path]");
+        println!("Example: moq_serial_server /dev/ttyUSB0 1000000 https://172.18.133.111:4443 anon/xoq-serial");
         println!("\nAvailable ports:");
         for port in xoq::list_ports()? {
             println!("  {} - {:?}", port.name, port.port_type);
@@ -29,9 +31,13 @@ async fn main() -> Result<()> {
     }
 
     let port_name = &args[1];
-    let baud_rate: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(115200);
-    let moq_path = args
+    let baud_rate: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1000000);
+    let relay_url = args
         .get(3)
+        .cloned()
+        .unwrap_or_else(|| "https://172.18.133.111:4443".to_string());
+    let moq_path = args
+        .get(4)
         .cloned()
         .unwrap_or_else(|| "anon/xoq-serial".to_string());
 
@@ -41,39 +47,22 @@ async fn main() -> Result<()> {
 
     tracing::info!("Serial port opened: {} @ {} baud", port_name, baud_rate);
 
-    // Connect to MoQ relay as duplex
-    tracing::info!("Connecting to MoQ relay at path '{}'...", moq_path);
-    let mut conn = xoq::MoqBuilder::new()
-        .path(&moq_path)
-        .connect_duplex()
-        .await?;
-
+    // Connect to MoQ relay using MoqStream (server side)
+    tracing::info!("Connecting to {} at path '{}'...", relay_url, moq_path);
+    let stream = xoq::MoqStream::accept_at_insecure(&relay_url, &moq_path).await?;
+    let stream = Arc::new(Mutex::new(stream));
     tracing::info!("Connected to MoQ relay");
 
-    // Create track for serial -> network (server publishes serial data)
-    let mut serial_out_track = conn.create_track("serial-out");
-    tracing::info!("Publishing on track 'serial-out'");
-
-    // Subscribe to track for network -> serial (client publishes commands)
-    tracing::info!("Waiting for client to publish on 'serial-in'...");
-    let serial_in_reader = conn.subscribe_track("serial-in").await?;
-
-    let mut serial_in_reader = match serial_in_reader {
-        Some(r) => {
-            tracing::info!("Subscribed to 'serial-in' track");
-            r
-        }
-        None => {
-            tracing::error!("Failed to subscribe to 'serial-in' track");
-            return Err(anyhow::anyhow!("No serial-in track"));
-        }
-    };
-
     // Spawn task: network -> serial
+    let stream_read = stream.clone();
     let net_to_serial = tokio::spawn(async move {
         let mut last_recv = Instant::now();
         loop {
-            match serial_in_reader.read().await {
+            let data = {
+                let mut s = stream_read.lock().await;
+                s.read().await
+            };
+            match data {
                 Ok(Some(data)) => {
                     let gap = last_recv.elapsed();
                     if gap > Duration::from_millis(50) {
@@ -91,7 +80,7 @@ async fn main() -> Result<()> {
                     }
                 }
                 Ok(None) => {
-                    tracing::info!("MoQ serial-in track ended");
+                    tracing::info!("MoQ stream ended");
                     break;
                 }
                 Err(e) => {
@@ -111,7 +100,8 @@ async fn main() -> Result<()> {
             }
             Ok(n) => {
                 tracing::debug!("Serial→MoQ: {} bytes", n);
-                serial_out_track.write(buf[..n].to_vec());
+                let mut s = stream.lock().await;
+                s.write(buf[..n].to_vec());
             }
             Err(e) => {
                 tracing::error!("Serial read error: {}", e);

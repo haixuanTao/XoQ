@@ -1,21 +1,20 @@
-//! MoQ relay diagnostic test
+//! MoQ relay test
 //!
-//! Tests publish and subscribe through the relay to verify announcements work.
+//! Tests publish and subscribe through a MoQ relay.
 //!
 //! Usage:
-//!   # Publisher mode (run first):
-//!   RUST_LOG=moq_lite=debug,info cargo run --example moq_test -- pub
+//!   # One-way pub/sub test (two terminals):
+//!   cargo run --example moq_test -- pub
+//!   cargo run --example moq_test -- sub
 //!
-//!   # Subscriber mode (run second, in another terminal):
-//!   RUST_LOG=moq_lite=debug,info cargo run --example moq_test -- sub
-//!
-//!   # Or run both in one process:
-//!   RUST_LOG=moq_lite=debug,info cargo run --example moq_test -- both
+//!   # Bidirectional MoqStream test (single process):
+//!   cargo run --example moq_test -- stream
 
 use anyhow::Result;
 use std::time::Duration;
 
-const TEST_PATH: &str = "anon/xoq-diag-test";
+const TEST_PATH: &str = "anon/xoq-test";
+const DEFAULT_RELAY: &str = "https://172.18.133.111:4443";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -25,124 +24,167 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let mode = std::env::args().nth(1).unwrap_or_default();
+    let args: Vec<String> = std::env::args().collect();
+    let mode = args.get(1).map(|s| s.as_str()).unwrap_or("");
+    let relay = args.get(2).map(|s| s.as_str()).unwrap_or(DEFAULT_RELAY);
 
-    match mode.as_str() {
-        "pub" => run_publisher().await,
-        "sub" => run_subscriber().await,
-        "both" => run_both().await,
+    match mode {
+        "pub" => run_publisher(relay).await,
+        "sub" => run_subscriber(relay).await,
+        "stream" => run_stream_test(relay).await,
         _ => {
-            eprintln!("Usage: moq_test <pub|sub|both>");
-            eprintln!("  pub  - Run publisher only");
-            eprintln!("  sub  - Run subscriber only");
-            eprintln!("  both - Run publisher then subscriber in same process");
+            eprintln!("Usage: moq_test <pub|sub|stream> [relay-url]");
+            eprintln!();
+            eprintln!("  pub    - Run publisher (one-way test)");
+            eprintln!("  sub    - Run subscriber (one-way test)");
+            eprintln!("  stream - Bidirectional MoqStream test (server + client)");
+            eprintln!();
+            eprintln!("Default relay: {}", DEFAULT_RELAY);
             Ok(())
         }
     }
 }
 
-async fn run_publisher() -> Result<()> {
-    eprintln!(
-        "[test] Connecting publisher to relay at path '{}'...",
-        TEST_PATH
-    );
+async fn run_publisher(relay: &str) -> Result<()> {
+    eprintln!("[pub] Connecting to {} at path '{}'...", relay, TEST_PATH);
 
-    let mut publisher = xoq::MoqBuilder::new()
+    let (_publisher, mut track) = xoq::MoqBuilder::new()
+        .relay(relay)
         .path(TEST_PATH)
-        .connect_publisher()
+        .disable_tls_verify()
+        .connect_publisher_with_track("video")
         .await?;
 
-    eprintln!("[test] Publisher connected! Creating track 'video'...");
-
-    let mut track = publisher.create_track("video");
-
-    eprintln!("[test] Track created. Sending frames every second...");
+    eprintln!("[pub] Connected! Sending frames...");
 
     for i in 0u64.. {
         let msg = format!("frame-{}", i);
         track.write_str(&msg);
-        eprintln!("[test] Sent: {}", msg);
+        eprintln!("[pub] Sent: {}", msg);
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
     Ok(())
 }
 
-async fn run_subscriber() -> Result<()> {
-    eprintln!(
-        "[test] Connecting subscriber to relay at path '{}'...",
-        TEST_PATH
-    );
+async fn run_subscriber(relay: &str) -> Result<()> {
+    eprintln!("[sub] Connecting to {} at path '{}'...", relay, TEST_PATH);
 
     let mut subscriber = xoq::MoqBuilder::new()
+        .relay(relay)
         .path(TEST_PATH)
+        .disable_tls_verify()
         .connect_subscriber()
         .await?;
 
-    eprintln!("[test] Subscriber connected! Waiting for track 'video'...");
+    eprintln!("[sub] Connected! Subscribing to track 'video'...");
 
     match subscriber.subscribe_track("video").await {
         Ok(Some(mut reader)) => {
-            eprintln!("[test] Subscribed to track! Reading frames...");
-            for _ in 0..10 {
+            eprintln!("[sub] Subscribed! Reading frames...");
+            loop {
                 match reader.read_string().await {
-                    Ok(Some(data)) => eprintln!("[test] Received: {}", data),
+                    Ok(Some(data)) => eprintln!("[sub] Received: {}", data),
                     Ok(None) => {
-                        eprintln!("[test] Track ended (read returned None)");
+                        eprintln!("[sub] Track ended");
                         break;
                     }
                     Err(e) => {
-                        eprintln!("[test] Read error: {}", e);
+                        eprintln!("[sub] Error: {}", e);
                         break;
                     }
                 }
             }
         }
-        Ok(None) => eprintln!("[test] No broadcast found (announced returned None)"),
-        Err(e) => eprintln!("[test] Subscribe failed: {}", e),
+        Ok(None) => eprintln!("[sub] Subscribe returned None"),
+        Err(e) => eprintln!("[sub] Subscribe failed: {}", e),
     }
 
     Ok(())
 }
 
-async fn run_both() -> Result<()> {
-    eprintln!("[test] === Running subscriber-first, then publisher ===");
+async fn run_stream_test(relay: &str) -> Result<()> {
+    eprintln!("[test] === MoqStream bidirectional test ===");
+    eprintln!("[test] Relay: {}", relay);
     eprintln!("[test] Path: {}", TEST_PATH);
 
-    // Start subscriber FIRST
-    eprintln!("\n[test] --- Starting subscriber ---");
-    let mut subscriber = xoq::MoqBuilder::new()
-        .path(TEST_PATH)
-        .connect_subscriber()
-        .await?;
-    eprintln!("[test] Subscriber connected! Waiting for announcements in background...");
+    // Use a channel to signal when both sides are ready
+    let (server_ready_tx, server_ready_rx) = tokio::sync::oneshot::channel::<()>();
+    let (client_ready_tx, client_ready_rx) = tokio::sync::oneshot::channel::<()>();
 
-    // Start publisher SECOND (after subscriber is waiting)
-    eprintln!("\n[test] --- Starting publisher ---");
-    let mut publisher = xoq::MoqBuilder::new()
-        .path(TEST_PATH)
-        .connect_publisher()
-        .await?;
+    let relay_server = relay.to_string();
+    let relay_client = relay.to_string();
 
-    eprintln!("[test] Publisher connected!");
-    let mut track = publisher.create_track("video");
-    track.write_str("hello-from-publisher");
-    eprintln!("[test] Published 'hello-from-publisher' to track 'video'");
+    let server = tokio::spawn(async move {
+        eprintln!("[server] Accepting...");
+        let mut stream = xoq::MoqStream::accept_at_insecure(&relay_server, TEST_PATH).await?;
+        eprintln!("[server] Connected!");
 
-    // Now check if subscriber receives the announcement
-    eprintln!("\n[test] --- Checking subscriber ---");
-    match subscriber.subscribe_track("video").await {
-        Ok(Some(mut reader)) => {
-            eprintln!("[test] Subscribed! Reading...");
-            match tokio::time::timeout(Duration::from_secs(5), reader.read_string()).await {
-                Ok(Ok(Some(data))) => eprintln!("[test] SUCCESS - Received: {}", data),
-                Ok(Ok(None)) => eprintln!("[test] FAIL - Track ended without data"),
-                Ok(Err(e)) => eprintln!("[test] FAIL - Read error: {}", e),
-                Err(_) => eprintln!("[test] FAIL - Read timed out after 5s"),
+        // Signal ready and wait for client
+        let _ = server_ready_tx.send(());
+        let _ = client_ready_rx.await;
+
+        // Write after both connected
+        eprintln!("[server] Writing 'hello-from-server'...");
+        stream.write(bytes::Bytes::from("hello-from-server"));
+
+        // Read
+        eprintln!("[server] Reading...");
+        match tokio::time::timeout(Duration::from_secs(10), stream.read()).await {
+            Ok(Ok(Some(data))) => {
+                eprintln!(
+                    "[server] SUCCESS: Received '{}'",
+                    String::from_utf8_lossy(&data)
+                );
             }
+            Ok(Ok(None)) => eprintln!("[server] FAIL: Stream ended"),
+            Ok(Err(e)) => eprintln!("[server] FAIL: Read error: {}", e),
+            Err(_) => eprintln!("[server] FAIL: Read timed out"),
         }
-        Ok(None) => eprintln!("[test] FAIL - No broadcast announced"),
-        Err(e) => eprintln!("[test] FAIL - Subscribe error: {}", e),
+
+        // Keep stream alive briefly so client can read
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        Ok::<_, anyhow::Error>(())
+    });
+
+    // Small delay to let server connect first
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let client = tokio::spawn(async move {
+        eprintln!("[client] Connecting...");
+        let mut stream = xoq::MoqStream::connect_to_insecure(&relay_client, TEST_PATH).await?;
+        eprintln!("[client] Connected!");
+
+        // Signal ready and wait for server
+        let _ = client_ready_tx.send(());
+        let _ = server_ready_rx.await;
+
+        // Write after both connected
+        eprintln!("[client] Writing 'hello-from-client'...");
+        stream.write(bytes::Bytes::from("hello-from-client"));
+
+        // Read
+        eprintln!("[client] Reading...");
+        match tokio::time::timeout(Duration::from_secs(10), stream.read()).await {
+            Ok(Ok(Some(data))) => {
+                eprintln!(
+                    "[client] SUCCESS: Received '{}'",
+                    String::from_utf8_lossy(&data)
+                );
+            }
+            Ok(Ok(None)) => eprintln!("[client] FAIL: Stream ended"),
+            Ok(Err(e)) => eprintln!("[client] FAIL: Read error: {}", e),
+            Err(_) => eprintln!("[client] FAIL: Read timed out"),
+        }
+        Ok::<_, anyhow::Error>(())
+    });
+
+    let (server_res, client_res) = tokio::join!(server, client);
+    if let Err(e) = server_res? {
+        eprintln!("[server] Error: {}", e);
+    }
+    if let Err(e) = client_res? {
+        eprintln!("[client] Error: {}", e);
     }
 
     Ok(())

@@ -1,7 +1,7 @@
 //! MoQ serial bridge client - connects to MoQ serial server
 //!
-//! Usage: moq_serial_client [moq_path]
-//! Example: moq_serial_client anon/xoq-serial
+//! Usage: moq_serial_client [relay_url] [moq_path]
+//! Example: moq_serial_client https://172.18.133.111:4443 anon/xoq-serial
 //!
 //! Reads from stdin, sends to server. Prints server responses to stdout.
 
@@ -19,14 +19,22 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let moq_path = env::args()
-        .nth(1)
+    let args: Vec<String> = env::args().collect();
+    let relay_url = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| "https://172.18.133.111:4443".to_string());
+    let moq_path = args
+        .get(2)
+        .cloned()
         .unwrap_or_else(|| "anon/xoq-serial".to_string());
 
-    tracing::info!("Connecting to MoQ relay at path '{}'...", moq_path);
+    tracing::info!("Connecting to {} at path '{}'...", relay_url, moq_path);
 
     let mut conn = xoq::MoqBuilder::new()
+        .relay(&relay_url)
         .path(&moq_path)
+        .disable_tls_verify()
         .connect_duplex()
         .await?;
 
