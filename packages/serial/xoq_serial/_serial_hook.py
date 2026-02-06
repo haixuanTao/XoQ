@@ -1,0 +1,123 @@
+"""Startup hook that patches ``import serial`` to include xoq remote serial ports.
+
+Installed via ``xoq_serial_hook.pth`` so it runs automatically at interpreter
+startup.  After the hook fires once it removes itself from
+``sys.meta_path`` — zero overhead for subsequent imports.
+"""
+
+import importlib
+import importlib.abc
+import importlib.machinery
+import importlib.util
+import re
+import sys
+
+
+# Pattern for iroh node IDs (64-char hex-encoded ed25519 public keys)
+_IROH_ID_RE = re.compile(r"^[a-f0-9]{64}$")
+
+
+def _is_remote_port(port):
+    """Return True if *port* looks like a remote serial port identifier."""
+    s = str(port) if port is not None else ""
+    return bool(_IROH_ID_RE.match(s))
+
+
+class _XoqSerialType(type):
+    """Metaclass: dispatches Serial() construction based on port identifier."""
+
+    def __call__(cls, *args, **kwargs):
+        port = args[0] if args else kwargs.get("port")
+
+        if _is_remote_port(port):
+            # Only pass port and timeout to xoq; strip pyserial-specific kwargs
+            xoq_kwargs = {}
+            if "timeout" in kwargs:
+                xoq_kwargs["timeout"] = kwargs["timeout"]
+            if args:
+                return cls._xoq(args[0], **xoq_kwargs)
+            return cls._xoq(port=port, **xoq_kwargs)
+
+        return cls._real(*args, **kwargs)
+
+    def __instancecheck__(cls, instance):
+        return type.__instancecheck__(cls, instance) or isinstance(
+            instance, (cls._real, cls._xoq)
+        )
+
+
+class _XoqSerial(metaclass=_XoqSerialType):
+    _real = object
+    _xoq = object
+
+
+def _patch_serial(mod):
+    """Patch serial.Serial with xoq-aware wrapper."""
+    try:
+        import xoq_serial as _xoq
+
+        if not isinstance(mod.Serial, _XoqSerialType):
+            _XoqSerial._real = mod.Serial
+            _XoqSerial._xoq = _xoq.Serial
+            _XoqSerial.__name__ = "Serial"
+            _XoqSerial.__qualname__ = "Serial"
+            mod.Serial = _XoqSerial
+    except ImportError:
+        pass
+
+
+class _SerialFinder(importlib.abc.MetaPathFinder):
+    """One-shot meta-path finder that intercepts ``import serial``."""
+
+    def find_spec(self, fullname, path, target=None):
+        if fullname != "serial":
+            return None
+
+        # Remove ourselves to avoid recursion
+        sys.meta_path[:] = [f for f in sys.meta_path if f is not self]
+
+        # Let the real serial import happen normally
+        spec = importlib.util.find_spec("serial")
+        if spec is None:
+            return None
+
+        # Wrap the loader to patch after loading
+        original_loader = spec.loader
+        spec.loader = _PatchingLoader(original_loader)
+        return spec
+
+
+class _PatchingLoader:
+    """Loader wrapper that patches serial after the real loader finishes."""
+
+    def __init__(self, original):
+        self._original = original
+
+    def create_module(self, spec):
+        if hasattr(self._original, "create_module"):
+            return self._original.create_module(spec)
+        return None
+
+    def exec_module(self, module):
+        self._original.exec_module(module)
+        _patch_serial(module)
+
+
+def install():
+    """Insert the serial import hook (idempotent, guards against re-entry)."""
+    # Already imported — patch in place
+    if "serial" in sys.modules:
+        _patch_serial(sys.modules["serial"])
+        return
+
+    # xoq_serial not available — nothing to do
+    try:
+        import xoq_serial  # noqa: F401
+    except ImportError:
+        return
+
+    # Don't double-install
+    if any(isinstance(f, _SerialFinder) for f in sys.meta_path):
+        return
+
+    sys.meta_path.insert(0, _SerialFinder())

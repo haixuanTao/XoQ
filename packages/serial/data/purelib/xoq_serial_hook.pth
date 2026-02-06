@@ -1,0 +1,1 @@
+import xoq_serial._serial_hook as _h; _h.install()

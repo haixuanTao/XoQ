@@ -1,0 +1,1 @@
+import xoq_can._can_hook as _h; _h.install()

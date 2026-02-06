@@ -15,7 +15,7 @@ method:Bus.send
 method:Bus.shutdown
 method:Message.__repr__
 method:Message.__str__
-module:can
+module:xoq_can
 property:Bus.channel_info
 property:Message.arbitration_id
 property:Message.bitrate_switch

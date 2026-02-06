@@ -27,17 +27,17 @@ class TestSerialConnectivity:
 
     @pytest.mark.timeout(60)
     def test_serial_connect(self):
-        import serial
+        import xoq_serial
 
-        ser = serial.Serial(SERIAL_SERVER_ID, timeout=10.0)
+        ser = xoq_serial.Serial(SERIAL_SERVER_ID, timeout=10.0)
         assert ser.is_open
         ser.close()
 
     @pytest.mark.timeout(60)
     def test_serial_read(self):
-        import serial
+        import xoq_serial
 
-        ser = serial.Serial(SERIAL_SERVER_ID, timeout=10.0)
+        ser = xoq_serial.Serial(SERIAL_SERVER_ID, timeout=10.0)
         try:
             data = ser.read(1)
             # Success: no exception raised. Data may be empty on timeout.
@@ -80,20 +80,20 @@ class TestCanConnectivity:
 
     @pytest.mark.timeout(60)
     def test_can_connect(self):
-        import can
+        import xoq_can
 
-        bus = can.Bus(channel=CAN_SERVER_ID, timeout=10.0)
+        bus = xoq_can.Bus(channel=CAN_SERVER_ID, timeout=10.0)
         assert bus.channel_info is not None
         bus.shutdown()
 
     @pytest.mark.timeout(60)
     def test_can_recv(self):
-        import can
+        import xoq_can
 
-        bus = can.Bus(channel=CAN_SERVER_ID, timeout=10.0)
+        bus = xoq_can.Bus(channel=CAN_SERVER_ID, timeout=10.0)
         try:
             # recv returns None on timeout, which is fine — we just want no exception
             msg = bus.recv(timeout=5.0)
-            assert msg is None or isinstance(msg, can.Message)
+            assert msg is None or isinstance(msg, xoq_can.Message)
         finally:
             bus.shutdown()

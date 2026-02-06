@@ -7,7 +7,7 @@ license = "Apache-2.0"
 repository = "https://github.com/haixuantao/xoq"
 
 [lib]
-name = "can"
+name = "xoq_can"
 crate-type = ["cdylib"]
 
 [dependencies]

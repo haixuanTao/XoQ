@@ -2,8 +2,7 @@
 
 # Re-export xoq-can as xoq.can
 try:
-    import can
-    can = can
+    import xoq_can as can
 except ImportError:
     can = None
 
@@ -15,8 +14,7 @@ except ImportError:
 
 # Re-export xoq-serial as xoq.serial
 try:
-    import serial
-    serial = serial
+    import xoq_serial as serial
 except ImportError:
     serial = None
 

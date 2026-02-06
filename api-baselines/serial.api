@@ -22,7 +22,7 @@ method:Serial.read_until
 method:Serial.readline
 method:Serial.reset_input_buffer
 method:Serial.write
-module:serial
+module:xoq_serial
 property:Serial.in_waiting
 property:Serial.is_open
 property:Serial.name
