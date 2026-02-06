@@ -30,7 +30,9 @@ const:WINDOW_NORMAL
 const:WINDOW_OPENGL
 constructor:VideoCapture
 export:VideoCapture
+method:VideoCapture.get
 method:VideoCapture.isOpened
 method:VideoCapture.read
 method:VideoCapture.release
+method:VideoCapture.set
 module:xoq_cv2

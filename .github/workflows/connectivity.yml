@@ -1,6 +1,10 @@
 name: Hardware Connectivity
 
 on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
   workflow_dispatch:
   schedule:
     # Every 6 hours
