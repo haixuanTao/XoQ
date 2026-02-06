@@ -195,6 +195,8 @@ pub enum Transport {
         relay: String,
         /// Authentication token
         token: Option<String>,
+        /// Disable TLS verification (for self-signed certs)
+        insecure: bool,
     },
 }
 
@@ -272,7 +274,20 @@ impl SerialPortBuilder {
         self.transport = Transport::Moq {
             relay: relay.to_string(),
             token: None,
+            insecure: false,
         };
+        self
+    }
+
+    /// Disable TLS verification for MoQ (for self-signed certs).
+    pub fn insecure(mut self) -> Self {
+        if let Transport::Moq {
+            insecure: ref mut i,
+            ..
+        } = self.transport
+        {
+            *i = true;
+        }
         self
     }
 
@@ -317,8 +332,16 @@ impl SerialPortBuilder {
                     use_datagrams,
                 })
             })?,
-            Transport::Moq { relay, token: _ } => runtime.block_on(async {
-                let stream = crate::moq::MoqStream::connect_to(&relay, &self.port_name).await?;
+            Transport::Moq {
+                relay,
+                token: _,
+                insecure,
+            } => runtime.block_on(async {
+                let stream = if insecure {
+                    crate::moq::MoqStream::connect_to_insecure(&relay, &self.port_name).await?
+                } else {
+                    crate::moq::MoqStream::connect_to(&relay, &self.port_name).await?
+                };
                 Ok::<_, anyhow::Error>(ClientInner::Moq {
                     stream: Arc::new(Mutex::new(stream)),
                 })

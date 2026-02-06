@@ -154,12 +154,12 @@ impl Server {
         // Log connection type (direct vs relay)
         if let Some(mut watcher) = self.endpoint.endpoint().conn_type(conn.remote_id().into()) {
             let conn_type = watcher.get();
-            tracing::warn!("Connection type: {:?}", conn_type);
+            tracing::info!("Connection type: {:?}", conn_type);
         } else {
-            tracing::warn!("Connection type: UNKNOWN (no watcher)");
+            tracing::info!("Connection type: UNKNOWN (no watcher)");
         }
 
-        tracing::warn!(
+        tracing::info!(
             "max_datagram_size={:?} (None means datagrams unsupported)",
             conn.max_datagram_size()
         );
@@ -226,7 +226,7 @@ impl Server {
         // Main task: network -> serial
         // Listen on BOTH the stream (reliable, backward-compatible) and datagrams
         // (low-latency, each datagram = separate message, no stream coalescing).
-        tracing::warn!("Entering network->serial bridge loop (stream + datagram)");
+        tracing::debug!("Entering network->serial bridge loop (stream + datagram)");
         let mut buf = vec![0u8; 1024];
         loop {
             tokio::select! {
@@ -261,7 +261,7 @@ impl Server {
                 result = conn.recv_datagram() => {
                     match result {
                         Ok(data) => {
-                            tracing::warn!(
+                            tracing::debug!(
                                 "Network(datagram) -> Serial: {} bytes",
                                 data.len(),
                             );

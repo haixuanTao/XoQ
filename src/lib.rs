@@ -122,6 +122,10 @@ pub mod can;
 #[cfg(all(feature = "can", feature = "iroh"))]
 pub mod can_server;
 
+// MoQ CAN server (local CAN only, no iroh needed)
+#[cfg(feature = "can")]
+pub mod moq_can_server;
+
 // Remote CAN client (cross-platform, requires iroh)
 #[cfg(feature = "can-remote")]
 pub mod socketcan_impl;
@@ -223,6 +227,9 @@ pub use can::{list_interfaces, CanConfig, CanReader, CanSocket, CanWriter};
 
 #[cfg(all(feature = "can", feature = "iroh"))]
 pub use can_server::CanServer;
+
+#[cfg(feature = "can")]
+pub use moq_can_server::MoqCanServer;
 
 // Remote CAN client (cross-platform)
 #[cfg(feature = "can-remote")]

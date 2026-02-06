@@ -6,7 +6,9 @@
 
 use anyhow::Result;
 use std::env;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -66,18 +68,26 @@ async fn run_moq_server(port_name: &str, baud_rate: u32, moq_path: &str) -> Resu
     tracing::info!("Serial port opened: {} @ {} baud", port_name, baud_rate);
 
     // Connect via MoqStream (waits for client, no timeout)
-    tracing::info!("Connecting to MoQ relay at path '{}'...", moq_path);
-    let stream = xoq::MoqStream::accept(moq_path).await?;
+    let relay = "https://cdn.moq.dev";
+    tracing::info!(
+        "Connecting to MoQ relay at '{}' path '{}'...",
+        relay,
+        moq_path
+    );
+    let stream = xoq::MoqStream::accept_at(relay, moq_path).await?;
+    let stream = Arc::new(Mutex::new(stream));
     tracing::info!("Client connected!");
 
-    // Split for concurrent read/write from different tasks
-    let (mut moq_writer, mut moq_reader, _pub, _sub) = stream.split();
-
     // Spawn task: network -> serial
+    let stream_read = stream.clone();
     let net_to_serial = tokio::spawn(async move {
         let mut last_recv = Instant::now();
         loop {
-            match moq_reader.read().await {
+            let read_result = {
+                let mut stream = stream_read.lock().await;
+                stream.read().await
+            };
+            match read_result {
                 Ok(Some(data)) => {
                     let gap = last_recv.elapsed();
                     if gap > Duration::from_millis(50) {
@@ -115,7 +125,8 @@ async fn run_moq_server(port_name: &str, baud_rate: u32, moq_path: &str) -> Resu
             }
             Ok(n) => {
                 tracing::debug!("Serial→MoQ: {} bytes", n);
-                moq_writer.write(buf[..n].to_vec());
+                let mut stream = stream.lock().await;
+                stream.write(buf[..n].to_vec());
             }
             Err(e) => {
                 tracing::error!("Serial read error: {}", e);
