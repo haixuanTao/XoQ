@@ -110,7 +110,7 @@ class TestAudioConnectivity:
         import xoq_sounddevice
 
         stream = xoq_sounddevice.Stream(AUDIO_SERVER_ID, samplerate=48000, channels=1)
-        assert stream.is_active
+        assert stream.active
         stream.stop()
 
     @pytest.mark.timeout(60)
