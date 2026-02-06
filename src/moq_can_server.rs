@@ -8,11 +8,10 @@ use socketcan::Socket;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
 
 use crate::can::{CanFdFrame, CanFrame};
 use crate::can_types::{wire, AnyCanFrame};
-use crate::moq::MoqStream;
+use crate::moq::MoqBuilder;
 
 /// A server that bridges a local CAN interface to remote clients over MoQ relay.
 pub struct MoqCanServer {
@@ -92,7 +91,13 @@ impl MoqCanServer {
     }
 
     /// Run the MoQ CAN bridge, connecting to the relay and bridging until disconnected.
-    pub async fn run(&mut self, relay: &str, path: &str) -> Result<()> {
+    ///
+    /// Uses broadcast pattern for 1-to-many state fan-out and many-to-1 command collection:
+    /// - State: Published to `{path}/state` track "can" (all browsers receive CAN frames)
+    /// - Commands: Subscribed from `{path}/commands` track "can" (any browser can send commands)
+    ///
+    /// Set `insecure` to true for self-hosted relays with self-signed TLS certificates.
+    pub async fn run(&mut self, relay: &str, path: &str, insecure: bool) -> Result<()> {
         tracing::info!(
             "MoQ CAN server connecting to {}/{} for interface {}...",
             relay,
@@ -100,9 +105,18 @@ impl MoqCanServer {
             self.interface
         );
 
-        let stream = MoqStream::accept_at(relay, path).await?;
-        let stream = Arc::new(Mutex::new(stream));
-        tracing::info!("MoQ CAN server connected to relay");
+        // State broadcast: CAN → all browsers
+        let mut builder = MoqBuilder::new().relay(relay);
+        if insecure {
+            builder = builder.disable_tls_verify();
+        }
+
+        let (_publisher, mut state_writer) = builder
+            .clone()
+            .path(&format!("{}/state", path))
+            .connect_publisher_with_track("can")
+            .await?;
+        tracing::info!("State broadcast connected on {}/state", path);
 
         let mut can_read_rx = self
             .can_read_rx
@@ -120,15 +134,13 @@ impl MoqCanServer {
 
         let can_write_tx = self.can_write_tx.clone();
 
-        // CAN → MoQ task
-        let stream_writer = Arc::clone(&stream);
+        // CAN → MoQ broadcast task (state fan-out to all subscribers)
         let can_to_moq = tokio::spawn(async move {
             loop {
                 match can_read_rx.recv().await {
                     Some(frame) => {
                         let encoded = wire::encode(&frame);
-                        let mut s = stream_writer.lock().await;
-                        s.write(encoded);
+                        state_writer.write(encoded);
                     }
                     None => break,
                 }
@@ -136,52 +148,97 @@ impl MoqCanServer {
             can_read_rx
         });
 
-        // MoQ → CAN (main task)
-        let mut pending = Vec::new();
+        // MoQ → CAN task (command receiver with retry)
+        // The command subscriber retries until an operator connects and publishes commands.
+        let cmd_path = format!("{}/commands", path);
         let result = loop {
-            let data = {
-                let mut s = stream.lock().await;
-                s.read().await
-            };
-            match data {
-                Ok(Some(data)) => {
-                    pending.extend_from_slice(&data);
+            tracing::info!("Waiting for command publisher on {}/commands...", path);
 
-                    while pending.len() >= 6 {
-                        match wire::encoded_size(&pending) {
-                            Ok(frame_size) if pending.len() >= frame_size => {
-                                match wire::decode(&pending) {
-                                    Ok((frame, consumed)) => {
-                                        if can_write_tx.send(frame).await.is_err() {
-                                            tracing::error!("CAN writer thread died");
+            let mut cmd_sub = match builder.clone().path(&cmd_path).connect_subscriber().await {
+                Ok(sub) => sub,
+                Err(e) => {
+                    tracing::warn!("Command subscriber connect error: {}, retrying...", e);
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
+
+            let mut cmd_reader =
+                match tokio::time::timeout(Duration::from_secs(5), cmd_sub.subscribe_track("can"))
+                    .await
+                {
+                    Ok(Ok(Some(reader))) => {
+                        tracing::info!("Command subscriber connected on {}/commands", path);
+                        reader
+                    }
+                    Ok(Ok(None)) => {
+                        tracing::debug!("Command broadcast ended, retrying...");
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        continue;
+                    }
+                    Ok(Err(e)) => {
+                        tracing::debug!("Command subscribe error: {}, retrying...", e);
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        continue;
+                    }
+                    Err(_) => {
+                        tracing::debug!("No command publisher yet, retrying...");
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        continue;
+                    }
+                };
+
+            // Read commands until stream ends
+            let mut pending = Vec::new();
+            let stream_result = loop {
+                match cmd_reader.read().await {
+                    Ok(Some(data)) => {
+                        pending.extend_from_slice(&data);
+
+                        while pending.len() >= 6 {
+                            match wire::encoded_size(&pending) {
+                                Ok(frame_size) if pending.len() >= frame_size => {
+                                    match wire::decode(&pending) {
+                                        Ok((frame, consumed)) => {
+                                            if can_write_tx.send(frame).await.is_err() {
+                                                tracing::error!("CAN writer thread died");
+                                                break;
+                                            }
+                                            pending.drain(..consumed);
+                                        }
+                                        Err(e) => {
+                                            tracing::error!("Frame decode error: {}", e);
+                                            pending.clear();
                                             break;
                                         }
-                                        pending.drain(..consumed);
-                                    }
-                                    Err(e) => {
-                                        tracing::error!("Frame decode error: {}", e);
-                                        pending.clear();
-                                        break;
                                     }
                                 }
-                            }
-                            Ok(_) => break,
-                            Err(e) => {
-                                tracing::error!("Frame size error: {}", e);
-                                pending.clear();
-                                break;
+                                Ok(_) => break,
+                                Err(e) => {
+                                    tracing::error!("Frame size error: {}", e);
+                                    pending.clear();
+                                    break;
+                                }
                             }
                         }
                     }
+                    Ok(None) => {
+                        tracing::info!("Command stream ended, will reconnect...");
+                        break None;
+                    }
+                    Err(e) => {
+                        tracing::warn!("Command read error: {}, will reconnect...", e);
+                        break None;
+                    }
                 }
-                Ok(None) => {
-                    tracing::info!("MoQ stream ended");
-                    break Ok(());
-                }
-                Err(e) => {
-                    break Err(anyhow::anyhow!("MoQ read error: {}", e));
-                }
+            };
+
+            if let Some(err) = stream_result {
+                break Err(err);
             }
+
+            // Command stream ended — loop back to reconnect for next operator
+            tokio::time::sleep(Duration::from_millis(500)).await;
         };
 
         // Recover the receiver for potential reuse

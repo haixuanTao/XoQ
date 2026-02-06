@@ -1,12 +1,16 @@
 //! MoQ CAN bridge server - bridges local CAN interface to remote clients via MoQ relay
 //!
-//! Usage: moq_can_server <interface[:fd]> [moq_path] [--relay <url>]
+//! Broadcasts CAN state to all subscribers (1-to-many) and accepts commands from
+//! any publisher (many-to-1, last command wins).
+//!
+//! Usage: moq_can_server <interface[:fd]> [moq_path] [--relay <url>] [--insecure]
 //!
 //! Examples:
 //!   moq_can_server can0                           # Standard CAN, default path
 //!   moq_can_server can0:fd                        # CAN FD
 //!   moq_can_server can0 anon/my-robot             # Custom path
 //!   moq_can_server can0 --relay https://my.relay  # Custom relay
+//!   moq_can_server can0 --relay https://172.18.133.111:4443 --insecure  # Self-hosted relay
 
 use anyhow::Result;
 use std::env;
@@ -30,6 +34,7 @@ async fn main() -> Result<()> {
     let mut relay = "https://cdn.moq.dev".to_string();
     let mut interface_arg: Option<String> = None;
     let mut moq_path: Option<String> = None;
+    let mut insecure = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -43,6 +48,11 @@ async fn main() -> Result<()> {
                 eprintln!("Error: --relay requires a URL argument");
                 return Ok(());
             }
+        }
+        if arg == "--insecure" {
+            insecure = true;
+            i += 1;
+            continue;
         }
         if interface_arg.is_none() {
             interface_arg = Some(arg.clone());
@@ -70,28 +80,38 @@ async fn main() -> Result<()> {
 
     let mut server = xoq::MoqCanServer::new(&interface, enable_fd)?;
 
-    tracing::info!("Interface: {} (FD: {})", server.interface(), server.is_fd(),);
-    tracing::info!("MoQ relay: {}", relay);
-    tracing::info!("MoQ path: {}", moq_path);
-    tracing::info!("Waiting for client connection...");
+    tracing::info!("Interface: {} (FD: {})", server.interface(), server.is_fd());
+    tracing::info!(
+        "MoQ relay: {}{}",
+        relay,
+        if insecure { " (insecure)" } else { "" }
+    );
+    tracing::info!("MoQ state broadcast: {}/state", moq_path);
+    tracing::info!("MoQ command listener: {}/commands", moq_path);
 
-    server.run(&relay, &moq_path).await?;
+    server.run(&relay, &moq_path, insecure).await?;
 
     Ok(())
 }
 
 fn print_usage() {
-    println!("Usage: moq_can_server <interface[:fd]> [moq_path] [--relay <url>]");
+    println!("Usage: moq_can_server <interface[:fd]> [moq_path] [--relay <url>] [--insecure]");
+    println!();
+    println!("Broadcasts CAN state to all subscribers and accepts commands from any publisher.");
+    println!("  State:    {{path}}/state    (track: can) — 1-to-many fan-out");
+    println!("  Commands: {{path}}/commands (track: can) — many-to-1, last command wins");
     println!();
     println!("Examples:");
     println!("  moq_can_server can0                           # Standard CAN");
     println!("  moq_can_server can0:fd                        # CAN FD");
     println!("  moq_can_server can0 anon/my-robot             # Custom MoQ path");
     println!("  moq_can_server can0 --relay https://my.relay  # Custom relay");
+    println!("  moq_can_server can0 --relay https://172.18.133.111:4443 --insecure");
     println!();
     println!("Options:");
     println!("  :fd                 Append to interface name to enable CAN FD");
     println!("  --relay <url>       MoQ relay URL (default: https://cdn.moq.dev)");
+    println!("  --insecure          Disable TLS verification (for self-signed certs)");
     println!();
     println!("Available CAN interfaces:");
     match xoq::list_interfaces() {
