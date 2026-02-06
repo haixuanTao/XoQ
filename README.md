@@ -13,6 +13,7 @@ Robot Hardware          Network              Clients
 │ Camera   │     │  Iroh (P2P)      │     │ Python       │
 │ Serial   │────▶│  MoQ  (Relay)    │────▶│ JavaScript   │
 │ CAN Bus  │     │  QUIC / TLS 1.3  │     │ Rust         │
+│ Audio    │     │                  │     │              │
 └──────────┘     └──────────────────┘     └──────────────┘
   XoQ Server                                XoQ Client
 ```
@@ -45,7 +46,6 @@ Robot Hardware          Network              Clients
 
 | Feature                          | Description                                                                                                                               |
 | -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| Audio                            | OS-level hardware AEC, noise cancellation, and compression                                                                                |
 | CMAF Format                      | Fragmented MP4 for dataset recording with robotic data track for Training dataset streaming (online + offline, compatible with inference) |
 | Framework compat                 | dora-rs, ROS, ROS2, and LeRobot                                                                                                           |
 | Embedded targets                 | ESP32 / STM32 (server and client)                                                                                                         |
@@ -58,12 +58,14 @@ Robot Hardware          Network              Clients
 
 ### Hardware Support
 
-| Device  | Server Platform       | HW Encoding                | Feature Flags           |
-| ------- | --------------------- | -------------------------- | ----------------------- |
-| Camera  | Linux (V4L2)          | NVIDIA NVENC (H.264/HEVC)  | `camera`, `nvenc`       |
-| Camera  | macOS (AVFoundation)  | Apple VideoToolbox (H.264) | `camera-macos`, `vtenc` |
-| Serial  | Linux, macOS, Windows | —                          | `serial`                |
-| CAN Bus | Linux (SocketCAN)     | —                          | `can`                   |
+| Device  | Server Platform       | HW Encoding / Processing        | Feature Flags           |
+| ------- | --------------------- | ------------------------------- | ----------------------- |
+| Camera  | Linux (V4L2)          | NVIDIA NVENC (H.264/HEVC)       | `camera`, `nvenc`       |
+| Camera  | macOS (AVFoundation)  | Apple VideoToolbox (H.264)      | `camera-macos`, `vtenc` |
+| Serial  | Linux, macOS, Windows | —                               | `serial`                |
+| CAN Bus | Linux (SocketCAN)     | —                               | `can`                   |
+| Audio   | Linux, macOS, Windows | cpal (ALSA/CoreAudio/WASAPI)    | `audio`                 |
+| Audio   | macOS (VPIO)          | AEC + Noise Suppression + AGC   | `audio-macos`           |
 
 ## Getting Started
 
@@ -110,6 +112,27 @@ print(response)
 port.close()
 ```
 
+### Bridge audio
+
+Server (macOS with Voice Processing IO — AEC/noise suppression/AGC):
+
+```bash
+cargo run --example audio_server --features "iroh,audio-macos"
+# Linux/Windows (cpal backend): --features "iroh,audio"
+# Disable VPIO on macOS: --no-vpio
+```
+
+Python client:
+
+```python
+import sounddevice
+
+stream = sounddevice.new("<server-endpoint-id>").sample_rate(48000).channels(1).open()
+chunk = stream.read_chunk()  # numpy array
+stream.write_chunk(chunk)    # bidirectional
+stream.close()
+```
+
 ### Bridge a CAN bus
 
 Server:
@@ -137,16 +160,17 @@ for msg in bus:
 
 Drop-in replacements for popular hardware libraries — same API, remote hardware:
 
-| Package      | Import           | Replaces      | API Surface                                                    |
-| ------------ | ---------------- | ------------- | -------------------------------------------------------------- |
-| `xoq-serial` | `import serial`  | pyserial      | `Serial`: read, write, readline, context manager               |
-| `xoq-can`    | `import can`     | python-can    | `Bus`, `Message` with full CAN FD fields, send/recv/iterator   |
-| `xoq-opencv` | `import xoq_cv2` | opencv-python | `VideoCapture`: read, isOpened, release — returns numpy arrays |
+| Package            | Import              | Replaces      | API Surface                                                    |
+| ------------------ | ------------------- | ------------- | -------------------------------------------------------------- |
+| `xoq-serial`       | `import serial`     | pyserial      | `Serial`: read, write, readline, context manager               |
+| `xoq-can`          | `import can`        | python-can    | `Bus`, `Message` with full CAN FD fields, send/recv/iterator   |
+| `xoq-opencv`       | `import xoq_cv2`    | opencv-python | `VideoCapture`: read, isOpened, release — returns numpy arrays |
+| `xoq-sounddevice`  | `import sounddevice` | sounddevice   | `Stream`: read_chunk, write_chunk, bidirectional audio         |
 
 Install individually or all at once:
 
 ```bash
-pip install xoq-serial xoq-can xoq-opencv
+pip install xoq-serial xoq-can xoq-opencv xoq-sounddevice
 # or
 pip install xoq[all]
 ```
@@ -157,6 +181,7 @@ Build from source with maturin:
 cd packages/serial && maturin develop --release
 cd packages/can && maturin develop --release
 cd packages/cv2 && maturin develop --features videotoolbox --release
+cd packages/sounddevice && maturin develop --release
 ```
 
 #### JavaScript / TypeScript
@@ -171,10 +196,10 @@ MoQ pub/sub for web — serial streaming and camera frames over WebTransport.
 
 ```toml
 [dependencies]
-xoq = { version = "0.3", features = ["serial-remote", "camera-remote", "can-remote"] }
+xoq = { version = "0.3", features = ["serial-remote", "camera-remote", "can-remote", "audio-remote"] }
 ```
 
-Feature flags for remote access: `serial-remote`, `camera-remote`, `can-remote`.
+Feature flags for remote access: `serial-remote`, `camera-remote`, `can-remote`, `audio-remote`.
 
 Clients target macOS, Linux, and Windows. Future: C/C++ bindings via Rust ABI.
 
@@ -192,6 +217,8 @@ Clients target macOS, Linux, and Windows. Future: C/C++ bindings via Rust ABI.
 | `rustypot_remote`  | Drives STS3215 servos over a remote serial port (rustypot) | `iroh`, `serial`                 |
 | `so100_teleop`     | Teleoperate a remote SO-100 arm from a local leader arm    | `iroh`, `serial`                 |
 | `reachy_mini`      | Reachy Mini robot control over remote serial               | `iroh`, `serial`                 |
+| `audio_server`     | Bridges local mic/speaker for remote access (VPIO on macOS) | `iroh`, `audio` / `audio-macos`  |
+| `audio_client`     | Connects to a remote audio server (bidirectional)          | `audio-remote`                   |
 | `moq_test`         | MoQ relay publish/subscribe diagnostic test                | —                                |
 
 ### ALPN Protocols
@@ -204,6 +231,7 @@ Clients target macOS, Linux, and Windows. Future: C/C++ bindings via Rust ABI.
 | `xoq/camera-h264/0` | Camera streaming with H.264 encoding      |
 | `xoq/camera-hevc/0` | Camera streaming with HEVC/H.265 encoding |
 | `xoq/camera-av1/0`  | Camera streaming with AV1 encoding        |
+| `xoq/audio-pcm/0`   | Bidirectional PCM audio streaming          |
 
 ### Cargo Feature Flags
 
@@ -216,9 +244,12 @@ Clients target macOS, Linux, and Windows. Future: C/C++ bindings via Rust ABI.
 | `nvenc`         | NVIDIA NVENC H.264/HEVC encoding (Linux server)  |
 | `vtenc`         | Apple VideoToolbox H.264 encoding (macOS server) |
 | `can`           | SocketCAN access (Linux server)                  |
+| `audio`         | Audio I/O via cpal (cross-platform server)       |
+| `audio-macos`   | macOS Voice Processing IO (AEC/NS/AGC)           |
 | `serial-remote` | Remote serial client (cross-platform)            |
 | `camera-remote` | Remote camera client (cross-platform)            |
 | `can-remote`    | Remote CAN client (cross-platform)               |
+| `audio-remote`  | Remote audio client (cross-platform)             |
 | `image`         | Image processing support                         |
 
 ### License
