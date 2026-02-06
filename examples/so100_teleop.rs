@@ -25,7 +25,9 @@ const SERVO_IDS: [u8; 5] = [1, 2, 3, 4, 5];
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env().add_directive("debug".parse()?),
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive("xoq=debug".parse()?)
+                .add_directive("info".parse()?),
         )
         .init();
 
@@ -66,17 +68,20 @@ fn main() -> Result<()> {
     println!("Connecting to remote follower arm...");
     let follower_port = if use_moq {
         // MOQ relay: tracks already preserve message boundaries, no batching issue
-        println!("Using MOQ relay transport");
+        // Default to local relay (cdn.moq.dev doesn't support cross-session)
+        let relay =
+            env::var("MOQ_RELAY").unwrap_or_else(|_| "https://172.18.133.111:4443".to_string());
+        println!("Using MOQ relay transport: {}", relay);
         xoq::serialport::new(remote_id)
-            .with_moq("https://cdn.moq.dev")
+            .with_moq(&relay)
+            .insecure() // for self-signed certs
             .timeout(Duration::from_millis(1000))
             .open()?
     } else {
-        // Iroh P2P with datagrams for writes to avoid stream coalescing
+        // Iroh P2P - use streams (datagrams cause connection issues)
         println!("Using iroh P2P transport");
         xoq::serialport::new(remote_id)
             .timeout(Duration::from_millis(1000))
-            .use_datagrams(true)
             .open()?
     };
 
