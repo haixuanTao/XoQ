@@ -63,29 +63,28 @@ impl Serial {
     }
 
     /// Write bytes to the serial port. Returns number of bytes written.
-    fn write(&self, data: Vec<u8>) -> PyResult<usize> {
+    fn write(&self, py: Python<'_>, data: Vec<u8>) -> PyResult<usize> {
         if !self.is_open.load(std::sync::atomic::Ordering::Relaxed) {
             return Err(PyRuntimeError::new_err("Port is closed"));
         }
         let len = data.len();
-        let client = self
-            .inner
-            .lock()
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        client
-            .write(&data)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let inner = self.inner.clone();
+        py.allow_threads(move || {
+            let client = inner.lock().map_err(|e| e.to_string())?;
+            client.write(&data).map_err(|e| e.to_string())
+        })
+        .map_err(|e: String| PyRuntimeError::new_err(e))?;
         Ok(len)
     }
 
     /// Read up to size bytes from the serial port.
     #[pyo3(signature = (size=1))]
-    fn read(&self, size: usize) -> PyResult<Vec<u8>> {
+    fn read(&self, py: Python<'_>, size: usize) -> PyResult<Vec<u8>> {
         if !self.is_open.load(std::sync::atomic::Ordering::Relaxed) {
             return Err(PyRuntimeError::new_err("Port is closed"));
         }
 
-        // First check buffer
+        // First check buffer (fast, no network I/O)
         {
             let mut buf = self.buffer.lock().unwrap();
             if !buf.is_empty() {
@@ -95,79 +94,81 @@ impl Serial {
             }
         }
 
-        // Read from network
-        let client = self
-            .inner
-            .lock()
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        let mut data = vec![0u8; size];
-
-        let result = if let Some(t) = self.timeout {
-            client.read_timeout(&mut data, Duration::from_secs_f64(t))
-        } else {
-            client.read(&mut data)
-        };
-
-        match result {
-            Ok(Some(n)) => Ok(data[..n].to_vec()),
-            Ok(None) => Ok(Vec::new()),
-            Err(e) => Err(PyRuntimeError::new_err(e.to_string())),
-        }
+        // Read from network without GIL
+        let inner = self.inner.clone();
+        let timeout = self.timeout;
+        py.allow_threads(move || {
+            let client = inner.lock().map_err(|e| e.to_string())?;
+            let mut data = vec![0u8; size];
+            let result = if let Some(t) = timeout {
+                client.read_timeout(&mut data, Duration::from_secs_f64(t))
+            } else {
+                client.read(&mut data)
+            };
+            match result {
+                Ok(Some(n)) => Ok(data[..n].to_vec()),
+                Ok(None) => Ok(Vec::new()),
+                Err(e) => Err(e.to_string()),
+            }
+        })
+        .map_err(|e: String| PyRuntimeError::new_err(e))
     }
 
     /// Read a line (until newline character).
-    fn readline(&self) -> PyResult<Vec<u8>> {
+    fn readline(&self, py: Python<'_>) -> PyResult<Vec<u8>> {
         if !self.is_open.load(std::sync::atomic::Ordering::Relaxed) {
             return Err(PyRuntimeError::new_err("Port is closed"));
         }
 
-        let mut result = Vec::new();
+        let inner = self.inner.clone();
+        let buffer = self.buffer.clone();
+        let timeout = self.timeout;
 
-        // Check buffer first for existing newline
-        {
-            let mut buf = self.buffer.lock().unwrap();
-            if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
-                result = buf.drain(..=pos).collect();
-                return Ok(result);
-            }
-            // Take everything from buffer
-            result.append(&mut *buf);
-        }
+        // Release GIL for the entire read loop
+        py.allow_threads(move || {
+            let mut result = Vec::new();
 
-        // Keep reading until we get a newline
-        let client = self
-            .inner
-            .lock()
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        let mut temp = vec![0u8; 256];
-
-        loop {
-            let n = if let Some(t) = self.timeout {
-                client.read_timeout(&mut temp, Duration::from_secs_f64(t))
-            } else {
-                client.read(&mut temp)
-            };
-
-            match n {
-                Ok(Some(n)) => {
-                    let chunk = &temp[..n];
-                    if let Some(pos) = chunk.iter().position(|&b| b == b'\n') {
-                        // Found newline - take up to and including it
-                        result.extend_from_slice(&chunk[..=pos]);
-                        // Buffer the rest
-                        if pos + 1 < n {
-                            let mut buf = self.buffer.lock().unwrap();
-                            buf.extend_from_slice(&chunk[pos + 1..]);
-                        }
-                        return Ok(result);
-                    } else {
-                        result.extend_from_slice(chunk);
-                    }
+            // Check buffer first for existing newline
+            {
+                let mut buf = buffer.lock().unwrap();
+                if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+                    result = buf.drain(..=pos).collect();
+                    return Ok(result);
                 }
-                Ok(None) => return Ok(result), // Timeout/EOF
-                Err(e) => return Err(PyRuntimeError::new_err(e.to_string())),
+                result.append(&mut *buf);
             }
-        }
+
+            // Keep reading until we get a newline
+            let client = inner.lock().map_err(|e| e.to_string())?;
+            let mut temp = vec![0u8; 256];
+
+            loop {
+                let n = if let Some(t) = timeout {
+                    client.read_timeout(&mut temp, Duration::from_secs_f64(t))
+                } else {
+                    client.read(&mut temp)
+                };
+
+                match n {
+                    Ok(Some(n)) => {
+                        let chunk = &temp[..n];
+                        if let Some(pos) = chunk.iter().position(|&b| b == b'\n') {
+                            result.extend_from_slice(&chunk[..=pos]);
+                            if pos + 1 < n {
+                                let mut buf = buffer.lock().unwrap();
+                                buf.extend_from_slice(&chunk[pos + 1..]);
+                            }
+                            return Ok(result);
+                        } else {
+                            result.extend_from_slice(chunk);
+                        }
+                    }
+                    Ok(None) => return Ok(result),
+                    Err(e) => return Err(e.to_string()),
+                }
+            }
+        })
+        .map_err(|e: String| PyRuntimeError::new_err(e))
     }
 
     /// Number of bytes in the receive buffer.
@@ -207,7 +208,7 @@ impl Serial {
 
     /// Read until a terminator sequence is found.
     #[pyo3(signature = (terminator=None))]
-    fn read_until(&self, terminator: Option<Vec<u8>>) -> PyResult<Vec<u8>> {
+    fn read_until(&self, py: Python<'_>, terminator: Option<Vec<u8>>) -> PyResult<Vec<u8>> {
         let terminator = terminator.unwrap_or_else(|| vec![b'\n']);
         if terminator.is_empty() {
             return Err(PyRuntimeError::new_err("Terminator cannot be empty"));
@@ -217,53 +218,55 @@ impl Serial {
             return Err(PyRuntimeError::new_err("Port is closed"));
         }
 
-        let mut result = Vec::new();
+        let inner = self.inner.clone();
+        let buffer = self.buffer.clone();
+        let timeout = self.timeout;
 
-        // Check buffer first for existing terminator
-        {
-            let mut buf = self.buffer.lock().unwrap();
-            if let Some(pos) = find_subsequence(&buf, &terminator) {
-                let end = pos + terminator.len();
-                result = buf.drain(..end).collect();
-                return Ok(result);
-            }
-            // Take everything from buffer
-            result.append(&mut *buf);
-        }
+        // Release GIL for the entire read loop
+        py.allow_threads(move || {
+            let mut result = Vec::new();
 
-        // Keep reading until we find terminator
-        let client = self
-            .inner
-            .lock()
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        let mut temp = vec![0u8; 256];
-
-        loop {
-            let n = if let Some(t) = self.timeout {
-                client.read_timeout(&mut temp, Duration::from_secs_f64(t))
-            } else {
-                client.read(&mut temp)
-            };
-
-            match n {
-                Ok(Some(n)) => {
-                    result.extend_from_slice(&temp[..n]);
-                    // Check if terminator is now in result
-                    if let Some(pos) = find_subsequence(&result, &terminator) {
-                        let end = pos + terminator.len();
-                        // Buffer anything after the terminator
-                        if end < result.len() {
-                            let mut buf = self.buffer.lock().unwrap();
-                            buf.extend_from_slice(&result[end..]);
-                        }
-                        result.truncate(end);
-                        return Ok(result);
-                    }
+            // Check buffer first for existing terminator
+            {
+                let mut buf = buffer.lock().unwrap();
+                if let Some(pos) = find_subsequence(&buf, &terminator) {
+                    let end = pos + terminator.len();
+                    result = buf.drain(..end).collect();
+                    return Ok(result);
                 }
-                Ok(None) => return Ok(result), // Timeout/EOF
-                Err(e) => return Err(PyRuntimeError::new_err(e.to_string())),
+                result.append(&mut *buf);
             }
-        }
+
+            // Keep reading until we find terminator
+            let client = inner.lock().map_err(|e| e.to_string())?;
+            let mut temp = vec![0u8; 256];
+
+            loop {
+                let n = if let Some(t) = timeout {
+                    client.read_timeout(&mut temp, Duration::from_secs_f64(t))
+                } else {
+                    client.read(&mut temp)
+                };
+
+                match n {
+                    Ok(Some(n)) => {
+                        result.extend_from_slice(&temp[..n]);
+                        if let Some(pos) = find_subsequence(&result, &terminator) {
+                            let end = pos + terminator.len();
+                            if end < result.len() {
+                                let mut buf = buffer.lock().unwrap();
+                                buf.extend_from_slice(&result[end..]);
+                            }
+                            result.truncate(end);
+                            return Ok(result);
+                        }
+                    }
+                    Ok(None) => return Ok(result),
+                    Err(e) => return Err(e.to_string()),
+                }
+            }
+        })
+        .map_err(|e: String| PyRuntimeError::new_err(e))
     }
 
     /// Flush write buffer (no-op for network connection).

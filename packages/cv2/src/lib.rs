@@ -74,13 +74,19 @@ impl VideoCapture {
             return Ok((false, py.None()));
         }
 
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        // Take client out of mutex so we can release the GIL during the blocking read
+        let mut client = {
+            let mut guard = self
+                .inner
+                .lock()
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            guard.take()
+        };
 
-        let frame_result = if let Some(client) = guard.as_mut() {
-            match client.read_frame() {
+        let frame_result = if let Some(ref mut c) = client {
+            // Release GIL while waiting for network frame
+            let result = py.allow_threads(|| c.read_frame());
+            match result {
                 Ok(frame) => Some(frame),
                 Err(e) => {
                     eprintln!("[xoq_cv2] read_frame error: {e}");
@@ -90,6 +96,15 @@ impl VideoCapture {
         } else {
             None
         };
+
+        // Put client back
+        if let Some(c) = client {
+            let mut guard = self
+                .inner
+                .lock()
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            *guard = Some(c);
+        }
 
         match frame_result {
             Some(frame) => {

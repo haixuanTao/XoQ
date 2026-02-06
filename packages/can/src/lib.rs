@@ -248,34 +248,35 @@ impl Bus {
     ///     msg: The Message to send
     ///     timeout: Send timeout in seconds (optional)
     #[pyo3(signature = (msg, timeout=None))]
-    fn send(&self, msg: &Message, timeout: Option<f64>) -> PyResult<()> {
+    fn send(&self, py: Python<'_>, msg: &Message, timeout: Option<f64>) -> PyResult<()> {
         if !self.is_open.load(std::sync::atomic::Ordering::Relaxed) {
             return Err(PyRuntimeError::new_err("Bus is closed"));
         }
 
         let _ = timeout; // TODO: implement send timeout
 
-        // RemoteCanSocket methods are already blocking (have internal runtime)
-        let mut socket = self
-            .socket
-            .lock()
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        // Extract data from Python object before releasing GIL
+        let is_fd = msg.is_fd;
+        let arb_id = msg.arbitration_id;
+        let data = msg.data.clone();
+        let brs = msg.bitrate_switch;
+        let esi = msg.error_state_indicator;
 
-        let result = if msg.is_fd {
-            let flags = xoq::CanFdFlags {
-                brs: msg.bitrate_switch,
-                esi: msg.error_state_indicator,
-            };
-            let frame = xoq::CanFdFrame::new_with_flags(msg.arbitration_id, &msg.data, flags)
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-            socket.write_fd_frame(&frame)
-        } else {
-            let frame = xoq::CanFrame::new(msg.arbitration_id, &msg.data)
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-            socket.write_frame(&frame)
-        };
-
-        result.map_err(|e| PyRuntimeError::new_err(e.to_string()))
+        let socket = self.socket.clone();
+        // Release GIL during blocking network I/O
+        py.allow_threads(move || {
+            let mut socket = socket.lock().map_err(|e| e.to_string())?;
+            if is_fd {
+                let flags = xoq::CanFdFlags { brs, esi };
+                let frame = xoq::CanFdFrame::new_with_flags(arb_id, &data, flags)
+                    .map_err(|e| e.to_string())?;
+                socket.write_fd_frame(&frame).map_err(|e| e.to_string())
+            } else {
+                let frame = xoq::CanFrame::new(arb_id, &data).map_err(|e| e.to_string())?;
+                socket.write_frame(&frame).map_err(|e| e.to_string())
+            }
+        })
+        .map_err(|e: String| PyRuntimeError::new_err(e))
     }
 
     /// Receive a CAN message.
@@ -286,78 +287,83 @@ impl Bus {
     /// Returns:
     ///     A Message object, or None if timeout occurred
     #[pyo3(signature = (timeout=None))]
-    fn recv(&self, timeout: Option<f64>) -> PyResult<Option<Message>> {
+    fn recv(&self, py: Python<'_>, timeout: Option<f64>) -> PyResult<Option<Message>> {
         if !self.is_open.load(std::sync::atomic::Ordering::Relaxed) {
             return Err(PyRuntimeError::new_err("Bus is closed"));
         }
 
         let timeout = timeout.or(self.recv_timeout);
-        let start = Instant::now();
+        let socket = self.socket.clone();
+        let channel = self.channel.clone();
 
-        // RemoteCanSocket methods are already blocking (have internal runtime)
-        let mut socket = self
-            .socket
-            .lock()
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        // Release GIL during blocking network I/O
+        let frame_result: Result<Option<(xoq::AnyCanFrame, f64)>, String> =
+            py.allow_threads(move || {
+                let start = Instant::now();
+                let mut socket = socket.lock().map_err(|e| e.to_string())?;
 
-        // Set socket timeout if specified
-        if let Some(t) = timeout {
-            let _ = socket.set_timeout(Duration::from_secs_f64(t));
-        }
-
-        loop {
-            let frame = socket
-                .read_frame()
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-
-            match frame {
-                Some(frame) => {
-                    let timestamp = start.elapsed().as_secs_f64();
-                    let msg = match frame {
-                        xoq::AnyCanFrame::Can(f) => Message {
-                            arbitration_id: f.id(),
-                            data: f.data().to_vec(),
-                            is_extended_id: f.is_extended(),
-                            is_fd: false,
-                            is_remote_frame: f.is_remote(),
-                            is_error_frame: f.is_error(),
-                            bitrate_switch: false,
-                            error_state_indicator: false,
-                            timestamp: Some(timestamp),
-                            channel: Some(self.channel.clone()),
-                            dlc: Some(f.dlc()),
-                        },
-                        xoq::AnyCanFrame::CanFd(f) => Message {
-                            arbitration_id: f.id(),
-                            data: f.data().to_vec(),
-                            is_extended_id: f.is_extended(),
-                            is_fd: true,
-                            is_remote_frame: false,
-                            is_error_frame: false,
-                            bitrate_switch: f.flags().brs,
-                            error_state_indicator: f.flags().esi,
-                            timestamp: Some(timestamp),
-                            channel: Some(self.channel.clone()),
-                            dlc: Some(f.len() as u8),
-                        },
-                    };
-                    return Ok(Some(msg));
+                if let Some(t) = timeout {
+                    let _ = socket.set_timeout(Duration::from_secs_f64(t));
                 }
-                None => {
-                    // Timeout occurred
-                    if let Some(t) = timeout {
-                        if start.elapsed().as_secs_f64() >= t {
-                            return Ok(None);
+
+                loop {
+                    let frame = socket.read_frame().map_err(|e| e.to_string())?;
+
+                    match frame {
+                        Some(frame) => {
+                            let timestamp = start.elapsed().as_secs_f64();
+                            return Ok(Some((frame, timestamp)));
+                        }
+                        None => {
+                            if let Some(t) = timeout {
+                                if start.elapsed().as_secs_f64() >= t {
+                                    return Ok(None);
+                                }
+                            }
+                            if timeout == Some(0.0) {
+                                return Ok(None);
+                            }
+                            continue;
                         }
                     }
-                    // Non-blocking mode with timeout=0
-                    if timeout == Some(0.0) {
-                        return Ok(None);
-                    }
-                    // Keep trying if no timeout specified
-                    continue;
                 }
+            });
+
+        // Convert to Python Message with GIL held
+        match frame_result {
+            Ok(Some((frame, timestamp))) => {
+                let msg = match frame {
+                    xoq::AnyCanFrame::Can(f) => Message {
+                        arbitration_id: f.id(),
+                        data: f.data().to_vec(),
+                        is_extended_id: f.is_extended(),
+                        is_fd: false,
+                        is_remote_frame: f.is_remote(),
+                        is_error_frame: f.is_error(),
+                        bitrate_switch: false,
+                        error_state_indicator: false,
+                        timestamp: Some(timestamp),
+                        channel: Some(channel),
+                        dlc: Some(f.dlc()),
+                    },
+                    xoq::AnyCanFrame::CanFd(f) => Message {
+                        arbitration_id: f.id(),
+                        data: f.data().to_vec(),
+                        is_extended_id: f.is_extended(),
+                        is_fd: true,
+                        is_remote_frame: false,
+                        is_error_frame: false,
+                        bitrate_switch: f.flags().brs,
+                        error_state_indicator: f.flags().esi,
+                        timestamp: Some(timestamp),
+                        channel: Some(channel),
+                        dlc: Some(f.len() as u8),
+                    },
+                };
+                Ok(Some(msg))
             }
+            Ok(None) => Ok(None),
+            Err(e) => Err(PyRuntimeError::new_err(e)),
         }
     }
 
@@ -397,8 +403,8 @@ impl Bus {
     }
 
     /// Iterator protocol - get next message.
-    fn __next__(&self) -> PyResult<Option<Message>> {
-        self.recv(Some(1.0))
+    fn __next__(&self, py: Python<'_>) -> PyResult<Option<Message>> {
+        self.recv(py, Some(1.0))
     }
 }
 
