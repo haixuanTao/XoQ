@@ -29,6 +29,8 @@ ENV/
 
 # Secrets
 serial_bridge_key
+.env
+.env.*
 
 # IDE
 .idea/
