@@ -106,23 +106,16 @@ class TestAudioConnectivity:
     """Test audio server reachability via Iroh relay."""
 
     @pytest.mark.timeout(60)
-    def test_audio_connect(self):
-        import xoq_sounddevice
-
-        stream = xoq_sounddevice.Stream(AUDIO_SERVER_ID, samplerate=48000, channels=1)
-        assert stream.active
-        stream.stop()
-
-    @pytest.mark.timeout(60)
-    def test_audio_read(self):
+    def test_audio_connect_and_read(self):
         import xoq_sounddevice
         import numpy as np
 
         stream = xoq_sounddevice.Stream(AUDIO_SERVER_ID, samplerate=48000, channels=1)
         try:
+            assert stream.active
             # Read 960 frames (20ms @ 48kHz)
             data = stream.read(960)
             assert isinstance(data, np.ndarray)
             assert data.shape == (960, 1)
         finally:
-            stream.stop()
+            stream.close()

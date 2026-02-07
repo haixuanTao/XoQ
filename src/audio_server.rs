@@ -269,30 +269,68 @@ impl AudioServer {
         match &mut self.inner {
             AudioServerInner::Iroh { server, .. } => {
                 let server = server.clone();
+                let mut active_cancel: Option<tokio_util::sync::CancellationToken> = None;
+                let mut active_task: Option<tokio::task::JoinHandle<()>> = None;
+
                 loop {
-                    let conn = match server.accept().await? {
-                        Some(c) => c,
-                        None => continue,
+                    let conn = match server.accept().await {
+                        Ok(Some(c)) => c,
+                        Ok(None) => continue,
+                        Err(e) => {
+                            tracing::warn!("Accept error (retrying): {}", e);
+                            continue;
+                        }
                     };
 
                     tracing::info!("Audio client connected: {}", conn.remote_id());
 
-                    let result = match &mut self.backend {
+                    // Cancel previous connection if still active
+                    if let Some(cancel) = active_cancel.take() {
+                        tracing::info!("Disconnecting previous audio client");
+                        cancel.cancel();
+                    }
+                    if let Some(task) = active_task.take() {
+                        let _ = task.await;
+                    }
+
+                    let external_cancel = tokio_util::sync::CancellationToken::new();
+                    active_cancel = Some(external_cancel.clone());
+
+                    // Spawn connection handler so we can accept new connections immediately.
+                    // We pass raw pointers (as usize) because AudioInput/AudioOutput/AudioVoiceIO
+                    // contain non-Send types. Safety: the backend lives in AudioServer which
+                    // outlives the task, and previous task is cancelled+awaited first.
+                    match &self.backend {
                         AudioBackend::Separate { input, output } => {
-                            Self::handle_iroh_connection_separate(input, output.as_ref(), conn)
+                            let input_ptr = input as *const AudioInput as usize;
+                            let output_ptr =
+                                output.as_ref().map(|o| o as *const AudioOutput as usize);
+                            let cancel = external_cancel;
+                            active_task = Some(tokio::spawn(async move {
+                                if let Err(e) = handle_iroh_connection_separate(
+                                    input_ptr, output_ptr, conn, cancel,
+                                )
                                 .await
+                                {
+                                    tracing::error!("Audio connection error: {}", e);
+                                }
+                                tracing::info!("Audio client disconnected");
+                            }));
                         }
                         #[cfg(feature = "audio-macos")]
                         AudioBackend::VoiceProcessing(vpio) => {
-                            Self::handle_iroh_connection_vpio(vpio, conn).await
+                            let vpio_ptr = vpio as *const crate::audio_macos::AudioVoiceIO as usize;
+                            let cancel = external_cancel;
+                            active_task = Some(tokio::spawn(async move {
+                                if let Err(e) =
+                                    handle_iroh_connection_vpio(vpio_ptr, conn, cancel).await
+                                {
+                                    tracing::error!("Audio connection error: {}", e);
+                                }
+                                tracing::info!("Audio client disconnected");
+                            }));
                         }
-                    };
-
-                    if let Err(e) = result {
-                        tracing::error!("Audio connection error: {}", e);
                     }
-
-                    tracing::info!("Audio client disconnected");
                 }
             }
             AudioServerInner::Moq { mic_track, .. } => match &self.backend {
@@ -310,199 +348,109 @@ impl AudioServer {
             },
         }
     }
+}
 
-    async fn handle_iroh_connection_separate(
-        input: &AudioInput,
-        output: Option<&AudioOutput>,
-        conn: IrohConnection,
-    ) -> Result<()> {
-        let stream = conn.accept_stream().await?;
-        let (mut send, mut recv) = stream.split();
+/// Handle an iroh connection using separate AudioInput/AudioOutput (cpal backend).
+///
+/// Takes raw pointers as usize to satisfy Send bounds for tokio::spawn.
+/// Safety: callers must ensure the pointed-to AudioInput/AudioOutput outlive this future.
+async fn handle_iroh_connection_separate(
+    input_ptr: usize,
+    output_ptr: Option<usize>,
+    conn: IrohConnection,
+    external_cancel: tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    let stream = tokio::select! {
+        result = conn.accept_stream() => result?,
+        _ = external_cancel.cancelled() => {
+            tracing::info!("Connection cancelled while waiting for stream");
+            return Ok(());
+        }
+    };
+    let (mut send, mut recv) = stream.split();
 
-        let cancel_token = conn.cancellation_token();
+    let cancel_token = conn.cancellation_token();
 
-        // Task: mic → network (read from AudioInput, write to stream)
-        // AudioInput::read() is blocking, so we use a dedicated thread
-        let input_rx = {
-            let (tx, rx) = tokio::sync::mpsc::channel::<AudioFrame>(32);
-            let input_ptr = input as *const AudioInput as usize;
-            let cancel = cancel_token.clone();
-            std::thread::spawn(move || {
-                let input = unsafe { &*(input_ptr as *const AudioInput) };
-                loop {
-                    if cancel.is_cancelled() {
-                        break;
-                    }
-                    match input.read() {
-                        Ok(frame) => {
-                            if tx.blocking_send(frame).is_err() {
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("Audio input read error: {}", e);
+    // Task: mic → network (read from AudioInput, write to stream)
+    // AudioInput::read() is blocking, so we use a dedicated thread
+    let input_rx = {
+        let (tx, rx) = tokio::sync::mpsc::channel::<AudioFrame>(32);
+        let cancel = cancel_token.clone();
+        let ext_cancel = external_cancel.clone();
+        std::thread::spawn(move || {
+            // Safety: input_ptr is valid for the lifetime of this task
+            let input = unsafe { &*(input_ptr as *const AudioInput) };
+            loop {
+                if cancel.is_cancelled() || ext_cancel.is_cancelled() {
+                    break;
+                }
+                match input.read() {
+                    Ok(frame) => {
+                        if tx.blocking_send(frame).is_err() {
                             break;
                         }
                     }
-                }
-            });
-            rx
-        };
-
-        let cancel_clone = cancel_token.clone();
-        let mic_to_net = tokio::spawn(async move {
-            let mut rx = input_rx;
-            loop {
-                tokio::select! {
-                    _ = cancel_clone.cancelled() => break,
-                    frame = rx.recv() => {
-                        match frame {
-                            Some(frame) => {
-                                let header = frame.encode_header();
-                                if send.write_all(&header).await.is_err() {
-                                    break;
-                                }
-                                if send.write_all(&frame.data).await.is_err() {
-                                    break;
-                                }
-                                tokio::task::yield_now().await;
-                            }
-                            None => break,
-                        }
+                    Err(e) => {
+                        tracing::error!("Audio input read error: {}", e);
+                        break;
                     }
                 }
             }
         });
+        rx
+    };
 
-        // Main task: network → speaker
-        if let Some(output) = output {
-            let mut header_buf = [0u8; WIRE_HEADER_SIZE];
-            loop {
-                tokio::select! {
-                    _ = cancel_token.cancelled() => break,
-                    result = recv.read_exact(&mut header_buf) => {
-                        match result {
-                            Ok(()) => {
-                                let (config, frame_count, timestamp_us, data_length) =
-                                    AudioFrame::decode_header(&header_buf)?;
-                                let mut data = vec![0u8; data_length as usize];
-                                recv.read_exact(&mut data).await?;
-                                let frame = AudioFrame {
-                                    data,
-                                    frame_count,
-                                    timestamp_us,
-                                    config,
-                                };
-                                if let Err(e) = output.write(&frame) {
-                                    tracing::debug!("Audio output write error: {}", e);
-                                }
-                            }
-                            Err(e) => {
-                                tracing::info!("Audio client disconnected: {}", e);
+    let cancel_clone = cancel_token.clone();
+    let ext_clone = external_cancel.clone();
+    let mic_to_net = tokio::spawn(async move {
+        let mut rx = input_rx;
+        loop {
+            tokio::select! {
+                _ = cancel_clone.cancelled() => break,
+                _ = ext_clone.cancelled() => break,
+                frame = rx.recv() => {
+                    match frame {
+                        Some(frame) => {
+                            let header = frame.encode_header();
+                            if send.write_all(&header).await.is_err() {
                                 break;
                             }
+                            if send.write_all(&frame.data).await.is_err() {
+                                break;
+                            }
+                            tokio::task::yield_now().await;
                         }
-                    }
-                }
-            }
-        } else {
-            // No output device — just drain incoming data
-            let mut buf = vec![0u8; 4096];
-            loop {
-                tokio::select! {
-                    _ = cancel_token.cancelled() => break,
-                    result = recv.read(&mut buf) => {
-                        match result {
-                            Ok(Some(0)) | Ok(None) | Err(_) => break,
-                            _ => {}
-                        }
+                        None => break,
                     }
                 }
             }
         }
+    });
 
-        cancel_token.cancel();
-        let _ = mic_to_net.await;
-        Ok(())
-    }
-
-    #[cfg(feature = "audio-macos")]
-    async fn handle_iroh_connection_vpio(
-        vpio: &crate::audio_macos::AudioVoiceIO,
-        conn: IrohConnection,
-    ) -> Result<()> {
-        let stream = conn.accept_stream().await?;
-        let (mut send, mut recv) = stream.split();
-
-        let cancel_token = conn.cancellation_token();
-
-        // Task: VPIO mic → network
-        // AudioVoiceIO::read() is blocking, so we use a dedicated thread
-        let input_rx = {
-            let (tx, rx) = tokio::sync::mpsc::channel::<AudioFrame>(32);
-            let vpio_ptr = vpio as *const crate::audio_macos::AudioVoiceIO as usize;
-            let cancel = cancel_token.clone();
-            std::thread::spawn(move || {
-                let vpio = unsafe { &*(vpio_ptr as *const crate::audio_macos::AudioVoiceIO) };
-                loop {
-                    if cancel.is_cancelled() {
-                        break;
-                    }
-                    match vpio.read() {
-                        Ok(frame) => {
-                            if tx.blocking_send(frame).is_err() {
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("VPIO input read error: {}", e);
-                            break;
-                        }
-                    }
-                }
-            });
-            rx
-        };
-
-        let cancel_clone = cancel_token.clone();
-        let mic_to_net = tokio::spawn(async move {
-            let mut rx = input_rx;
-            loop {
-                tokio::select! {
-                    _ = cancel_clone.cancelled() => break,
-                    frame = rx.recv() => {
-                        match frame {
-                            Some(frame) => {
-                                let header = frame.encode_header();
-                                if send.write_all(&header).await.is_err() {
-                                    break;
-                                }
-                                if send.write_all(&frame.data).await.is_err() {
-                                    break;
-                                }
-                                tokio::task::yield_now().await;
-                            }
-                            None => break,
-                        }
-                    }
-                }
-            }
-        });
-
-        // Main task: network → VPIO speaker (with AEC reference)
+    // Main task: network → speaker
+    if let Some(out_ptr) = output_ptr {
         let mut header_buf = [0u8; WIRE_HEADER_SIZE];
         loop {
             tokio::select! {
                 _ = cancel_token.cancelled() => break,
+                _ = external_cancel.cancelled() => break,
                 result = recv.read_exact(&mut header_buf) => {
                     match result {
                         Ok(()) => {
-                            let (_config, _frame_count, _timestamp_us, data_length) =
+                            let (config, frame_count, timestamp_us, data_length) =
                                 AudioFrame::decode_header(&header_buf)?;
                             let mut data = vec![0u8; data_length as usize];
                             recv.read_exact(&mut data).await?;
-                            if let Err(e) = vpio.write_raw(data) {
-                                tracing::debug!("VPIO output write error: {}", e);
+                            let frame = AudioFrame {
+                                data,
+                                frame_count,
+                                timestamp_us,
+                                config,
+                            };
+                            // Momentary reference — no await between creation and use
+                            let output = unsafe { &*(out_ptr as *const AudioOutput) };
+                            if let Err(e) = output.write(&frame) {
+                                tracing::debug!("Audio output write error: {}", e);
                             }
                         }
                         Err(e) => {
@@ -513,9 +461,135 @@ impl AudioServer {
                 }
             }
         }
-
-        cancel_token.cancel();
-        let _ = mic_to_net.await;
-        Ok(())
+    } else {
+        // No output device — just drain incoming data
+        let mut buf = vec![0u8; 4096];
+        loop {
+            tokio::select! {
+                _ = cancel_token.cancelled() => break,
+                _ = external_cancel.cancelled() => break,
+                result = recv.read(&mut buf) => {
+                    match result {
+                        Ok(Some(0)) | Ok(None) | Err(_) => break,
+                        _ => {}
+                    }
+                }
+            }
+        }
     }
+
+    cancel_token.cancel();
+    let _ = mic_to_net.await;
+    Ok(())
+}
+
+/// Handle an iroh connection using VPIO backend (macOS Voice Processing IO).
+///
+/// Takes raw pointer as usize to satisfy Send bounds for tokio::spawn.
+/// Safety: callers must ensure the pointed-to AudioVoiceIO outlives this future.
+#[cfg(feature = "audio-macos")]
+async fn handle_iroh_connection_vpio(
+    vpio_ptr: usize,
+    conn: IrohConnection,
+    external_cancel: tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    let stream = tokio::select! {
+        result = conn.accept_stream() => result?,
+        _ = external_cancel.cancelled() => {
+            tracing::info!("Connection cancelled while waiting for stream");
+            return Ok(());
+        }
+    };
+    let (mut send, mut recv) = stream.split();
+
+    let cancel_token = conn.cancellation_token();
+
+    // Task: VPIO mic → network
+    // AudioVoiceIO::read() is blocking, so we use a dedicated thread
+    let input_rx = {
+        let (tx, rx) = tokio::sync::mpsc::channel::<AudioFrame>(32);
+        let cancel = cancel_token.clone();
+        let ext_cancel = external_cancel.clone();
+        std::thread::spawn(move || {
+            // Safety: vpio_ptr is valid for the lifetime of this task
+            let vpio = unsafe { &*(vpio_ptr as *const crate::audio_macos::AudioVoiceIO) };
+            loop {
+                if cancel.is_cancelled() || ext_cancel.is_cancelled() {
+                    break;
+                }
+                match vpio.read() {
+                    Ok(frame) => {
+                        if tx.blocking_send(frame).is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("VPIO input read error: {}", e);
+                        break;
+                    }
+                }
+            }
+        });
+        rx
+    };
+
+    let cancel_clone = cancel_token.clone();
+    let ext_clone = external_cancel.clone();
+    let mic_to_net = tokio::spawn(async move {
+        let mut rx = input_rx;
+        loop {
+            tokio::select! {
+                _ = cancel_clone.cancelled() => break,
+                _ = ext_clone.cancelled() => break,
+                frame = rx.recv() => {
+                    match frame {
+                        Some(frame) => {
+                            let header = frame.encode_header();
+                            if send.write_all(&header).await.is_err() {
+                                break;
+                            }
+                            if send.write_all(&frame.data).await.is_err() {
+                                break;
+                            }
+                            tokio::task::yield_now().await;
+                        }
+                        None => break,
+                    }
+                }
+            }
+        }
+    });
+
+    // Main task: network → VPIO speaker (with AEC reference)
+    let mut header_buf = [0u8; WIRE_HEADER_SIZE];
+    loop {
+        tokio::select! {
+            _ = cancel_token.cancelled() => break,
+            _ = external_cancel.cancelled() => break,
+            result = recv.read_exact(&mut header_buf) => {
+                match result {
+                    Ok(()) => {
+                        let (_config, _frame_count, _timestamp_us, data_length) =
+                            AudioFrame::decode_header(&header_buf)?;
+                        let mut data = vec![0u8; data_length as usize];
+                        recv.read_exact(&mut data).await?;
+                        // Momentary reference — no await between creation and use
+                        let vpio =
+                            unsafe { &*(vpio_ptr as *const crate::audio_macos::AudioVoiceIO) };
+                        if let Err(e) = vpio.write_raw(data) {
+                            tracing::debug!("VPIO output write error: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::info!("Audio client disconnected: {}", e);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    cancel_token.cancel();
+    let _ = mic_to_net.await;
+    Ok(())
 }
