@@ -421,25 +421,37 @@ async fn handle_iroh_connection_separate(
 
     let cancel_clone = cancel_token.clone();
     let ext_clone = external_cancel.clone();
+    let silence_config = config.clone();
     let mic_to_net = tokio::spawn(async move {
         let mut rx = input_rx;
+        let silence = make_silence_frame(&silence_config);
         loop {
-            tokio::select! {
-                _ = cancel_clone.cancelled() => break,
-                _ = ext_clone.cancelled() => break,
-                frame = rx.recv() => {
-                    match frame {
-                        Some(frame) => {
-                            let header = frame.encode_header();
-                            if send.write_all(&header).await.is_err() {
-                                break;
-                            }
-                            if send.write_all(&frame.data).await.is_err() {
-                                break;
-                            }
-                            tokio::task::yield_now().await;
-                        }
-                        None => break,
+            if cancel_clone.is_cancelled() || ext_clone.is_cancelled() {
+                break;
+            }
+            // Use a timeout so we send periodic silence when mic produces no data.
+            // This keeps the connection alive and ensures the client gets data even
+            // if the initial silence frame was lost during relay switchover.
+            match tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await {
+                Ok(Some(frame)) => {
+                    let header = frame.encode_header();
+                    if send.write_all(&header).await.is_err() {
+                        break;
+                    }
+                    if send.write_all(&frame.data).await.is_err() {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+                Ok(None) => break, // channel closed
+                Err(_) => {
+                    // No mic data within 100ms — send silence to keep stream alive
+                    let header = silence.encode_header();
+                    if send.write_all(&header).await.is_err() {
+                        break;
+                    }
+                    if send.write_all(&silence.data).await.is_err() {
+                        break;
                     }
                 }
             }
@@ -578,25 +590,33 @@ async fn handle_iroh_connection_vpio(
 
     let cancel_clone = cancel_token.clone();
     let ext_clone = external_cancel.clone();
+    let silence_config = config.clone();
     let mic_to_net = tokio::spawn(async move {
         let mut rx = input_rx;
+        let silence = make_silence_frame(&silence_config);
         loop {
-            tokio::select! {
-                _ = cancel_clone.cancelled() => break,
-                _ = ext_clone.cancelled() => break,
-                frame = rx.recv() => {
-                    match frame {
-                        Some(frame) => {
-                            let header = frame.encode_header();
-                            if send.write_all(&header).await.is_err() {
-                                break;
-                            }
-                            if send.write_all(&frame.data).await.is_err() {
-                                break;
-                            }
-                            tokio::task::yield_now().await;
-                        }
-                        None => break,
+            if cancel_clone.is_cancelled() || ext_clone.is_cancelled() {
+                break;
+            }
+            match tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await {
+                Ok(Some(frame)) => {
+                    let header = frame.encode_header();
+                    if send.write_all(&header).await.is_err() {
+                        break;
+                    }
+                    if send.write_all(&frame.data).await.is_err() {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    let header = silence.encode_header();
+                    if send.write_all(&header).await.is_err() {
+                        break;
+                    }
+                    if send.write_all(&silence.data).await.is_err() {
+                        break;
                     }
                 }
             }
