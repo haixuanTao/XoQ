@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RealSense MoQ Viewer</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #111; color: #ddd; font-family: 'SF Mono', 'Consolas', monospace; padding: 20px; }
+h1 { margin-bottom: 12px; font-size: 20px; }
+.controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
+.controls label { font-size: 12px; color: #888; }
+.controls input { background: #222; border: 1px solid #444; color: #fff; padding: 5px 8px; border-radius: 4px; font-family: inherit; font-size: 12px; }
+.controls button { background: #2563eb; color: white; border: none; padding: 5px 14px; border-radius: 4px; cursor: pointer; font-family: inherit; }
+.controls button:hover { background: #1d4ed8; }
+.controls button.stop { background: #dc2626; }
+.videos { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
+.panel { text-align: center; }
+.panel h3 { margin-bottom: 6px; font-size: 13px; color: #888; }
+video { width: 640px; height: 480px; background: #000; border-radius: 4px; }
+.stats { font-size: 11px; color: #666; margin-top: 4px; }
+#log { background: #0a0a0a; border: 1px solid #333; border-radius: 4px; padding: 8px; height: 180px; overflow-y: auto; font-size: 11px; line-height: 1.6; }
+.log-err { color: #ef4444; } .log-ok { color: #22c55e; } .log-info { color: #3b82f6; }
+.note { font-size: 11px; color: #555; margin-top: 8px; }
+.note code { background: #222; padding: 1px 4px; border-radius: 2px; }
+</style>
+</head>
+<body>
+<h1>RealSense MoQ Viewer</h1>
+
+<div class="controls">
+  <label>Relay:</label>
+  <input id="relay" value="https://172.18.133.111:4443" size="32">
+  <label>Path:</label>
+  <input id="path" value="anon/realsense" size="14">
+  <label>Cert hash (hex, optional):</label>
+  <input id="certHash" placeholder="sha256 hex fingerprint" size="24" oninput="localStorage.setItem('moq-cert-hash',this.value)">
+  <button onclick="doConnect()">Connect</button>
+  <button onclick="doDisconnect()" class="stop">Disconnect</button>
+</div>
+
+<div class="videos">
+  <div class="panel">
+    <h3>Color (H.264)</h3>
+    <video id="colorVideo" autoplay muted playsinline></video>
+    <div class="stats" id="colorStats">Waiting...</div>
+  </div>
+  <div class="panel">
+    <h3>Depth (AV1)</h3>
+    <video id="depthVideo" autoplay muted playsinline></video>
+    <div class="stats" id="depthStats">Waiting...</div>
+  </div>
+</div>
+
+<div id="log"></div>
+<p class="note">
+  For self-signed certs: launch Chrome with <code>--ignore-certificate-errors</code>,
+  or paste the relay's SHA-256 cert fingerprint (hex) above.<br>
+  Serve this file from <code>localhost</code> (WebTransport requires secure context).
+</p>
+
+<script>
+// =====================================================================
+// Utilities
+// =====================================================================
+function concat(...arrs) {
+  const len = arrs.reduce((s, a) => s + a.length, 0);
+  const r = new Uint8Array(len);
+  let o = 0;
+  for (const a of arrs) { r.set(a, o); o += a.length; }
+  return r;
+}
+
+function hexToBytes(hex) {
+  hex = hex.replace(/[^0-9a-fA-F]/g, '');
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
+  return bytes.buffer;
+}
+
+const logEl = document.getElementById('log');
+function log(msg, cls) {
+  const d = document.createElement('div');
+  d.className = cls ? `log-${cls}` : '';
+  d.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  logEl.appendChild(d);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+// =====================================================================
+// QUIC VarInt
+// =====================================================================
+function encodeVarInt(v) {
+  if (v < 0x40) return new Uint8Array([v]);
+  if (v < 0x4000) return new Uint8Array([0x40 | (v >> 8), v & 0xff]);
+  if (v < 0x40000000) return new Uint8Array([
+    0x80 | ((v >>> 24) & 0x3f), (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff
+  ]);
+  const hi = Math.floor(v / 0x100000000);
+  const lo = v >>> 0;
+  return new Uint8Array([
+    0xc0 | ((hi >>> 24) & 0x3f), (hi >>> 16) & 0xff, (hi >>> 8) & 0xff, hi & 0xff,
+    (lo >>> 24) & 0xff, (lo >>> 16) & 0xff, (lo >>> 8) & 0xff, lo & 0xff
+  ]);
+}
+
+function encodeString(s) {
+  const b = new TextEncoder().encode(s);
+  return concat(encodeVarInt(b.length), b);
+}
+
+function sizePrefix(payload) {
+  return concat(encodeVarInt(payload.length), payload);
+}
+
+// =====================================================================
+// BufferReader (for parsing already-buffered data)
+// =====================================================================
+class BufReader {
+  constructor(data) { this.d = data; this.p = 0; }
+  readVarInt() {
+    const f = this.d[this.p], tag = (f & 0xc0) >> 6, len = 1 << tag;
+    let v = f & 0x3f;
+    for (let i = 1; i < len; i++) v = v * 256 + this.d[this.p + i];
+    this.p += len;
+    return v;
+  }
+  readBytes(n) { const r = this.d.slice(this.p, this.p + n); this.p += n; return r; }
+  readString() { const n = this.readVarInt(); return new TextDecoder().decode(this.readBytes(n)); }
+  readU8() { return this.d[this.p++]; }
+  remaining() { return this.d.length - this.p; }
+}
+
+// =====================================================================
+// StreamReader (buffered reading from ReadableStream)
+// =====================================================================
+class StreamReader {
+  constructor(reader) { this.reader = reader; this.buf = new Uint8Array(0); this.pos = 0; }
+
+  avail() { return this.buf.length - this.pos; }
+
+  async ensure(n) {
+    while (this.avail() < n) {
+      const { value, done } = await this.reader.read();
+      if (done) throw new Error('Stream ended');
+      const v = new Uint8Array(value);
+      const nb = new Uint8Array(this.avail() + v.length);
+      nb.set(this.buf.subarray(this.pos));
+      nb.set(v, this.avail());
+      this.buf = nb; this.pos = 0;
+    }
+  }
+
+  async readVarInt() {
+    await this.ensure(1);
+    const f = this.buf[this.pos], tag = (f & 0xc0) >> 6, len = 1 << tag;
+    await this.ensure(len);
+    let v = f & 0x3f;
+    for (let i = 1; i < len; i++) v = v * 256 + this.buf[this.pos + i];
+    this.pos += len;
+    return v;
+  }
+
+  async readBytes(n) {
+    await this.ensure(n);
+    const r = this.buf.slice(this.pos, this.pos + n);
+    this.pos += n;
+    return r;
+  }
+
+  async readMessage() {
+    const size = await this.readVarInt();
+    return await this.readBytes(size);
+  }
+}
+
+// =====================================================================
+// MoQ-Lite Protocol Messages
+// =====================================================================
+function encodeClientSetup() {
+  return sizePrefix(concat(
+    encodeVarInt(2), encodeVarInt(0xff0dad02), encodeVarInt(0xff0dad01), // versions
+    encodeVarInt(0) // params (empty)
+  ));
+}
+
+function encodeAnnouncePlease(prefix) {
+  return sizePrefix(encodeString(prefix));
+}
+
+function encodeSubscribe(id, broadcast, track, priority) {
+  return sizePrefix(concat(
+    encodeVarInt(id),
+    encodeString(broadcast),
+    encodeString(track),
+    new Uint8Array([(priority + 128) & 0xff]) // i8 bias encoding
+  ));
+}
+
+// =====================================================================
+// Codec detection from fMP4 init segment
+// =====================================================================
+function detectCodec(data) {
+  const d = new Uint8Array(data);
+  const hex2 = n => n.toString(16).padStart(2, '0').toUpperCase();
+
+  for (let i = 0; i < d.length - 11; i++) {
+    // avcC box: bytes [size(4)] [a][v][c][C] [configVersion] [profile] [compat] [level]
+    if (d[i+4]===0x61 && d[i+5]===0x76 && d[i+6]===0x63 && d[i+7]===0x43) {
+      const off = i + 8;
+      if (off + 4 <= d.length) {
+        return `avc1.${hex2(d[off+1])}${hex2(d[off+2])}${hex2(d[off+3])}`;
+      }
+    }
+    // av1C box: bytes [size(4)] [a][v][1][C] [marker|ver] [profile(3)|level(5)] [tier|flags]
+    if (d[i+4]===0x61 && d[i+5]===0x76 && d[i+6]===0x31 && d[i+7]===0x43) {
+      const off = i + 8;
+      if (off + 3 <= d.length) {
+        const b2 = d[off+1], b3 = d[off+2];
+        const prof = (b2 >> 5) & 7, lev = b2 & 0x1f;
+        const tier = (b3 >> 7) & 1, hbd = (b3 >> 6) & 1, tb = (b3 >> 5) & 1;
+        const bd = hbd ? (tb ? 12 : 10) : 8;
+        return `av01.${prof}.${String(lev).padStart(2,'0')}${tier?'H':'M'}.${String(bd).padStart(2,'0')}`;
+      }
+    }
+  }
+  return null;
+}
+
+// Check if data starts with an ftyp box (indicates init segment)
+function hasFtyp(data) {
+  return data.length >= 8 && data[4]===0x66 && data[5]===0x74 && data[6]===0x79 && data[7]===0x70;
+}
+
+// =====================================================================
+// MSE Player
+// =====================================================================
+class MsePlayer {
+  constructor(videoEl, statsEl, label) {
+    this.video = videoEl;
+    this.statsEl = statsEl;
+    this.label = label;
+    this.ms = null;
+    this.sb = null;
+    this.queue = [];
+    this.ready = false;
+    this.frames = 0;
+    this.bytes = 0;
+    this.t0 = 0;
+    this.seekIv = null;
+  }
+
+  onData(data) {
+    this.frames++;
+    this.bytes += data.length;
+
+    if (!this.ready) {
+      // First chunk should be init segment (ftyp+moov)
+      if (!hasFtyp(data)) {
+        // Not an init segment yet, skip
+        return;
+      }
+      const codec = detectCodec(data);
+      if (!codec) { log(`${this.label}: cannot detect codec`, 'err'); return; }
+      this.initMse(codec, data);
+      return;
+    }
+
+    this.enqueue(data);
+    this.updateStats();
+  }
+
+  initMse(codec, initData) {
+    const mime = `video/mp4; codecs="${codec}"`;
+    log(`${this.label}: ${mime}`, 'info');
+
+    if (!MediaSource.isTypeSupported(mime)) {
+      log(`${this.label}: unsupported MIME type`, 'err');
+      return;
+    }
+
+    this.ms = new MediaSource();
+    this.video.src = URL.createObjectURL(this.ms);
+    this.t0 = performance.now();
+
+    this.ms.addEventListener('sourceopen', () => {
+      try {
+        this.sb = this.ms.addSourceBuffer(mime);
+        this.sb.mode = 'segments';
+        this.sb.addEventListener('updateend', () => this.flush());
+        this.sb.addEventListener('error', () => log(`${this.label}: SB error`, 'err'));
+        this.ready = true;
+        this.enqueue(initData);
+        this.video.play().catch(() => {});
+
+        // Seek to live edge periodically
+        this.seekIv = setInterval(() => {
+          if (this.video.buffered.length > 0) {
+            const end = this.video.buffered.end(this.video.buffered.length - 1);
+            if (end - this.video.currentTime > 0.5) this.video.currentTime = end - 0.05;
+            // Trim old buffer to avoid memory growth
+            const start = this.video.buffered.start(0);
+            if (end - start > 10 && !this.sb.updating) {
+              try { this.sb.remove(start, end - 5); } catch {}
+            }
+          }
+        }, 500);
+      } catch (e) { log(`${this.label}: init failed: ${e.message}`, 'err'); }
+    });
+  }
+
+  enqueue(data) {
+    this.queue.push(data);
+    this.flush();
+  }
+
+  flush() {
+    if (!this.sb || this.sb.updating || !this.queue.length) return;
+    const d = this.queue.shift();
+    try { this.sb.appendBuffer(d); }
+    catch (e) { log(`${this.label}: append error: ${e.message}`, 'err'); }
+  }
+
+  updateStats() {
+    const elapsed = (performance.now() - this.t0) / 1000;
+    const fps = elapsed > 0 ? (this.frames / elapsed).toFixed(1) : '0';
+    const kb = (this.bytes / 1024).toFixed(0);
+    this.statsEl.textContent = `${this.frames} frames | ${fps} fps | ${kb} KB`;
+  }
+
+  destroy() {
+    if (this.seekIv) clearInterval(this.seekIv);
+    this.queue = [];
+    this.ready = false;
+    if (this.ms && this.ms.readyState === 'open') {
+      try { this.ms.endOfStream(); } catch {}
+    }
+    this.video.src = '';
+  }
+}
+
+// =====================================================================
+// MoQ Subscriber
+// =====================================================================
+let subscriber = null;
+
+class MoqSubscriber {
+  constructor() {
+    this.transport = null;
+    this.nextId = 0;
+    this.handlers = new Map();
+    this.running = false;
+  }
+
+  async connect(url, certHash) {
+    const opts = {};
+    if (certHash) {
+      opts.serverCertificateHashes = [{ algorithm: 'sha-256', value: hexToBytes(certHash) }];
+    }
+
+    this.transport = new WebTransport(url, opts);
+    await this.transport.ready;
+    this.running = true;
+    log('WebTransport connected', 'ok');
+
+    this.transport.closed.then(() => {
+      this.running = false;
+      log('Transport closed');
+    }).catch(e => {
+      this.running = false;
+      log(`Transport closed: ${e.message}`, 'err');
+    });
+
+    // Session setup
+    await this.setup();
+    // Start data reception in background
+    this.receiveStreams();
+  }
+
+  async setup() {
+    const bidi = await this.transport.createBidirectionalStream();
+    const w = bidi.writable.getWriter();
+    const r = new StreamReader(bidi.readable.getReader());
+
+    await w.write(concat(encodeVarInt(0), encodeClientSetup()));
+
+    const setupMsg = await r.readMessage();
+    const br = new BufReader(setupMsg);
+    const ver = br.readVarInt();
+    log(`Server version: 0x${ver.toString(16)}`, 'info');
+  }
+
+  async waitBroadcast() {
+    const bidi = await this.transport.createBidirectionalStream();
+    const w = bidi.writable.getWriter();
+    const r = new StreamReader(bidi.readable.getReader());
+
+    await w.write(concat(encodeVarInt(1), encodeAnnouncePlease("")));
+
+    const initMsg = await r.readMessage();
+    const br = new BufReader(initMsg);
+    const count = br.readVarInt();
+    const paths = [];
+    for (let i = 0; i < count; i++) paths.push(br.readString());
+    log(`Broadcasts: [${paths.map(p => `"${p}"`).join(', ')}] (${count})`, 'info');
+
+    if (count > 0) return paths[0];
+
+    // Wait for an Active announce
+    log('Waiting for publisher...', 'info');
+    while (true) {
+      const msg = await r.readMessage();
+      const status = msg[0];
+      const pbr = new BufReader(msg.subarray(1));
+      const path = pbr.readString();
+      if (status === 1) { log(`Broadcast active: "${path}"`, 'ok'); return path; }
+    }
+  }
+
+  async subscribe(broadcast, track, onData) {
+    const id = this.nextId++;
+    this.handlers.set(id, onData);
+
+    const bidi = await this.transport.createBidirectionalStream();
+    const w = bidi.writable.getWriter();
+    const r = new StreamReader(bidi.readable.getReader());
+
+    await w.write(concat(encodeVarInt(2), encodeSubscribe(id, broadcast, track, 0)));
+
+    const okMsg = await r.readMessage();
+    log(`Subscribed "${track}" (id=${id})`, 'ok');
+    return id;
+  }
+
+  async receiveStreams() {
+    const sr = this.transport.incomingUnidirectionalStreams.getReader();
+    while (this.running) {
+      try {
+        const { value: stream, done } = await sr.read();
+        if (done) break;
+        this.handleData(stream);
+      } catch (e) {
+        if (this.running) log(`Receive error: ${e.message}`, 'err');
+        break;
+      }
+    }
+  }
+
+  async handleData(stream) {
+    try {
+      const r = new StreamReader(stream.getReader());
+      const dt = await r.readVarInt(); // DataType
+      if (dt !== 0) return;
+
+      // Group header
+      const hdr = await r.readMessage();
+      const br = new BufReader(hdr);
+      const subId = br.readVarInt();
+      const seq = br.readVarInt();
+
+      // Frame (size-prefixed)
+      const frame = await r.readMessage();
+
+      const handler = this.handlers.get(subId);
+      if (handler) handler(frame, seq);
+    } catch {}
+  }
+
+  disconnect() {
+    this.running = false;
+    if (this.transport) { this.transport.close(); this.transport = null; }
+  }
+}
+
+// =====================================================================
+// UI
+// =====================================================================
+let colorPlayer = null;
+let depthPlayer = null;
+
+// Restore cert hash from localStorage
+{ const saved = localStorage.getItem('moq-cert-hash'); if (saved) document.getElementById('certHash').value = saved; }
+
+async function doConnect() {
+  doDisconnect();
+
+  const relay = document.getElementById('relay').value.trim();
+  const path = document.getElementById('path').value.trim();
+  const certHash = document.getElementById('certHash').value.trim();
+  const url = `${relay}/${path}`;
+
+  colorPlayer = new MsePlayer(
+    document.getElementById('colorVideo'),
+    document.getElementById('colorStats'), 'Color');
+  depthPlayer = new MsePlayer(
+    document.getElementById('depthVideo'),
+    document.getElementById('depthStats'), 'Depth');
+
+  try {
+    subscriber = new MoqSubscriber();
+    await subscriber.connect(url, certHash || null);
+
+    const broadcast = await subscriber.waitBroadcast();
+
+    await subscriber.subscribe(broadcast, 'video', (data, seq) => colorPlayer.onData(data));
+    await subscriber.subscribe(broadcast, 'depth', (data, seq) => depthPlayer.onData(data));
+
+    log('Receiving frames...', 'ok');
+  } catch (e) {
+    log(`Connect failed: ${e.message}`, 'err');
+  }
+}
+
+function doDisconnect() {
+  if (subscriber) { subscriber.disconnect(); subscriber = null; }
+  if (colorPlayer) { colorPlayer.destroy(); colorPlayer = null; }
+  if (depthPlayer) { depthPlayer.destroy(); depthPlayer = null; }
+  document.getElementById('colorStats').textContent = 'Waiting...';
+  document.getElementById('depthStats').textContent = 'Waiting...';
+}
+</script>
+</body>
+</html>

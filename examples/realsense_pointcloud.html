@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RealSense 3D Point Cloud</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #111; color: #ddd; font-family: 'SF Mono', 'Consolas', monospace; overflow: hidden; }
+#canvas3d { width: 100vw; height: 100vh; display: block; }
+.overlay { position: fixed; top: 0; left: 0; padding: 12px; z-index: 10; pointer-events: none; }
+.overlay > * { pointer-events: auto; }
+.controls { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 8px;
+  background: rgba(0,0,0,0.7); padding: 8px; border-radius: 6px; }
+.controls label { font-size: 11px; color: #888; }
+.controls input { background: #222; border: 1px solid #444; color: #fff; padding: 3px 6px;
+  border-radius: 3px; font-family: inherit; font-size: 11px; }
+.controls button { background: #2563eb; color: white; border: none; padding: 3px 12px;
+  border-radius: 3px; cursor: pointer; font-family: inherit; font-size: 11px; }
+.controls button:hover { background: #1d4ed8; }
+.controls button.stop { background: #dc2626; }
+.stats { font-size: 11px; color: #888; background: rgba(0,0,0,0.7); padding: 6px 8px;
+  border-radius: 4px; display: inline-block; }
+#log { position: fixed; bottom: 0; left: 0; right: 0; background: rgba(0,0,0,0.85);
+  padding: 6px 10px; font-size: 10px; max-height: 100px; overflow-y: auto; z-index: 10; }
+.log-err { color: #ef4444; } .log-ok { color: #22c55e; } .log-info { color: #3b82f6; }
+.hidden-videos { position: fixed; top: -9999px; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="canvas3d"></canvas>
+
+<div class="overlay">
+  <div class="controls">
+    <label>Relay:</label>
+    <input id="relay" value="https://172.18.133.111:4443" size="28">
+    <label>Path:</label>
+    <input id="path" value="anon/realsense" size="12">
+    <label>Cert:</label>
+    <input id="certHash" placeholder="sha256 hex" size="16" oninput="localStorage.setItem('moq-cert-hash',this.value)">
+    <button onclick="doConnect()">Connect</button>
+    <button onclick="doDisconnect()" class="stop">Stop</button>
+  </div>
+  <div class="controls">
+    <label>Point size:</label>
+    <input id="ptSize" type="range" min="0.5" max="8" step="0.5" value="2" oninput="updatePointSize()">
+    <label>Subsample:</label>
+    <input id="subsample" type="number" min="1" max="8" value="2" style="width:36px" oninput="updateSubsample()">
+    <label>Min depth (mm):</label>
+    <input id="minDepth" type="number" min="0" max="5000" value="0" style="width:56px">
+    <label>Max depth (mm):</label>
+    <input id="maxDepth" type="number" min="10" max="20000" value="1000" style="width:56px">
+    <label>fx:</label>
+    <input id="fx" type="number" value="383" style="width:48px">
+    <label>fy:</label>
+    <input id="fy" type="number" value="383" style="width:48px">
+  </div>
+  <div class="stats" id="stats">Waiting for connection...</div>
+</div>
+
+<div class="hidden-videos">
+  <video id="colorVideo" autoplay muted playsinline></video>
+  <video id="depthVideo" autoplay muted playsinline></video>
+</div>
+
+<div id="log"></div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// =====================================================================
+// Utilities (same as viewer)
+// =====================================================================
+function concat(...arrs) {
+  const len = arrs.reduce((s, a) => s + a.length, 0);
+  const r = new Uint8Array(len); let o = 0;
+  for (const a of arrs) { r.set(a, o); o += a.length; }
+  return r;
+}
+function hexToBytes(hex) {
+  hex = hex.replace(/[^0-9a-fA-F]/g, '');
+  const b = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < b.length; i++) b[i] = parseInt(hex.substr(i * 2, 2), 16);
+  return b.buffer;
+}
+const logEl = document.getElementById('log');
+function log(msg, cls) {
+  const d = document.createElement('div');
+  d.className = cls ? `log-${cls}` : '';
+  d.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  logEl.appendChild(d); logEl.scrollTop = logEl.scrollHeight;
+  if (logEl.children.length > 50) logEl.removeChild(logEl.firstChild);
+}
+
+// =====================================================================
+// QUIC VarInt
+// =====================================================================
+function encodeVarInt(v) {
+  if (v < 0x40) return new Uint8Array([v]);
+  if (v < 0x4000) return new Uint8Array([0x40 | (v >> 8), v & 0xff]);
+  if (v < 0x40000000) return new Uint8Array([
+    0x80 | ((v >>> 24) & 0x3f), (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff
+  ]);
+  const hi = Math.floor(v / 0x100000000), lo = v >>> 0;
+  return new Uint8Array([
+    0xc0 | ((hi >>> 24) & 0x3f), (hi >>> 16) & 0xff, (hi >>> 8) & 0xff, hi & 0xff,
+    (lo >>> 24) & 0xff, (lo >>> 16) & 0xff, (lo >>> 8) & 0xff, lo & 0xff
+  ]);
+}
+function encodeString(s) { const b = new TextEncoder().encode(s); return concat(encodeVarInt(b.length), b); }
+function sizePrefix(p) { return concat(encodeVarInt(p.length), p); }
+
+// =====================================================================
+// BufferReader / StreamReader
+// =====================================================================
+class BufReader {
+  constructor(d) { this.d = d; this.p = 0; }
+  readVarInt() {
+    const f = this.d[this.p], tag = (f & 0xc0) >> 6, len = 1 << tag;
+    let v = f & 0x3f;
+    for (let i = 1; i < len; i++) v = v * 256 + this.d[this.p + i];
+    this.p += len; return v;
+  }
+  readBytes(n) { const r = this.d.slice(this.p, this.p + n); this.p += n; return r; }
+  readString() { const n = this.readVarInt(); return new TextDecoder().decode(this.readBytes(n)); }
+}
+
+class StreamReader {
+  constructor(r) { this.reader = r; this.buf = new Uint8Array(0); this.pos = 0; }
+  avail() { return this.buf.length - this.pos; }
+  async ensure(n) {
+    while (this.avail() < n) {
+      const { value, done } = await this.reader.read();
+      if (done) throw new Error('Stream ended');
+      const v = new Uint8Array(value);
+      const nb = new Uint8Array(this.avail() + v.length);
+      nb.set(this.buf.subarray(this.pos)); nb.set(v, this.avail());
+      this.buf = nb; this.pos = 0;
+    }
+  }
+  async readVarInt() {
+    await this.ensure(1);
+    const f = this.buf[this.pos], tag = (f & 0xc0) >> 6, len = 1 << tag;
+    await this.ensure(len);
+    let v = f & 0x3f;
+    for (let i = 1; i < len; i++) v = v * 256 + this.buf[this.pos + i];
+    this.pos += len; return v;
+  }
+  async readBytes(n) { await this.ensure(n); const r = this.buf.slice(this.pos, this.pos + n); this.pos += n; return r; }
+  async readMessage() { const s = await this.readVarInt(); return await this.readBytes(s); }
+}
+
+// =====================================================================
+// MoQ-Lite Protocol
+// =====================================================================
+function encodeClientSetup() {
+  return sizePrefix(concat(
+    encodeVarInt(2), encodeVarInt(0xff0dad02), encodeVarInt(0xff0dad01),
+    encodeVarInt(0)
+  ));
+}
+function encodeAnnouncePlease(pfx) { return sizePrefix(encodeString(pfx)); }
+function encodeSubscribe(id, bc, tk, pri) {
+  return sizePrefix(concat(encodeVarInt(id), encodeString(bc), encodeString(tk), new Uint8Array([(pri+128)&0xff])));
+}
+
+// =====================================================================
+// Codec detection from fMP4 init segment
+// =====================================================================
+function detectCodec(data) {
+  const d = new Uint8Array(data), h = n => n.toString(16).padStart(2,'0').toUpperCase();
+  for (let i = 0; i < d.length - 11; i++) {
+    if (d[i+4]===0x61&&d[i+5]===0x76&&d[i+6]===0x63&&d[i+7]===0x43) {
+      const o = i+8; if (o+4<=d.length) return `avc1.${h(d[o+1])}${h(d[o+2])}${h(d[o+3])}`;
+    }
+  }
+  return null;
+}
+function hasFtyp(d) { return d.length>=8 && d[4]===0x66&&d[5]===0x74&&d[6]===0x79&&d[7]===0x70; }
+
+// =====================================================================
+// MSE Player (hidden, for decoding only)
+// =====================================================================
+class MsePlayer {
+  constructor(videoEl, label) {
+    this.video = videoEl; this.label = label;
+    this.ms = null; this.sb = null; this.queue = []; this.ready = false;
+    this.frames = 0; this.seekIv = null;
+  }
+  onData(data) {
+    this.frames++;
+    if (!this.ready) {
+      if (!hasFtyp(data)) return;
+      const codec = detectCodec(data);
+      if (!codec) { log(`${this.label}: cannot detect codec`, 'err'); return; }
+      this.initMse(codec, data); return;
+    }
+    this.enqueue(data);
+  }
+  initMse(codec, initData) {
+    const mime = `video/mp4; codecs="${codec}"`;
+    log(`${this.label}: ${mime}`, 'info');
+    if (!MediaSource.isTypeSupported(mime)) { log(`${this.label}: unsupported`, 'err'); return; }
+    this.ms = new MediaSource();
+    this.video.src = URL.createObjectURL(this.ms);
+    this.ms.addEventListener('sourceopen', () => {
+      try {
+        this.sb = this.ms.addSourceBuffer(mime);
+        this.sb.mode = 'segments';
+        this.sb.addEventListener('updateend', () => this.flush());
+        this.ready = true;
+        this.enqueue(initData);
+        this.video.play().catch(() => {});
+        this.seekIv = setInterval(() => {
+          if (this.video.buffered.length > 0) {
+            const end = this.video.buffered.end(this.video.buffered.length - 1);
+            if (end - this.video.currentTime > 0.5) this.video.currentTime = end - 0.05;
+            const start = this.video.buffered.start(0);
+            if (end - start > 10 && !this.sb.updating) try { this.sb.remove(start, end - 5); } catch {}
+          }
+        }, 500);
+      } catch (e) { log(`${this.label}: init failed: ${e.message}`, 'err'); }
+    });
+  }
+  enqueue(d) { this.queue.push(d); this.flush(); }
+  flush() {
+    if (!this.sb || this.sb.updating || !this.queue.length) return;
+    try { this.sb.appendBuffer(this.queue.shift()); } catch (e) { log(`${this.label}: ${e.message}`, 'err'); }
+  }
+  destroy() {
+    if (this.seekIv) clearInterval(this.seekIv);
+    this.queue = []; this.ready = false;
+    if (this.ms && this.ms.readyState === 'open') try { this.ms.endOfStream(); } catch {}
+    this.video.src = '';
+  }
+}
+
+// =====================================================================
+// MoQ Subscriber
+// =====================================================================
+class MoqSubscriber {
+  constructor() { this.transport = null; this.nextId = 0; this.handlers = new Map(); this.running = false; }
+  async connect(url, certHash) {
+    const opts = {};
+    if (certHash) opts.serverCertificateHashes = [{ algorithm: 'sha-256', value: hexToBytes(certHash) }];
+    this.transport = new WebTransport(url, opts);
+    await this.transport.ready; this.running = true;
+    log('WebTransport connected', 'ok');
+    this.transport.closed.then(() => { this.running = false; log('Transport closed'); })
+      .catch(e => { this.running = false; log(`Transport: ${e.message}`, 'err'); });
+    await this.setup();
+    this.receiveStreams();
+  }
+  async setup() {
+    const b = await this.transport.createBidirectionalStream();
+    const w = b.writable.getWriter(), r = new StreamReader(b.readable.getReader());
+    await w.write(concat(encodeVarInt(0), encodeClientSetup()));
+    const msg = await r.readMessage(); const br = new BufReader(msg);
+    log(`Server version: 0x${br.readVarInt().toString(16)}`, 'info');
+  }
+  async waitBroadcast() {
+    const b = await this.transport.createBidirectionalStream();
+    const w = b.writable.getWriter(), r = new StreamReader(b.readable.getReader());
+    await w.write(concat(encodeVarInt(1), encodeAnnouncePlease("")));
+    const msg = await r.readMessage(); const br = new BufReader(msg);
+    const cnt = br.readVarInt(), paths = [];
+    for (let i = 0; i < cnt; i++) paths.push(br.readString());
+    log(`Broadcasts: [${paths.map(p=>`"${p}"`).join(', ')}]`, 'info');
+    if (cnt > 0) return paths[0];
+    log('Waiting for publisher...', 'info');
+    while (true) {
+      const m = await r.readMessage();
+      if (m[0] === 1) { const pbr = new BufReader(m.subarray(1)); return pbr.readString(); }
+    }
+  }
+  async subscribe(bc, tk, onData) {
+    const id = this.nextId++; this.handlers.set(id, onData);
+    const b = await this.transport.createBidirectionalStream();
+    const w = b.writable.getWriter(), r = new StreamReader(b.readable.getReader());
+    await w.write(concat(encodeVarInt(2), encodeSubscribe(id, bc, tk, 0)));
+    await r.readMessage();
+    log(`Subscribed "${tk}" (id=${id})`, 'ok'); return id;
+  }
+  async receiveStreams() {
+    const sr = this.transport.incomingUnidirectionalStreams.getReader();
+    while (this.running) {
+      try {
+        const { value, done } = await sr.read(); if (done) break;
+        this.handleData(value);
+      } catch (e) { if (this.running) log(`Recv: ${e.message}`, 'err'); break; }
+    }
+  }
+  async handleData(stream) {
+    try {
+      const r = new StreamReader(stream.getReader());
+      if (await r.readVarInt() !== 0) return;
+      const hdr = await r.readMessage(); const br = new BufReader(hdr);
+      const subId = br.readVarInt(); br.readVarInt();
+      const frame = await r.readMessage();
+      const h = this.handlers.get(subId); if (h) h(frame);
+    } catch {}
+  }
+  disconnect() { this.running = false; if (this.transport) { this.transport.close(); this.transport = null; } }
+}
+
+// =====================================================================
+// Three.js Point Cloud
+// =====================================================================
+const W = 640, H = 480;
+const canvas3d = document.getElementById('canvas3d');
+const renderer = new THREE.WebGLRenderer({ canvas: canvas3d, antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setClearColor(0x111111);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 1, 50000);
+camera.position.set(0, 0, -500);
+camera.lookAt(0, 0, 1000);
+
+const controls = new OrbitControls(camera, canvas3d);
+controls.target.set(0, 0, 500);
+controls.enableDamping = true;
+controls.dampingFactor = 0.1;
+controls.update();
+
+// Pre-allocate max point cloud buffers
+let step = 2;
+const maxPts = Math.ceil(W / 1) * Math.ceil(H / 1); // worst case step=1
+const posArr = new Float32Array(maxPts * 3);
+const colArr = new Float32Array(maxPts * 3);
+
+const geometry = new THREE.BufferGeometry();
+geometry.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
+geometry.setAttribute('color', new THREE.BufferAttribute(colArr, 3));
+geometry.setDrawRange(0, 0);
+
+const material = new THREE.PointsMaterial({ size: 2, vertexColors: true, sizeAttenuation: true });
+const points = new THREE.Points(geometry, material);
+scene.add(points);
+
+// Canvases for pixel extraction
+const colorCanvas = document.createElement('canvas');
+colorCanvas.width = W; colorCanvas.height = H;
+const colorCtx = colorCanvas.getContext('2d', { willReadFrequently: true });
+
+const depthCanvas = document.createElement('canvas');
+depthCanvas.width = W; depthCanvas.height = H;
+const depthCtx = depthCanvas.getContext('2d', { willReadFrequently: true });
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// =====================================================================
+// Point cloud update
+// =====================================================================
+const colorVideo = document.getElementById('colorVideo');
+const depthVideo = document.getElementById('depthVideo');
+const statsEl = document.getElementById('stats');
+let pcFrames = 0, pcT0 = 0;
+
+function updatePointCloud() {
+  if (!colorVideo.videoWidth || !depthVideo.videoWidth) return;
+
+  const fx = parseFloat(document.getElementById('fx').value) || 383;
+  const fy = parseFloat(document.getElementById('fy').value) || 383;
+  const cx = W / 2, cy = H / 2;
+  const minDepthMm = parseFloat(document.getElementById('minDepth').value) || 0;
+  const maxDepthMm = parseFloat(document.getElementById('maxDepth').value) || 1000;
+
+  colorCtx.drawImage(colorVideo, 0, 0, W, H);
+  depthCtx.drawImage(depthVideo, 0, 0, W, H);
+
+  const cPx = colorCtx.getImageData(0, 0, W, H).data;
+  const dPx = depthCtx.getImageData(0, 0, W, H).data;
+
+  let n = 0;
+  for (let v = 0; v < H; v += step) {
+    for (let u = 0; u < W; u += step) {
+      const idx = (v * W + u) * 4;
+      const dv = dPx[idx]; // R channel = grayscale depth
+      if (dv < 2) continue; // skip zero/near-zero depth (out-of-range)
+
+      const depth = minDepthMm + (dv / 255) * (maxDepthMm - minDepthMm);
+      const i3 = n * 3;
+      posArr[i3]     = (u - cx) * depth / fx;      // X: right
+      posArr[i3 + 1] = -(v - cy) * depth / fy;     // Y: up (flip)
+      posArr[i3 + 2] = depth;                       // Z: forward
+
+      colArr[i3]     = cPx[idx] / 255;
+      colArr[i3 + 1] = cPx[idx + 1] / 255;
+      colArr[i3 + 2] = cPx[idx + 2] / 255;
+      n++;
+    }
+  }
+
+  geometry.attributes.position.needsUpdate = true;
+  geometry.attributes.color.needsUpdate = true;
+  geometry.setDrawRange(0, n);
+  geometry.computeBoundingSphere();
+
+  pcFrames++;
+  if (!pcT0) pcT0 = performance.now();
+  const elapsed = (performance.now() - pcT0) / 1000;
+  const fps = elapsed > 0 ? (pcFrames / elapsed).toFixed(1) : '0';
+  statsEl.textContent = `${n.toLocaleString()} points | ${fps} fps | step=${step}`;
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  updatePointCloud();
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+
+// =====================================================================
+// UI controls
+// =====================================================================
+window.updatePointSize = () => { material.size = parseFloat(document.getElementById('ptSize').value); };
+window.updateSubsample = () => { step = Math.max(1, parseInt(document.getElementById('subsample').value) || 2); };
+
+let subscriber = null, colorPlayer = null, depthPlayer = null;
+
+// Restore cert hash from localStorage
+{ const saved = localStorage.getItem('moq-cert-hash'); if (saved) document.getElementById('certHash').value = saved; }
+
+window.doConnect = async () => {
+  window.doDisconnect();
+  const relay = document.getElementById('relay').value.trim();
+  const path = document.getElementById('path').value.trim();
+  const cert = document.getElementById('certHash').value.trim();
+
+  colorPlayer = new MsePlayer(colorVideo, 'Color');
+  depthPlayer = new MsePlayer(depthVideo, 'Depth');
+
+  try {
+    subscriber = new MoqSubscriber();
+    await subscriber.connect(`${relay}/${path}`, cert || null);
+    const bc = await subscriber.waitBroadcast();
+    await subscriber.subscribe(bc, 'video', d => colorPlayer.onData(d));
+    await subscriber.subscribe(bc, 'depth', d => depthPlayer.onData(d));
+    pcFrames = 0; pcT0 = 0;
+    log('Receiving frames...', 'ok');
+  } catch (e) { log(`Connect failed: ${e.message}`, 'err'); }
+};
+
+window.doDisconnect = () => {
+  if (subscriber) { subscriber.disconnect(); subscriber = null; }
+  if (colorPlayer) { colorPlayer.destroy(); colorPlayer = null; }
+  if (depthPlayer) { depthPlayer.destroy(); depthPlayer = null; }
+  geometry.setDrawRange(0, 0);
+  statsEl.textContent = 'Disconnected';
+};
+</script>
+</body>
+</html>

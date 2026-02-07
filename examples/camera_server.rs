@@ -99,6 +99,8 @@ struct CameraConfig {
     use_h264: bool,
     identity_path: PathBuf,
     moq_path: Option<String>,
+    relay: String,
+    insecure: bool,
 }
 
 fn parse_args() -> Option<(Vec<CameraConfig>, PathBuf)> {
@@ -122,6 +124,8 @@ fn parse_args() -> Option<(Vec<CameraConfig>, PathBuf)> {
     let mut bitrate = 2_000_000u32; // 2 Mbps default
     let mut use_h264 = false;
     let mut moq_path: Option<String> = None;
+    let mut relay = String::from("https://cdn.moq.dev");
+    let mut insecure = false;
     let mut i = 1;
 
     while i < args.len() {
@@ -155,6 +159,14 @@ fn parse_args() -> Option<(Vec<CameraConfig>, PathBuf)> {
                 use_h264 = true;
                 i += 1;
             }
+            "--relay" if i + 1 < args.len() => {
+                relay = args[i + 1].clone();
+                i += 2;
+            }
+            "--insecure" => {
+                insecure = true;
+                i += 1;
+            }
             "--moq" => {
                 // --moq [path] — next arg is path if it doesn't look like a flag or index
                 if i + 1 < args.len()
@@ -182,8 +194,8 @@ fn parse_args() -> Option<(Vec<CameraConfig>, PathBuf)> {
         return None;
     }
 
-    // List cameras to get names
-    let name_map = get_camera_name_map();
+    // Skip camera listing (can hang on macOS); just use fallback names
+    let name_map = std::collections::HashMap::<u32, String>::new();
 
     let configs = indices
         .into_iter()
@@ -212,6 +224,8 @@ fn parse_args() -> Option<(Vec<CameraConfig>, PathBuf)> {
                 use_h264,
                 identity_path,
                 moq_path: resolved_moq_path,
+                relay: relay.clone(),
+                insecure,
             }
         })
         .collect();
@@ -306,6 +320,8 @@ fn print_usage() {
     println!("  --h264            Use H.264 encoding (NVENC on Linux, VideoToolbox on macOS)");
     println!("  --bitrate <bps>   H.264 bitrate in bps (default: 2000000)");
     println!("  --moq [path]      Use MoQ relay transport (default: anon/camera-<index>)");
+    println!("  --relay <url>     MoQ relay URL (default: https://cdn.moq.dev)");
+    println!("  --insecure        Disable TLS verification (for self-signed certs)");
     println!();
     print_cameras();
 }
@@ -625,9 +641,18 @@ async fn run_camera_server_moq(config: &CameraConfig, moq_path: &str) -> Result<
 
     let camera = Arc::new(Mutex::new(camera));
 
-    let mut publisher = MoqBuilder::new().path(moq_path).connect_publisher().await?;
+    let mut builder = MoqBuilder::new().relay(&config.relay).path(moq_path);
+    if config.insecure {
+        builder = builder.disable_tls_verify();
+    }
+    let mut publisher = builder.connect_publisher().await?;
 
-    tracing::info!("[cam{}] MoQ path: {}", config.index, moq_path);
+    tracing::info!(
+        "[cam{}] MoQ path: {} (relay: {})",
+        config.index,
+        moq_path,
+        config.relay
+    );
 
     let mut track = publisher.create_track("camera");
     let mut frame_count = 0u64;
@@ -689,9 +714,18 @@ async fn run_camera_server_moq_h264_vtenc(config: &CameraConfig, moq_path: &str)
 
     let camera = Arc::new(Mutex::new(camera));
 
-    let mut publisher = MoqBuilder::new().path(moq_path).connect_publisher().await?;
+    let mut builder = MoqBuilder::new().relay(&config.relay).path(moq_path);
+    if config.insecure {
+        builder = builder.disable_tls_verify();
+    }
+    let mut publisher = builder.connect_publisher().await?;
 
-    tracing::info!("[cam{}] MoQ path: {} (H.264 CMAF)", config.index, moq_path);
+    tracing::info!(
+        "[cam{}] MoQ path: {} (H.264 CMAF, relay: {})",
+        config.index,
+        moq_path,
+        config.relay
+    );
 
     let mut track = publisher.create_track("video");
     let mut init_segment: Option<Vec<u8>> = None;
@@ -789,12 +823,17 @@ async fn run_camera_server_moq_h264_nvenc(config: &CameraConfig, moq_path: &str)
 
     let camera = Arc::new(Mutex::new(camera));
 
-    let mut publisher = MoqBuilder::new().path(moq_path).connect_publisher().await?;
+    let mut builder = MoqBuilder::new().relay(&config.relay).path(moq_path);
+    if config.insecure {
+        builder = builder.disable_tls_verify();
+    }
+    let mut publisher = builder.connect_publisher().await?;
 
     tracing::info!(
-        "[cam{}] MoQ path: {} (H.264 CMAF NVENC)",
+        "[cam{}] MoQ path: {} (H.264 CMAF NVENC, relay: {})",
         config.index,
-        moq_path
+        moq_path,
+        config.relay
     );
 
     let mut track = publisher.create_track("video");
@@ -1190,8 +1229,7 @@ async fn run_camera_server_h264_vtenc(config: &CameraConfig) -> Result<()> {
 // Main
 // ============================================================================
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
@@ -1241,27 +1279,45 @@ async fn main() -> Result<()> {
     println!("Encoding: {}", encoding_str);
     println!("========================================\n");
 
-    // Spawn all camera servers as async tasks
-    let mut tasks: JoinSet<Result<()>> = JoinSet::new();
-    for config in configs {
-        tasks.spawn(run_camera_server(config));
+    // On macOS, AVFoundation requires the main thread's RunLoop to be running.
+    // Run the tokio runtime on a background thread and keep the main thread
+    // pumping the CFRunLoop.
+    let rt = tokio::runtime::Runtime::new()?;
+
+    rt.spawn(async move {
+        let mut tasks: JoinSet<Result<()>> = JoinSet::new();
+        for config in configs {
+            tasks.spawn(run_camera_server(config));
+        }
+
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("Shutting down...");
+                tasks.abort_all();
+            }
+            _ = async {
+                while tasks.join_next().await.is_some() {}
+            } => {
+                tracing::info!("All camera servers stopped");
+            }
+        }
+
+        while tasks.join_next().await.is_some() {}
+        std::process::exit(0);
+    });
+
+    // Run the main thread's RunLoop so AVFoundation dispatches can execute
+    #[cfg(target_os = "macos")]
+    unsafe {
+        extern "C" {
+            fn CFRunLoopRun();
+        }
+        CFRunLoopRun();
     }
 
-    // Wait for Ctrl+C or all servers to exit
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-            tracing::info!("Shutting down...");
-            tasks.abort_all();
-        }
-        _ = async {
-            while tasks.join_next().await.is_some() {}
-        } => {
-            tracing::info!("All camera servers stopped");
-        }
-    }
-
-    // Drain remaining tasks so encoder destructors run before process exit
-    while tasks.join_next().await.is_some() {}
+    // On non-macOS, just block forever (tokio handles shutdown via process::exit)
+    #[cfg(not(target_os = "macos"))]
+    std::thread::park();
 
     Ok(())
 }

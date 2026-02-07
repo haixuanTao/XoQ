@@ -111,6 +111,10 @@ pub mod opencv;
 #[cfg(any(feature = "camera-remote", all(feature = "camera", feature = "iroh")))]
 pub mod camera_client;
 
+// Intel RealSense depth camera (Linux only)
+#[cfg(feature = "realsense")]
+pub mod realsense;
+
 // Audio device abstraction (cpal)
 #[cfg(feature = "audio")]
 pub mod audio;

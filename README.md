@@ -49,7 +49,7 @@ Robot Hardware          Network              Clients
 | CMAF Format                      | Fragmented MP4 for dataset recording with robotic data track for Training dataset streaming (online + offline, compatible with inference) |
 | Framework compat                 | dora-rs, ROS, ROS2, and LeRobot                                                                                                           |
 | Embedded targets                 | ESP32 / STM32 (server and client)                                                                                                         |
-| Intel RealSense / lidar / Orbbec | `pyrealsense2` drop-in replacement                                                                                                        |
+| Intel RealSense / lidar / Orbbec | Color + depth streaming done; `pyrealsense2` drop-in replacement TBD                                                                                                        |
 | C/C++ bindings                   | Via Rust ABI                                                                                                                              |
 
 ---
@@ -66,6 +66,7 @@ Robot Hardware          Network              Clients
 | CAN Bus | Linux (SocketCAN)     | —                               | `can`                   |
 | Audio   | Linux, macOS, Windows | cpal (ALSA/CoreAudio/WASAPI)    | `audio`                 |
 | Audio   | macOS (VPIO)          | AEC + Noise Suppression + AGC   | `audio-macos`           |
+| Depth   | Linux (RealSense)     | NVIDIA NVENC (H.264)            | `realsense`             |
 
 ## Getting Started
 
@@ -110,6 +111,26 @@ port.write(b"\xff\xff\x01\x04\x02\x00\x00\xf8")
 response = port.read(64)
 print(response)
 port.close()
+```
+
+### Bridge a RealSense depth camera
+
+Server (Linux with NVIDIA GPU + RealSense camera):
+
+```bash
+cargo run --example realsense_server --features realsense -- \
+  --relay https://your-relay:4443 --path anon/realsense
+```
+
+Publishes two H.264/CMAF tracks over MoQ: `video` (color) and `depth` (grayscale, auto-calibrated depth range).
+Auto-detects depth scale, camera intrinsics, and optimal depth mapping on startup.
+
+Open `examples/realsense_viewer.html` for 2D playback or `examples/realsense_pointcloud.html` for a real-time colored 3D point cloud (Three.js + WebTransport).
+
+```
+--serial <serial>    Select a specific camera (listed at startup)
+--min-depth <mm>     Override min depth (default: auto)
+--max-depth <mm>     Override max depth (default: auto)
 ```
 
 ### Bridge audio
@@ -219,6 +240,7 @@ Clients target macOS, Linux, and Windows. Future: C/C++ bindings via Rust ABI.
 | `reachy_mini`      | Reachy Mini robot control over remote serial               | `iroh`, `serial`                 |
 | `audio_server`     | Bridges local mic/speaker for remote access (VPIO on macOS) | `iroh`, `audio` / `audio-macos`  |
 | `audio_client`     | Connects to a remote audio server (bidirectional)          | `audio-remote`                   |
+| `realsense_server` | Streams color + depth from RealSense over MoQ              | `realsense`                      |
 | `moq_test`         | MoQ relay publish/subscribe diagnostic test                | —                                |
 
 ### ALPN Protocols
@@ -250,6 +272,7 @@ Clients target macOS, Linux, and Windows. Future: C/C++ bindings via Rust ABI.
 | `camera-remote` | Remote camera client (cross-platform)            |
 | `can-remote`    | Remote CAN client (cross-platform)               |
 | `audio-remote`  | Remote audio client (cross-platform)             |
+| `realsense`     | Intel RealSense depth camera (Linux server)      |
 | `image`         | Image processing support                         |
 
 ### License

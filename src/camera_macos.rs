@@ -162,6 +162,14 @@ extern "C" {
     ) -> *mut std::ffi::c_void;
 }
 
+// CoreFoundation RunLoop (needed for AVFoundation on background threads)
+#[link(name = "CoreFoundation", kind = "framework")]
+extern "C" {
+    fn CFRunLoopGetCurrent() -> *mut std::ffi::c_void;
+    fn CFRunLoopRun();
+    fn CFRunLoopStop(rl: *mut std::ffi::c_void);
+}
+
 // ObjC runtime for adding methods
 #[link(name = "objc", kind = "dylib")]
 extern "C" {
@@ -237,14 +245,80 @@ impl Camera {
     }
 
     /// Open a camera with options.
+    ///
+    /// AVFoundation APIs can hang on tokio worker threads (no RunLoop).
+    /// This method spawns a dedicated std::thread for camera initialization.
     pub fn open_with_options(
+        index: u32,
+        width: u32,
+        height: u32,
+        fps: u32,
+        options: CameraOptions,
+    ) -> Result<Self> {
+        // Call directly — caller must ensure this runs on the main thread
+        // (camera_server.rs opens cameras before starting the tokio runtime)
+        Self::open_on_thread(index, width, height, fps, options)
+    }
+
+    fn open_on_thread(
         index: u32,
         width: u32,
         height: u32,
         _fps: u32,
         _options: CameraOptions,
     ) -> Result<Self> {
+        eprintln!("[camera_macos] open_on_thread: checking auth...");
+        // Check camera authorization before attempting to enumerate devices.
+        // AVFoundation blocks indefinitely if authorization hasn't been granted.
+        unsafe {
+            let media_type = AVMediaTypeVideo.expect("AVMediaTypeVideo not available");
+            eprintln!("[camera_macos] open_on_thread: calling authorizationStatusForMediaType...");
+            let status: isize = msg_send![
+                class!(AVCaptureDevice),
+                authorizationStatusForMediaType: media_type
+            ];
+            // 0 = notDetermined, 1 = restricted, 2 = denied, 3 = authorized
+            eprintln!("[camera_macos] auth status = {}", status);
+            match status {
+                3 => {} // authorized
+                0 => {
+                    // Request access and wait
+                    let (auth_tx, auth_rx) = std::sync::mpsc::sync_channel(1);
+                    let block = block2::StackBlock::new(move |granted: Bool| {
+                        let _ = auth_tx.send(granted.as_bool());
+                    });
+                    let () = msg_send![
+                        class!(AVCaptureDevice),
+                        requestAccessForMediaType: media_type,
+                        completionHandler: &block
+                    ];
+                    let granted = auth_rx
+                        .recv_timeout(std::time::Duration::from_secs(30))
+                        .map_err(|_| {
+                            anyhow::anyhow!(
+                                "Camera authorization timed out. \
+                             Grant access in System Settings > Privacy & Security > Camera"
+                            )
+                        })?;
+                    if !granted {
+                        anyhow::bail!(
+                            "Camera access denied. \
+                             Grant access in System Settings > Privacy & Security > Camera"
+                        );
+                    }
+                }
+                1 => anyhow::bail!("Camera access restricted by system policy"),
+                2 => anyhow::bail!(
+                    "Camera access denied. \
+                     Grant access in System Settings > Privacy & Security > Camera"
+                ),
+                _ => anyhow::bail!("Unknown camera authorization status: {}", status),
+            }
+        }
+
+        eprintln!("[camera_macos] auth passed, listing cameras...");
         let cameras = list_cameras()?;
+        eprintln!("[camera_macos] found {} cameras", cameras.len());
         let _cam_info = cameras
             .iter()
             .find(|c| c.index == index)
@@ -587,19 +661,33 @@ unsafe fn set_sample_buffer_delegate(
 fn list_av_devices() -> Result<Vec<Retained<AVCaptureDevice>>> {
     let media_type = unsafe { AVMediaTypeVideo.expect("AVMediaTypeVideo not available") };
 
-    // Use discovery session to enumerate all video devices
-    let devices: Retained<objc2_foundation::NSArray<AVCaptureDevice>> = unsafe {
-        msg_send![
-            class!(AVCaptureDevice),
-            devicesWithMediaType: media_type
-        ]
-    };
+    // Use AVCaptureDeviceDiscoverySession (devicesWithMediaType: is deprecated and can deadlock)
+    unsafe {
+        let built_in = NSString::from_str("AVCaptureDeviceTypeBuiltInWideAngleCamera");
+        let external = NSString::from_str("AVCaptureDeviceTypeExternal");
+        let objects: [*const NSString; 2] = [&*built_in, &*external];
+        let device_types: Retained<objc2_foundation::NSArray<NSString>> = msg_send![
+            class!(NSArray),
+            arrayWithObjects: objects.as_ptr(),
+            count: 2usize
+        ];
 
-    let mut result = Vec::new();
-    for i in 0..devices.len() {
-        result.push(devices.objectAtIndex(i).clone());
+        let discovery_session: Retained<NSObject> = msg_send![
+            class!(AVCaptureDeviceDiscoverySession),
+            discoverySessionWithDeviceTypes: &*device_types,
+            mediaType: media_type,
+            position: 0isize  // AVCaptureDevicePositionUnspecified
+        ];
+
+        let devices: Retained<objc2_foundation::NSArray<AVCaptureDevice>> =
+            msg_send![&discovery_session, devices];
+
+        let mut result = Vec::new();
+        for i in 0..devices.len() {
+            result.push(devices.objectAtIndex(i).clone());
+        }
+        Ok(result)
     }
-    Ok(result)
 }
 
 /// List all available cameras.
