@@ -53,18 +53,26 @@ impl Stream {
     ///     channels: Number of channels (default: 1)
     ///     blocksize: Default block size in frames (default: 960 = 20ms @ 48kHz)
     #[new]
-    #[pyo3(signature = (source, samplerate=48000, channels=1, blocksize=960))]
-    fn new(source: &str, samplerate: u32, channels: u16, blocksize: u32) -> PyResult<Self> {
+    #[pyo3(signature = (source, samplerate=48000, channels=1, blocksize=960, timeout=None))]
+    fn new(
+        source: &str,
+        samplerate: u32,
+        channels: u16,
+        blocksize: u32,
+        timeout: Option<f64>,
+    ) -> PyResult<Self> {
         let config = xoq::audio::AudioConfig {
             sample_rate: samplerate,
             channels,
             sample_format: xoq::audio::SampleFormat::I16,
         };
 
+        let timeout_dur = timeout.map(std::time::Duration::from_secs_f64);
+
         let client = if source.contains('/') {
             xoq::SyncAudioClient::connect_moq_with_config(source, config)
         } else {
-            xoq::SyncAudioClient::connect_with_config(source, config)
+            xoq::SyncAudioClient::connect_with_config_and_timeout(source, config, timeout_dur)
         }
         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
@@ -228,10 +236,16 @@ pub struct InputStream {
 #[pymethods]
 impl InputStream {
     #[new]
-    #[pyo3(signature = (source, samplerate=48000, channels=1, blocksize=960))]
-    fn new(source: &str, samplerate: u32, channels: u16, blocksize: u32) -> PyResult<Self> {
+    #[pyo3(signature = (source, samplerate=48000, channels=1, blocksize=960, timeout=None))]
+    fn new(
+        source: &str,
+        samplerate: u32,
+        channels: u16,
+        blocksize: u32,
+        timeout: Option<f64>,
+    ) -> PyResult<Self> {
         Ok(InputStream {
-            stream: Stream::new(source, samplerate, channels, blocksize)?,
+            stream: Stream::new(source, samplerate, channels, blocksize, timeout)?,
         })
     }
 
@@ -283,10 +297,16 @@ pub struct OutputStream {
 #[pymethods]
 impl OutputStream {
     #[new]
-    #[pyo3(signature = (source, samplerate=48000, channels=1, blocksize=960))]
-    fn new(source: &str, samplerate: u32, channels: u16, blocksize: u32) -> PyResult<Self> {
+    #[pyo3(signature = (source, samplerate=48000, channels=1, blocksize=960, timeout=None))]
+    fn new(
+        source: &str,
+        samplerate: u32,
+        channels: u16,
+        blocksize: u32,
+        timeout: Option<f64>,
+    ) -> PyResult<Self> {
         Ok(OutputStream {
-            stream: Stream::new(source, samplerate, channels, blocksize)?,
+            stream: Stream::new(source, samplerate, channels, blocksize, timeout)?,
         })
     }
 

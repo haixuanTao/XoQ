@@ -110,7 +110,7 @@ class TestAudioConnectivity:
         import xoq_sounddevice
         import numpy as np
 
-        stream = xoq_sounddevice.Stream(AUDIO_SERVER_ID, samplerate=48000, channels=1)
+        stream = xoq_sounddevice.Stream(AUDIO_SERVER_ID, samplerate=48000, channels=1, timeout=30.0)
         try:
             assert stream.active
             # Read 960 frames (20ms @ 48kHz)

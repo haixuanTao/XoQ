@@ -300,6 +300,7 @@ impl AudioServer {
                     // We pass raw pointers (as usize) because AudioInput/AudioOutput/AudioVoiceIO
                     // contain non-Send types. Safety: the backend lives in AudioServer which
                     // outlives the task, and previous task is cancelled+awaited first.
+                    let config = self.config.clone();
                     match &self.backend {
                         AudioBackend::Separate { input, output } => {
                             let input_ptr = input as *const AudioInput as usize;
@@ -308,7 +309,7 @@ impl AudioServer {
                             let cancel = external_cancel;
                             active_task = Some(tokio::spawn(async move {
                                 if let Err(e) = handle_iroh_connection_separate(
-                                    input_ptr, output_ptr, conn, cancel,
+                                    input_ptr, output_ptr, conn, cancel, config,
                                 )
                                 .await
                                 {
@@ -323,7 +324,8 @@ impl AudioServer {
                             let cancel = external_cancel;
                             active_task = Some(tokio::spawn(async move {
                                 if let Err(e) =
-                                    handle_iroh_connection_vpio(vpio_ptr, conn, cancel).await
+                                    handle_iroh_connection_vpio(vpio_ptr, conn, cancel, config)
+                                        .await
                                 {
                                     tracing::error!("Audio connection error: {}", e);
                                 }
@@ -359,6 +361,7 @@ async fn handle_iroh_connection_separate(
     output_ptr: Option<usize>,
     conn: IrohConnection,
     external_cancel: tokio_util::sync::CancellationToken,
+    config: AudioConfig,
 ) -> Result<()> {
     let stream = tokio::select! {
         result = conn.accept_stream() => result?,
@@ -368,6 +371,14 @@ async fn handle_iroh_connection_separate(
         }
     };
     let (mut send, mut recv) = stream.split();
+
+    // Send an initial silence frame so the client knows the connection is alive,
+    // even before the mic thread produces real audio data.
+    let silence = make_silence_frame(&config);
+    let header = silence.encode_header();
+    send.write_all(&header).await?;
+    send.write_all(&silence.data).await?;
+    tracing::debug!("Sent initial silence frame to client");
 
     let cancel_token = conn.cancellation_token();
 
@@ -483,6 +494,19 @@ async fn handle_iroh_connection_separate(
     Ok(())
 }
 
+/// Create a silence frame (20ms of zeros) for the given audio config.
+fn make_silence_frame(config: &AudioConfig) -> AudioFrame {
+    let frame_count = (config.sample_rate * 20) / 1000; // 20ms
+    let data_len =
+        frame_count as usize * config.channels as usize * config.sample_format.bytes_per_sample();
+    AudioFrame {
+        data: vec![0u8; data_len],
+        frame_count,
+        timestamp_us: 0,
+        config: config.clone(),
+    }
+}
+
 /// Handle an iroh connection using VPIO backend (macOS Voice Processing IO).
 ///
 /// Takes raw pointer as usize to satisfy Send bounds for tokio::spawn.
@@ -492,6 +516,7 @@ async fn handle_iroh_connection_vpio(
     vpio_ptr: usize,
     conn: IrohConnection,
     external_cancel: tokio_util::sync::CancellationToken,
+    config: AudioConfig,
 ) -> Result<()> {
     let stream = tokio::select! {
         result = conn.accept_stream() => result?,
@@ -501,6 +526,14 @@ async fn handle_iroh_connection_vpio(
         }
     };
     let (mut send, mut recv) = stream.split();
+
+    // Send an initial silence frame so the client knows the connection is alive,
+    // even before the mic thread produces real audio data.
+    let silence = make_silence_frame(&config);
+    let header = silence.encode_header();
+    send.write_all(&header).await?;
+    send.write_all(&silence.data).await?;
+    tracing::debug!("Sent initial silence frame to client");
 
     let cancel_token = conn.cancellation_token();
 

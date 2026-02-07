@@ -4,6 +4,7 @@
 //! managing its own tokio runtime internally.
 
 use anyhow::Result;
+use std::time::Duration;
 
 use crate::audio::{AudioConfig, AudioFrame};
 use crate::sounddevice_impl::AudioStreamBuilder;
@@ -25,11 +26,23 @@ impl SyncAudioClient {
 
     /// Connect with custom audio config.
     pub fn connect_with_config(server_id: &str, config: AudioConfig) -> Result<Self> {
-        let stream = AudioStreamBuilder::new(server_id)
+        Self::connect_with_config_and_timeout(server_id, config, None)
+    }
+
+    /// Connect with custom audio config and read timeout.
+    pub fn connect_with_config_and_timeout(
+        server_id: &str,
+        config: AudioConfig,
+        timeout: Option<Duration>,
+    ) -> Result<Self> {
+        let mut builder = AudioStreamBuilder::new(server_id)
             .sample_rate(config.sample_rate)
             .channels(config.channels)
-            .sample_format(config.sample_format)
-            .open()?;
+            .sample_format(config.sample_format);
+        if let Some(t) = timeout {
+            builder = builder.timeout(t);
+        }
+        let stream = builder.open()?;
 
         Ok(Self {
             inner: stream,
