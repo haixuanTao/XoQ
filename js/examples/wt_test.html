@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>WebTransport Test</title>
+  <style>
+    body { font-family: monospace; background: #1a1a1a; color: #0f0; padding: 1rem; }
+    .error { color: #f00; }
+    .info { color: #ff0; }
+    .success { color: #0f0; }
+    input { font-family: monospace; padding: 4px; width: 400px; }
+    button { font-family: monospace; padding: 4px 12px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h2>WebTransport Direct Test</h2>
+  <div>
+    <label>URL: <input id="url" value="https://cdn.1ms.ai/anon/realsense" /></label>
+    <button id="testWT">Test WebTransport</button>
+    <button id="testWS">Test WebSocket</button>
+    <button id="testMoq">Test @moq/lite (race)</button>
+  </div>
+  <div id="log" style="margin-top: 1rem;"></div>
+
+  <script type="module">
+    import * as Moq from "@moq/lite";
+
+    const logEl = document.getElementById("log");
+    function log(msg, cls = "") {
+      const el = document.createElement("div");
+      el.textContent = `[${new Date().toISOString().slice(11,23)}] ${msg}`;
+      if (cls) el.className = cls;
+      logEl.appendChild(el);
+      console.log(msg);
+    }
+
+    // Test 1: Raw WebTransport only
+    document.getElementById("testWT").onclick = async () => {
+      const url = document.getElementById("url").value;
+      logEl.innerHTML = "";
+      log(`Testing raw WebTransport to: ${url}`, "info");
+      log(`WebTransport available: ${typeof WebTransport !== 'undefined'}`, "info");
+
+      try {
+        const t0 = performance.now();
+        const wt = new WebTransport(url, {
+          allowPooling: false,
+          congestionControl: "low-latency",
+        });
+
+        wt.closed.then(info => {
+          log(`Transport closed: ${JSON.stringify(info)}`, "error");
+        }).catch(e => {
+          log(`Transport closed with error: ${e.message}`, "error");
+        });
+
+        log("Waiting for WebTransport.ready...", "info");
+        await wt.ready;
+        const dt = (performance.now() - t0).toFixed(0);
+        log(`WebTransport connected in ${dt}ms!`, "success");
+
+        // Try opening a bidi stream
+        log("Opening bidirectional stream...", "info");
+        const stream = await wt.createBidirectionalStream();
+        log("Bidi stream opened!", "success");
+
+        wt.close();
+        log("Test complete - WebTransport works!", "success");
+      } catch (e) {
+        log(`WebTransport FAILED: ${e.name}: ${e.message}`, "error");
+        log(`Stack: ${e.stack}`, "error");
+      }
+    };
+
+    // Test 2: WebSocket only
+    document.getElementById("testWS").onclick = async () => {
+      const url = document.getElementById("url").value;
+      logEl.innerHTML = "";
+      log(`Testing @moq/lite with WebSocket only to: ${url}`, "info");
+
+      try {
+        const t0 = performance.now();
+        const conn = await Moq.Connection.connect(new URL(url), {
+          websocket: { enabled: true, delay: 0 },
+          webtransport: undefined,
+        });
+        const dt = (performance.now() - t0).toFixed(0);
+        log(`Connected via @moq/lite in ${dt}ms`, "success");
+        log(`Connection type: ${conn.constructor.name}`, "info");
+        await conn.close();
+        log("WebSocket test complete!", "success");
+      } catch (e) {
+        log(`WebSocket FAILED: ${e.message}`, "error");
+      }
+    };
+
+    // Test 3: Normal @moq/lite race
+    document.getElementById("testMoq").onclick = async () => {
+      const url = document.getElementById("url").value;
+      logEl.innerHTML = "";
+      log(`Testing @moq/lite (WT vs WS race) to: ${url}`, "info");
+
+      try {
+        const t0 = performance.now();
+        const conn = await Moq.Connection.connect(new URL(url));
+        const dt = (performance.now() - t0).toFixed(0);
+        log(`Connected in ${dt}ms`, "success");
+        log(`Connection: ${conn.constructor.name}`, "info");
+        await conn.close();
+        log("Race test complete!", "success");
+      } catch (e) {
+        log(`FAILED: ${e.message}`, "error");
+      }
+    };
+
+    log("Ready. Click a button to test.", "info");
+  </script>
+</body>
+</html>

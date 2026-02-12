@@ -3,7 +3,7 @@ members = [".", "packages/serial", "packages/cv2", "packages/can", "packages/sou
 
 [package]
 name = "xoq"
-version = "0.3.4"
+version = "0.3.5"
 edition = "2021"
 description = "X-Embodiment over QUIC - P2P and relay communication for robotics"
 license = "Apache-2.0"
@@ -119,6 +119,11 @@ required-features = ["iroh", "can"]
 name = "can_client"
 path = "examples/can_client.rs"
 required-features = ["iroh", "can"]
+
+[[example]]
+name = "can_benchmark"
+path = "examples/can_benchmark.rs"
+required-features = ["can-remote"]
 
 [[bin]]
 name = "camera-server"

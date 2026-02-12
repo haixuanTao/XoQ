@@ -36,7 +36,8 @@ const DEPTH_SHIFT: u32 = 0;
 
 /// Convert depth u16 mm values to P010 buffer (10-bit grayscale in YUV420).
 /// gray10 = min(depth_mm >> DEPTH_SHIFT, 1023). 0 = no measurement.
-/// Invalid pixels are filled with nearest valid neighbor to help compression.
+/// Invalid pixels are filled with the farthest (largest depth) neighbor to help
+/// compression and avoid foreground bleeding at depth edges.
 fn depth_to_p010(depth_mm: &[u16], p010_buf: &mut Vec<u8>, width: u32, height: u32) {
     let w = width as usize;
     let h = height as usize;
@@ -53,44 +54,60 @@ fn depth_to_p010(depth_mm: &[u16], p010_buf: &mut Vec<u8>, width: u32, height: u
         }
     }
 
-    // Fill invalid pixels with nearest valid neighbor (horizontal then vertical)
-    // Horizontal pass (bidirectional per row)
+    // Fill invalid pixels with the FARTHEST (largest depth) nearest neighbor.
+    // At depth edges, holes are caused by occlusion — the true value behind
+    // a foreground object is the background (farther away), so we pick max.
+    //
+    // Horizontal pass: sweep left-to-right and right-to-left independently,
+    // then for each hole pixel, pick the larger (farther) of the two candidates.
+    let mut fill_left = vec![0u16; w * h];
+    let mut fill_right = vec![0u16; w * h];
     for y in 0..h {
         let row = y * w;
         let mut last_valid = 0u16;
         for x in 0..w {
             if gray[row + x] != 0 {
                 last_valid = gray[row + x];
-            } else {
-                gray[row + x] = last_valid;
             }
+            fill_left[row + x] = last_valid;
         }
         last_valid = 0;
         for x in (0..w).rev() {
             if gray[row + x] != 0 {
                 last_valid = gray[row + x];
-            } else {
-                gray[row + x] = last_valid;
             }
+            fill_right[row + x] = last_valid;
         }
     }
+    for i in 0..(w * h) {
+        if gray[i] == 0 {
+            gray[i] = fill_left[i].max(fill_right[i]);
+        }
+    }
+
     // Vertical pass (fills remaining gaps from rows that were entirely empty)
+    // Same logic: pick the farther of top/bottom neighbors.
+    let mut fill_top = vec![0u16; w * h];
+    let mut fill_bot = vec![0u16; w * h];
     for x in 0..w {
         let mut last_valid = 0u16;
         for y in 0..h {
             if gray[y * w + x] != 0 {
                 last_valid = gray[y * w + x];
-            } else {
-                gray[y * w + x] = last_valid;
             }
+            fill_top[y * w + x] = last_valid;
         }
         last_valid = 0;
         for y in (0..h).rev() {
             if gray[y * w + x] != 0 {
                 last_valid = gray[y * w + x];
-            } else {
-                gray[y * w + x] = last_valid;
             }
+            fill_bot[y * w + x] = last_valid;
+        }
+    }
+    for i in 0..(w * h) {
+        if gray[i] == 0 {
+            gray[i] = fill_top[i].max(fill_bot[i]);
         }
     }
 
@@ -121,7 +138,7 @@ struct Args {
     height: u32,
     fps: u32,
     color_bitrate: u32,
-    depth_bitrate: u32,
+    depth_qp: u32,
     insecure: bool,
 }
 
@@ -134,8 +151,8 @@ fn parse_args() -> Args {
         width: 640,
         height: 480,
         fps: 30,
-        color_bitrate: 4_000_000,
-        depth_bitrate: 4_000_000,
+        color_bitrate: 8_000_000,
+        depth_qp: 10,
         insecure: false,
     };
 
@@ -168,11 +185,11 @@ fn parse_args() -> Args {
                 i += 2;
             }
             "--bitrate" if i + 1 < args.len() => {
-                result.color_bitrate = args[i + 1].parse().unwrap_or(2_000_000);
+                result.color_bitrate = args[i + 1].parse().unwrap_or(8_000_000);
                 i += 2;
             }
-            "--depth-bitrate" if i + 1 < args.len() => {
-                result.depth_bitrate = args[i + 1].parse().unwrap_or(1_000_000);
+            "--depth-qp" if i + 1 < args.len() => {
+                result.depth_qp = args[i + 1].parse().unwrap_or(20);
                 i += 2;
             }
             "--insecure" => {
@@ -203,8 +220,8 @@ fn print_usage() {
     println!("  --width <px>            Resolution width (default: 640)");
     println!("  --height <px>           Resolution height (default: 480)");
     println!("  --fps <rate>            Framerate (default: 30)");
-    println!("  --bitrate <bps>         AV1 color bitrate (default: 4000000)");
-    println!("  --depth-bitrate <bps>   AV1 depth bitrate (default: 4000000)");
+    println!("  --bitrate <bps>         AV1 color bitrate (default: 8000000)");
+    println!("  --depth-qp <qp>        AV1 depth QP (0=lossless, 20=high quality, default: 20)");
     println!("  --serial <serial>       RealSense serial number (default: first device)");
     println!("  --insecure              Disable TLS verification");
     println!();
@@ -249,8 +266,8 @@ async fn main() -> Result<()> {
         args.color_bitrate / 1000
     );
     println!(
-        "Depth:     AV1 NVENC 10-bit P010, {} kbps, shift={} ({}mm/step, max {}mm)",
-        args.depth_bitrate / 1000,
+        "Depth:     AV1 NVENC 10-bit P010, CQP QP={}, P7 high-quality, shift={} ({}mm/step, max {}mm)",
+        args.depth_qp,
         DEPTH_SHIFT,
         1u32 << DEPTH_SHIFT,
         1023u32 << DEPTH_SHIFT,
@@ -294,11 +311,14 @@ async fn main() -> Result<()> {
         NvencAv1Encoder::new(args.width, args.height, args.fps, args.color_bitrate, false)?;
     tracing::info!("AV1 color encoder ready");
 
-    // Initialize AV1 encoder for depth (10-bit P010)
-    tracing::info!("Initializing AV1 encoder for depth (10-bit P010)...");
+    // Initialize AV1 encoder for depth (10-bit P010, CQP high quality)
+    tracing::info!(
+        "Initializing AV1 encoder for depth (10-bit P010, CQP QP={})...",
+        args.depth_qp
+    );
     let mut depth_encoder =
-        NvencAv1Encoder::new(args.width, args.height, args.fps, args.depth_bitrate, true)?;
-    tracing::info!("AV1 depth encoder ready");
+        NvencAv1Encoder::new_cqp(args.width, args.height, args.fps, args.depth_qp, true)?;
+    tracing::info!("AV1 depth encoder ready (P7 high-quality, CQP)");
 
     // Initialize AV1 CMAF muxers
     let mut color_muxer = Av1CmafMuxer::new(CmafConfig {

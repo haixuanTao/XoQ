@@ -1,6 +1,6 @@
 [package]
 name = "xoq-sounddevice"
-version = "0.3.4"
+version = "0.3.5"
 edition = "2021"
 description = "Drop-in replacement for sounddevice - remote audio over P2P"
 license = "Apache-2.0"

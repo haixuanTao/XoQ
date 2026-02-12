@@ -167,30 +167,33 @@
       color: #888;
     }
 
-    /* Camera preview (vertical fit — no scroll) */
+    /* Camera preview — same-type streams side-by-side */
     #panelCamera.tab-visible {
+      display: block;
+      overflow-y: auto;
+    }
+    .cam-row {
       display: flex;
-      flex-direction: column;
-      height: 100%;
-      overflow: hidden;
+      gap: 4px;
+      margin-bottom: 2px;
     }
-    #panelCamera.tab-visible #cameraPreviewRow {
-      flex-direction: column;
-      flex: 1;
-      min-height: 0;
+    .cam-row > div { flex: 1; text-align: center; min-width: 0; }
+    .cam-row canvas {
+      width: 100%;
+      height: auto;
+      aspect-ratio: 4/3;
+      border-radius: 3px;
+      background: #000;
     }
-    #panelCamera.tab-visible #cameraPreviewRow > div {
-      flex: 1;
-      min-height: 0;
+    .cam-stats-row {
       display: flex;
-      flex-direction: column;
+      gap: 4px;
+      margin-bottom: 0.5rem;
     }
-    #panelCamera.tab-visible #cameraPreviewRow canvas {
+    .cam-stats-row > div {
       flex: 1;
-      min-height: 0;
-      width: 100% !important;
-      height: auto !important;
-      object-fit: contain;
+      font-size: 0.7rem;
+      color: #888;
     }
 
     /* Stats */
@@ -338,6 +341,10 @@
         <input type="text" id="depthPath" style="width:180px;" />
       </label>
       <label>
+        Depth2:
+        <input type="text" id="depth2Path" style="width:180px;" />
+      </label>
+      <label>
         Cert hash:
         <input type="text" id="certHash" placeholder="sha256 hex (optional)" style="width:140px;" />
       </label>
@@ -354,6 +361,13 @@
       <label style="font-size:0.75rem;">R:<input type="number" id="camRoll" value="90" step="1" style="width:40px; padding:0.2rem; border:1px solid #444; border-radius:3px; background:#2a2a4a; color:#fff; font-size:0.75rem;" /></label>
       <label style="font-size:0.75rem;">P:<input type="number" id="camPitch" value="-225" step="1" style="width:40px; padding:0.2rem; border:1px solid #444; border-radius:3px; background:#2a2a4a; color:#fff; font-size:0.75rem;" /></label>
       <label style="font-size:0.75rem;">Yw:<input type="number" id="camYaw" value="0" step="1" style="width:40px; padding:0.2rem; border:1px solid #444; border-radius:3px; background:#2a2a4a; color:#fff; font-size:0.75rem;" /></label>
+      <span style="border-left:1px solid #444; height:1.2rem;"></span>
+      <label style="font-size:0.75rem;">Cam2 X:<input type="number" id="cam2X" value="0.26" step="0.01" style="width:48px; padding:0.2rem; border:1px solid #444; border-radius:3px; background:#2a2a4a; color:#fff; font-size:0.75rem;" /></label>
+      <label style="font-size:0.75rem;">Y:<input type="number" id="cam2Y" value="0.79" step="0.01" style="width:48px; padding:0.2rem; border:1px solid #444; border-radius:3px; background:#2a2a4a; color:#fff; font-size:0.75rem;" /></label>
+      <label style="font-size:0.75rem;">Z:<input type="number" id="cam2Z" value="0.22" step="0.01" style="width:48px; padding:0.2rem; border:1px solid #444; border-radius:3px; background:#2a2a4a; color:#fff; font-size:0.75rem;" /></label>
+      <label style="font-size:0.75rem;">R:<input type="number" id="cam2Roll" value="90" step="1" style="width:40px; padding:0.2rem; border:1px solid #444; border-radius:3px; background:#2a2a4a; color:#fff; font-size:0.75rem;" /></label>
+      <label style="font-size:0.75rem;">P:<input type="number" id="cam2Pitch" value="-225" step="1" style="width:40px; padding:0.2rem; border:1px solid #444; border-radius:3px; background:#2a2a4a; color:#fff; font-size:0.75rem;" /></label>
+      <label style="font-size:0.75rem;">Yw:<input type="number" id="cam2Yaw" value="0" step="1" style="width:40px; padding:0.2rem; border:1px solid #444; border-radius:3px; background:#2a2a4a; color:#fff; font-size:0.75rem;" /></label>
     </div>
   </div>
 
@@ -382,18 +396,32 @@
       </div>
 
       <div class="panel-section" id="panelCamera">
-        <h3>Camera</h3>
-        <div id="cameraPreviewRow" style="display:flex; gap:4px;">
-          <div style="flex:1; text-align:center;">
-            <div style="font-size:0.65rem; color:#666; margin-bottom:2px;">Color</div>
-            <canvas id="colorPreview" width="128" height="96" style="width:100%; border-radius:3px; background:#000;"></canvas>
+        <h3>Color</h3>
+        <div class="cam-row">
+          <div>
+            <div style="font-size:0.65rem; color:#666; margin-bottom:2px;">Cam 1</div>
+            <canvas id="colorPreview1" width="320" height="240"></canvas>
           </div>
-          <div style="flex:1; text-align:center;">
-            <div style="font-size:0.65rem; color:#666; margin-bottom:2px;">Depth</div>
-            <canvas id="depthPreview" width="128" height="96" style="width:100%; border-radius:3px; background:#000;"></canvas>
+          <div>
+            <div style="font-size:0.65rem; color:#666; margin-bottom:2px;">Cam 2</div>
+            <canvas id="colorPreview2" width="320" height="240"></canvas>
           </div>
         </div>
-        <div style="font-size:0.7rem; color:#888; margin-top:4px;" id="pcStats">No depth stream</div>
+        <h3>Depth</h3>
+        <div class="cam-row">
+          <div>
+            <div style="font-size:0.65rem; color:#666; margin-bottom:2px;">Cam 1</div>
+            <canvas id="depthPreview1" width="320" height="240"></canvas>
+          </div>
+          <div>
+            <div style="font-size:0.65rem; color:#666; margin-bottom:2px;">Cam 2</div>
+            <canvas id="depthPreview2" width="320" height="240"></canvas>
+          </div>
+        </div>
+        <div class="cam-stats-row">
+          <div id="pcStats1">No depth stream</div>
+          <div id="pcStats2">No depth stream</div>
+        </div>
       </div>
 
       <div class="panel-section" id="panelStats">
@@ -433,6 +461,7 @@
 
   <div style="position:fixed; top:-9999px;">
     <video id="colorVideo" autoplay muted playsinline></video>
+    <video id="colorVideo2" autoplay muted playsinline></video>
   </div>
 
   <script type="module">
@@ -453,21 +482,26 @@
     const leftPathInput = document.getElementById("leftPath");
     const rightPathInput= document.getElementById("rightPath");
     const depthPathInput= document.getElementById("depthPath");
+    const depth2PathInput= document.getElementById("depth2Path");
     const certHashInput = document.getElementById("certHash");
 
     relayInput.value     = ls("relay", "https://cdn.1ms.ai");
     leftPathInput.value  = params.has("left") ? (params.get("left") || "") : (params.get("path") || localStorage.getItem(LS_PREFIX + "left") || "anon/xoq-can-can0/state");
     rightPathInput.value = ls("right", "anon/xoq-can-can1/state");
     depthPathInput.value = ls("depth", "anon/realsense");
+    depth2PathInput.value = ls("depth2", "anon/realsense2");
     certHashInput.value  = ls("certHash", "");
 
     // Persist all config inputs on change
     const configInputs = {
       relay: relayInput, left: leftPathInput, right: rightPathInput,
-      depth: depthPathInput, certHash: certHashInput,
+      depth: depthPathInput, depth2: depth2PathInput, certHash: certHashInput,
       camX: document.getElementById("camX"), camY: document.getElementById("camY"),
       camZ: document.getElementById("camZ"), camRoll: document.getElementById("camRoll"),
       camPitch: document.getElementById("camPitch"), camYaw: document.getElementById("camYaw"),
+      cam2X: document.getElementById("cam2X"), cam2Y: document.getElementById("cam2Y"),
+      cam2Z: document.getElementById("cam2Z"), cam2Roll: document.getElementById("cam2Roll"),
+      cam2Pitch: document.getElementById("cam2Pitch"), cam2Yaw: document.getElementById("cam2Yaw"),
       queryRate: document.getElementById("queryRate"),
       ptSize: document.getElementById("ptSize"),
     };
@@ -597,6 +631,26 @@
 
       const data = buf.slice(6, 6 + dataLen);
       return { flags, canId, dataLen, data };
+    }
+
+    // Parse ALL CAN frames from a buffer (handles batched MoQ groups)
+    function parseAllCanFrames(buf) {
+      const frames = [];
+      let offset = 0;
+      while (offset + 6 <= buf.length) {
+        const slice = buf.subarray(offset);
+        const dataLen = slice[5];
+        if (offset + 6 + dataLen > buf.length) break;
+        const view = new DataView(buf.buffer, buf.byteOffset + offset, 6 + dataLen);
+        frames.push({
+          flags: slice[0],
+          canId: view.getUint32(1, true),
+          dataLen,
+          data: buf.slice(offset + 6, offset + 6 + dataLen),
+        });
+        offset += 6 + dataLen;
+      }
+      return frames;
     }
 
     // Damiao motor state response parsing
@@ -1001,60 +1055,96 @@
       }
     }
 
-    let colorPlayer = null, depthDecoder = null;
-    let rsConnection = null, rsRunning = false;
+    // Per-camera state
+    const cam1 = { conn: null, colorPlayer: null, depthDecoder: null, running: false };
+    const cam2 = { conn: null, colorPlayer: null, depthDecoder: null, running: false };
 
     // ─── RealSense connection (via @moq/lite — supports WebSocket fallback) ─────────
-    async function connectRealSense() {
-      const depthPath = depthPathInput.value.trim();
-      if (!depthPath) return;
-      const relay = relayInput.value.trim();
-      const fullUrl = `${relay}/${depthPath}`;
+    function withTimeout(promise, ms) {
+      return Promise.race([
+        promise,
+        new Promise((_, rej) => setTimeout(() => rej(new Error('stale (no data for ' + (ms/1000) + 's)')), ms)),
+      ]);
+    }
+    const STALE_MS = 10000;
+    const RECONNECT_DELAY = 3000;
 
-      colorPlayer = new MsePlayer(document.getElementById("colorVideo"), "Color");
-      depthDecoder = new DepthDecoder();
+    async function connectOneCameraOnce(cam, path, videoElId, label) {
+      const relay = relayInput.value.trim();
+      const fullUrl = `${relay}/${path}`;
+
+      cam.colorPlayer = new MsePlayer(document.getElementById(videoElId), label + " Color");
+      cam.depthDecoder = new DepthDecoder();
 
       const connectOpts = buildConnectOpts();
-      log(`[depth] Connecting to ${fullUrl}...`);
-      rsConnection = await Moq.Connection.connect(new URL(fullUrl), connectOpts);
-      log('[depth] Connected', 'success');
+      log(`[${label}] Connecting to ${fullUrl}...`);
+      cam.conn = await Moq.Connection.connect(new URL(fullUrl), connectOpts);
+      log(`[${label}] Connected`, 'success');
 
-      const broadcast = rsConnection.consume(Moq.Path.from(""));
+      const broadcast = cam.conn.consume(Moq.Path.from(""));
       const videoTrack = broadcast.subscribe("video", 0);
       const depthTrack = broadcast.subscribe("depth", 0);
-      log('[depth] Subscribed to video + depth tracks', 'success');
+      log(`[${label}] Subscribed to video + depth tracks`, 'success');
 
-      rsRunning = true;
-
-      // Read tracks in parallel
       async function readTrack(track, handler, name) {
-        while (rsRunning) {
-          const group = await track.nextGroup();
-          if (!group) { log(`[depth] ${name} track ended`); break; }
-          while (rsRunning) {
-            const frame = await group.readFrame();
+        while (cam.running) {
+          const group = await withTimeout(track.nextGroup(), STALE_MS);
+          if (!group) { log(`[${label}] ${name} track ended`); break; }
+          while (cam.running) {
+            const frame = await withTimeout(group.readFrame(), STALE_MS);
             if (!frame) break;
             handler(new Uint8Array(frame));
           }
         }
       }
 
-      const videoPromise = readTrack(videoTrack, d => colorPlayer.onData(d), 'video').catch(e => {
-        if (rsRunning) log(`[depth] video error: ${e.message}`, 'error');
-      });
-      const depthPromise = readTrack(depthTrack, d => depthDecoder.onData(d), 'depth').catch(e => {
-        if (rsRunning) log(`[depth] depth error: ${e.message}`, 'error');
-      });
-      log('[depth] Receiving frames...', 'success');
-      return Promise.all([videoPromise, depthPromise]);
+      const videoPromise = readTrack(videoTrack, d => cam.colorPlayer.onData(d), 'video');
+      const depthPromise = readTrack(depthTrack, d => cam.depthDecoder.onData(d), 'depth');
+      log(`[${label}] Receiving frames...`, 'success');
+      await Promise.all([videoPromise, depthPromise]);
+    }
+
+    function cleanupCam(cam) {
+      if (cam.conn) { try { cam.conn.close(); } catch {} cam.conn = null; }
+      if (cam.colorPlayer) { cam.colorPlayer.destroy(); cam.colorPlayer = null; }
+      if (cam.depthDecoder) { cam.depthDecoder.destroy(); cam.depthDecoder = null; }
+    }
+
+    async function connectOneCamera(cam, path, videoElId, label) {
+      if (!path) return;
+      cam.running = true;
+      while (cam.running) {
+        try {
+          await connectOneCameraOnce(cam, path, videoElId, label);
+          if (!cam.running) break;
+          log(`[${label}] Stream ended`, 'info');
+        } catch (e) {
+          if (!cam.running) break;
+          log(`[${label}] ${e.message}`, 'error');
+        }
+        cleanupCam(cam);
+        if (!cam.running) break;
+        log(`[${label}] Reconnecting in ${RECONNECT_DELAY/1000}s...`, 'info');
+        await new Promise(r => setTimeout(r, RECONNECT_DELAY));
+      }
+    }
+
+    async function connectRealSense() {
+      const promises = [];
+      const p1 = depthPathInput.value.trim();
+      const p2 = depth2PathInput.value.trim();
+      if (p1) promises.push(connectOneCamera(cam1, p1, "colorVideo", "cam1"));
+      if (p2) promises.push(connectOneCamera(cam2, p2, "colorVideo2", "cam2"));
+      if (promises.length) await Promise.all(promises);
     }
 
     function disconnectRealSense() {
-      rsRunning = false;
-      if (rsConnection) { try { rsConnection.close(); } catch {} rsConnection = null; }
-      if (colorPlayer) { colorPlayer.destroy(); colorPlayer = null; }
-      if (depthDecoder) { depthDecoder.destroy(); depthDecoder = null; }
+      for (const cam of [cam1, cam2]) {
+        cam.running = false;
+        cleanupCam(cam);
+      }
       pcGeometry.setDrawRange(0, 0);
+      pcGeometry2.setDrawRange(0, 0);
     }
 
     // ─── Motor Query Commands ────────────────────────────
@@ -1224,10 +1314,25 @@
     const pcPoints = new THREE.Points(pcGeometry, pcMaterial);
     pcPoints.scale.set(0.001, 0.001, 0.001); // mm → meters
 
+    // Second point cloud
+    const posArr2 = new Float32Array(maxPts * 3);
+    const colArr2 = new Float32Array(maxPts * 3);
+    const pcGeometry2 = new THREE.BufferGeometry();
+    pcGeometry2.setAttribute('position', new THREE.BufferAttribute(posArr2, 3));
+    pcGeometry2.setAttribute('color', new THREE.BufferAttribute(colArr2, 3));
+    pcGeometry2.setDrawRange(0, 0);
+    const pcMaterial2 = new THREE.PointsMaterial({ size: 0.002, vertexColors: true, sizeAttenuation: true });
+    const pcPoints2 = new THREE.Points(pcGeometry2, pcMaterial2);
+    pcPoints2.scale.set(0.001, 0.001, 0.001);
+
     // Camera indicator group — red dot + FOV frustum wireframe
     const camGroup = new THREE.Group();
     scene.add(camGroup);
     camGroup.add(pcPoints);
+
+    const camGroup2 = new THREE.Group();
+    scene.add(camGroup2);
+    camGroup2.add(pcPoints2);
 
     // Red dot at camera origin
     const camDot = new THREE.Mesh(
@@ -1236,139 +1341,174 @@
     );
     camGroup.add(camDot);
 
+    const camDot2 = new THREE.Mesh(
+      new THREE.SphereGeometry(0.012, 12, 8),
+      new THREE.MeshBasicMaterial({ color: 0x2222ff })
+    );
+    camGroup2.add(camDot2);
+
     // FOV frustum wireframe (updated by buildFrustum)
-    let camFrustum = null;
-    function buildFrustum() {
-      if (camFrustum) camGroup.remove(camFrustum);
+    function buildFrustumGeometry(color) {
       const fx = 604.2, fy = 603.5;
-      const DEPTH_SHIFT_F = 0; // match server (10-bit, 1mm/step)
-      const nearM = 0.3;  // D435 min range ~0.3m
-      const farM  = (1023 << DEPTH_SHIFT_F) * 0.001; // max representable depth in meters (4092mm)
-      // Half-extents at near/far planes
+      const DEPTH_SHIFT_F = 0;
+      const nearM = 0.3;
+      const farM  = (1023 << DEPTH_SHIFT_F) * 0.001;
       const nw = nearM * (PC_W / 2) / fx, nh = nearM * (PC_H / 2) / fy;
       const fw = farM  * (PC_W / 2) / fx, fh = farM  * (PC_H / 2) / fy;
-      // 8 corners: near TL TR BR BL, far TL TR BR BL (camera: +X right, -Y up, +Z forward)
       const verts = new Float32Array([
         -nw,  nh, nearM,   nw,  nh, nearM,   nw, -nh, nearM,  -nw, -nh, nearM,
         -fw,  fh, farM,    fw,  fh, farM,    fw, -fh, farM,   -fw, -fh, farM,
       ]);
-      // Lines: 4 edges near, 4 edges far, 4 connecting
       const idx = [
-        0,1, 1,2, 2,3, 3,0,  // near rect
-        4,5, 5,6, 6,7, 7,4,  // far rect
-        0,4, 1,5, 2,6, 3,7,  // connecting
+        0,1, 1,2, 2,3, 3,0,
+        4,5, 5,6, 6,7, 7,4,
+        0,4, 1,5, 2,6, 3,7,
       ];
       const geo = new THREE.BufferGeometry();
       geo.setAttribute('position', new THREE.BufferAttribute(verts, 3));
       geo.setIndex(idx);
-      camFrustum = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: 0xff4444, opacity: 0.5, transparent: true }));
-      camGroup.add(camFrustum);
+      return new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color, opacity: 0.5, transparent: true }));
     }
-    buildFrustum();
+    let camFrustum = buildFrustumGeometry(0xff4444);
+    camGroup.add(camFrustum);
+    let camFrustum2 = buildFrustumGeometry(0x4444ff);
+    camGroup2.add(camFrustum2);
 
     // Offscreen canvases for pixel extraction
     const colorCanvas = document.createElement('canvas');
     colorCanvas.width = PC_W; colorCanvas.height = PC_H;
     const colorCtx = colorCanvas.getContext('2d', { willReadFrequently: true });
 
-    const colorPreviewCtx = document.getElementById('colorPreview').getContext('2d');
-    const depthPreviewCtx = document.getElementById('depthPreview').getContext('2d');
-    const pcStatsEl = document.getElementById('pcStats');
-    let pcFrames = 0, pcT0 = 0;
+    const colorPreviewCtx1 = document.getElementById('colorPreview1').getContext('2d');
+    const depthPreviewCtx1 = document.getElementById('depthPreview1').getContext('2d');
+    const pcStatsEl1 = document.getElementById('pcStats1');
 
-    function updatePointCloud() {
-      const colorVideo = document.getElementById("colorVideo");
-      if (!colorVideo.videoWidth) return;
-      if (!depthDecoder || !depthDecoder.latestY) return;
+    const colorPreviewCtx2 = document.getElementById('colorPreview2').getContext('2d');
+    const depthPreviewCtx2 = document.getElementById('depthPreview2').getContext('2d');
+    const pcStatsEl2 = document.getElementById('pcStats2');
+
+    // Offscreen canvas for cam2 color extraction
+    const colorCanvas2 = document.createElement('canvas');
+    colorCanvas2.width = PC_W; colorCanvas2.height = PC_H;
+    const colorCtx2 = colorCanvas2.getContext('2d', { willReadFrequently: true });
+
+    function updatePointCloudGeneric(videoEl, decoder, cCtx, colorPrevCtx, depthPrevCtx, pArr, cArr, geom, statsEl, statsState) {
+      if (!videoEl.videoWidth) return;
+      if (!decoder || !decoder.latestY) return;
 
       const step = 1;
       const fx = 604.2, fy = 603.5;  // RealSense D435 intrinsics
       const cx = 322.7, cy = 252.7;
-      const DEPTH_SHIFT = 0; // server: gray10 = depth_mm >> 0 (10-bit, 1mm/step, max ~1m)
+      const DEPTH_SHIFT = 0;
 
-      colorCtx.drawImage(colorVideo, 0, 0, PC_W, PC_H);
-      colorPreviewCtx.drawImage(colorVideo, 0, 0, 128, 96);
+      cCtx.drawImage(videoEl, 0, 0, PC_W, PC_H);
+      colorPrevCtx.drawImage(videoEl, 0, 0, 320, 240);
 
-      // Draw depth preview from decoded Y plane
-      const dY = depthDecoder.latestY;
-      const dW = depthDecoder.width, dH = depthDecoder.height;
-      const prevW = 128, prevH = 96;
-      const prevImg = depthPreviewCtx.createImageData(prevW, prevH);
+      const dY = decoder.latestY;
+      const dW = decoder.width, dH = decoder.height;
+      const prevW = 320, prevH = 240;
+      const prevImg = depthPrevCtx.createImageData(prevW, prevH);
       const prevPx = prevImg.data;
       const sx = dW / prevW, sy = dH / prevH;
       for (let py = 0; py < prevH; py++) {
         for (let px = 0; px < prevW; px++) {
           const g = dY[Math.floor(py*sy) * dW + Math.floor(px*sx)];
-          const v8 = depthDecoder.is10bit ? (g >> 2) : g;
+          const v8 = decoder.is10bit ? (g >> 2) : g;
           const pi = (py * prevW + px) * 4;
           prevPx[pi] = v8; prevPx[pi+1] = v8; prevPx[pi+2] = v8; prevPx[pi+3] = 255;
         }
       }
-      depthPreviewCtx.putImageData(prevImg, 0, 0);
+      depthPrevCtx.putImageData(prevImg, 0, 0);
 
-      const cPx = colorCtx.getImageData(0, 0, PC_W, PC_H).data;
+      const cPx = cCtx.getImageData(0, 0, PC_W, PC_H).data;
 
       let n = 0;
       for (let v = 0; v < PC_H; v += step) {
         for (let u = 0; u < PC_W; u += step) {
           const dIdx = v * PC_W + u;
-          const gray = dY[dIdx]; // 10-bit (0-1023) or 8-bit (0-255)
+          const gray = dY[dIdx];
           if (gray < 2) continue;
 
-          const depth = depthDecoder.is10bit ? (gray << DEPTH_SHIFT) : (gray << 4);
+          const depth = decoder.is10bit ? (gray << DEPTH_SHIFT) : (gray << 4);
           const i3 = n * 3;
-          posArr[i3]     = -(u - cx) * depth / fx;
-          posArr[i3 + 1] = -(v - cy) * depth / fy;
-          posArr[i3 + 2] = depth;
+          pArr[i3]     = -(u - cx) * depth / fx;
+          pArr[i3 + 1] = -(v - cy) * depth / fy;
+          pArr[i3 + 2] = depth;
 
           const cIdx = (v * PC_W + u) * 4;
-          colArr[i3]     = cPx[cIdx] / 255;
-          colArr[i3 + 1] = cPx[cIdx + 1] / 255;
-          colArr[i3 + 2] = cPx[cIdx + 2] / 255;
+          cArr[i3]     = cPx[cIdx] / 255;
+          cArr[i3 + 1] = cPx[cIdx + 1] / 255;
+          cArr[i3 + 2] = cPx[cIdx + 2] / 255;
           n++;
         }
       }
 
-      pcGeometry.attributes.position.needsUpdate = true;
-      pcGeometry.attributes.color.needsUpdate = true;
-      pcGeometry.setDrawRange(0, n);
-      pcGeometry.computeBoundingSphere();
+      geom.attributes.position.needsUpdate = true;
+      geom.attributes.color.needsUpdate = true;
+      geom.setDrawRange(0, n);
+      geom.computeBoundingSphere();
 
-      pcFrames++;
-      if (!pcT0) pcT0 = performance.now();
-      const elapsed = (performance.now() - pcT0) / 1000;
-      const fps = elapsed > 0 ? (pcFrames / elapsed).toFixed(1) : '0';
-      pcStatsEl.textContent = `${n.toLocaleString()} pts | ${fps} fps | step=${step}`;
+      statsState.frames++;
+      if (!statsState.t0) statsState.t0 = performance.now();
+      const elapsed = (performance.now() - statsState.t0) / 1000;
+      const fps = elapsed > 0 ? (statsState.frames / elapsed).toFixed(1) : '0';
+      statsEl.textContent = `${n.toLocaleString()} pts | ${fps} fps | step=${step}`;
+    }
+
+    const statsState1 = { frames: 0, t0: 0 };
+    const statsState2 = { frames: 0, t0: 0 };
+
+    function updatePointCloud1() {
+      updatePointCloudGeneric(
+        document.getElementById("colorVideo"), cam1.depthDecoder,
+        colorCtx, colorPreviewCtx1, depthPreviewCtx1,
+        posArr, colArr, pcGeometry, pcStatsEl1, statsState1
+      );
+    }
+    function updatePointCloud2() {
+      updatePointCloudGeneric(
+        document.getElementById("colorVideo2"), cam2.depthDecoder,
+        colorCtx2, colorPreviewCtx2, depthPreviewCtx2,
+        posArr2, colArr2, pcGeometry2, pcStatsEl2, statsState2
+      );
     }
 
     // Point size slider
     document.getElementById('ptSize').addEventListener('input', (e) => {
-      pcMaterial.size = parseFloat(e.target.value) * 0.001; // slider value in mm, material in meters
+      const s = parseFloat(e.target.value) * 0.001;
+      pcMaterial.size = s;
+      pcMaterial2.size = s;
     });
-    pcMaterial.size = parseFloat(document.getElementById('ptSize').value) * 0.001; // apply restored value
+    pcMaterial.size = parseFloat(document.getElementById('ptSize').value) * 0.001;
+    pcMaterial2.size = pcMaterial.size;
 
     // Camera XYZRPY — apply transform via explicit matrix product R = Rz(yaw) * Ry(pitch) * Rx(roll)
     const _rx = new THREE.Matrix4(), _ry = new THREE.Matrix4(), _rz = new THREE.Matrix4(), _tmp = new THREE.Matrix4();
-    function updateCamPose() {
-      const x = parseFloat(document.getElementById('camX').value) || 0;
-      const y = parseFloat(document.getElementById('camY').value) || 0;
-      const z = parseFloat(document.getElementById('camZ').value) || 0;
-      const roll  = (parseFloat(document.getElementById('camRoll').value)  || 0) * Math.PI / 180;
-      const pitch = (parseFloat(document.getElementById('camPitch').value) || 0) * Math.PI / 180;
-      const yaw   = (parseFloat(document.getElementById('camYaw').value)   || 0) * Math.PI / 180;
-      camGroup.position.set(x, y, z);
-      // R = Rz(yaw) * Ry(pitch) * Rx(roll)
+    function applyCamPose(group, xId, yId, zId, rollId, pitchId, yawId) {
+      const x = parseFloat(document.getElementById(xId).value) || 0;
+      const y = parseFloat(document.getElementById(yId).value) || 0;
+      const z = parseFloat(document.getElementById(zId).value) || 0;
+      const roll  = (parseFloat(document.getElementById(rollId).value)  || 0) * Math.PI / 180;
+      const pitch = (parseFloat(document.getElementById(pitchId).value) || 0) * Math.PI / 180;
+      const yaw   = (parseFloat(document.getElementById(yawId).value)   || 0) * Math.PI / 180;
+      group.position.set(x, y, z);
       _rx.makeRotationX(roll);
       _ry.makeRotationY(pitch);
       _rz.makeRotationZ(yaw);
       _tmp.multiplyMatrices(_rz, _ry);
       _tmp.multiply(_rx);
-      camGroup.setRotationFromMatrix(_tmp);
+      group.setRotationFromMatrix(_tmp);
     }
+    function updateCamPose() { applyCamPose(camGroup, 'camX', 'camY', 'camZ', 'camRoll', 'camPitch', 'camYaw'); }
+    function updateCam2Pose() { applyCamPose(camGroup2, 'cam2X', 'cam2Y', 'cam2Z', 'cam2Roll', 'cam2Pitch', 'cam2Yaw'); }
     for (const id of ['camX', 'camY', 'camZ', 'camRoll', 'camPitch', 'camYaw']) {
       document.getElementById(id).addEventListener('input', updateCamPose);
     }
-    updateCamPose(); // apply restored values from localStorage
+    for (const id of ['cam2X', 'cam2Y', 'cam2Z', 'cam2Roll', 'cam2Pitch', 'cam2Yaw']) {
+      document.getElementById(id).addEventListener('input', updateCam2Pose);
+    }
+    updateCamPose();
+    updateCam2Pose();
 
     // ─── Load URDF model ────────────────────────────────
     let robot = null;
@@ -1478,13 +1618,14 @@
       updateArmPose();
       if (!renderer) return;
       controls.update();
-      updatePointCloud();
+      updatePointCloud1();
+      updatePointCloud2();
       renderer.render(scene, camera);
     }
     animate();
 
     // ─── Subscribe to one arm's CAN stream ────────────────
-    async function subscribeArm(label, path, jointState) {
+    async function subscribeArmOnce(label, path, jointState) {
       const relay = relayInput.value;
       const fullUrl = `${relay}/${path}`;
       log(`[${label}] Connecting to ${fullUrl}...`);
@@ -1502,17 +1643,17 @@
       log(`[${label}] Subscribed to 'can' track`, "success");
 
       while (running) {
-        const group = await track.nextGroup();
+        const group = await withTimeout(track.nextGroup(), STALE_MS);
         if (!group) { log(`[${label}] Track ended`); break; }
         while (running) {
-          const frame = await group.readFrame();
+          const frame = await withTimeout(group.readFrame(), STALE_MS);
           if (!frame) break;
           const bytes = new Uint8Array(frame);
           bytesTotal += bytes.length;
-          frameCount++;
-          fpsCounter++;
-          const parsed = parseCanFrame(bytes);
-          if (!parsed) continue;
+          const canFrames = parseAllCanFrames(bytes);
+          frameCount += canFrames.length;
+          fpsCounter += canFrames.length;
+          for (const parsed of canFrames) {
           const jointIdx = JOINTS.findIndex(j => j.canId === parsed.canId);
           if (jointIdx < 0) continue;
           const state = parseDamiaoState(parsed.data);
@@ -1523,19 +1664,24 @@
           jointState[jointIdx].tempMos = state.tempMos;
           jointState[jointIdx].tempRotor = state.tempRotor;
           jointState[jointIdx].updated = true;
-          // Debug gripper cross-talk: log when gripper (index 7) changes significantly
-          if (jointIdx === 7) {
-            const deg = (state.qRad * 180 / Math.PI).toFixed(1);
-            const key = `_lastGripDeg_${label}`;
-            if (!window[key] || Math.abs(parseFloat(deg) - window[key]) > 0.5) {
-              window[key] = parseFloat(deg);
-              const otherArm = label === "left" ? "right" : "left";
-              const otherState = label === "left" ? rightJointState : leftJointState;
-              const otherDeg = (otherState[7].angle * 180 / Math.PI).toFixed(1);
-              log(`[GRIP] ${label}=${deg}° (${otherArm}=${otherDeg}°) canId=0x${parsed.canId.toString(16)}`, "data");
-            }
           }
         }
+      }
+    }
+
+    async function subscribeArm(label, path, jointState) {
+      while (running) {
+        try {
+          await subscribeArmOnce(label, path, jointState);
+          if (!running) break;
+          log(`[${label}] Stream ended`, 'info');
+        } catch (e) {
+          if (!running) break;
+          log(`[${label}] ${e.message}`, 'error');
+        }
+        if (!running) break;
+        log(`[${label}] Reconnecting in ${RECONNECT_DELAY/1000}s...`, 'info');
+        await new Promise(r => setTimeout(r, RECONNECT_DELAY));
       }
     }
 
@@ -1545,7 +1691,8 @@
         const leftPath = leftPathInput.value.trim();
         const rightPath = rightPathInput.value.trim();
         const depthPath = depthPathInput.value.trim();
-        if (!leftPath && !rightPath && !depthPath) { log("No paths configured", "error"); return; }
+        const depth2Path = depth2PathInput.value.trim();
+        if (!leftPath && !rightPath && !depthPath && !depth2Path) { log("No paths configured", "error"); return; }
 
         startBtn.disabled = true;
         stopBtn.disabled = false;
@@ -1572,7 +1719,7 @@
         if (rightPath) subs.push(subscribeArm("right", rightPath, rightJointState).catch(e => log(`[right] ${e.message}`, "error")));
 
         // Connect RealSense point cloud if configured (add to subs so finally waits)
-        if (depthPath) subs.push(connectRealSense().catch(e => log(`[depth] ${e.message}`, "error")));
+        if (depthPath || depth2Path) subs.push(connectRealSense().catch(e => log(`[depth] ${e.message}`, "error")));
 
         queryBtn.disabled = false;
         setStatus("Streaming");

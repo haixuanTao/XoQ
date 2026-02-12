@@ -151,6 +151,11 @@ class _CanFinder(importlib.abc.MetaPathFinder):
             self._resolving = False
 
         if spec is not None:
+            if spec.loader is None:
+                # Namespace package (loader=None) — use _NamespacePatchLoader
+                # which lets the default init run, then patches the module.
+                spec.loader = _NamespacePatchLoader(self)
+                return spec
             # Wrap the loader to patch after loading, then remove ourselves
             original_loader = spec.loader
             spec.loader = _PatchingLoader(original_loader, self)
@@ -181,6 +186,33 @@ class _PatchingLoader:
         _patch_can(module)
         # Remove the finder now that we've successfully loaded and patched
         sys.meta_path[:] = [f for f in sys.meta_path if f is not self._finder]
+
+
+class _NamespacePatchLoader:
+    """Loader for namespace-style python-can (spec.loader=None).
+
+    Removes our finder, lets default import machinery fully load the
+    real ``can`` package, then patches it with xoq_can.
+    """
+
+    def __init__(self, finder):
+        self._finder = finder
+
+    def create_module(self, spec):
+        return None  # use default semantics
+
+    def exec_module(self, module):
+        # Remove ourselves so the re-import below uses the default path
+        sys.meta_path[:] = [f for f in sys.meta_path if f is not self._finder]
+        # Force a fresh import of the real can package
+        name = module.__name__
+        if name in sys.modules:
+            del sys.modules[name]
+        real_mod = importlib.import_module(name)
+        # Copy all attributes from the real module into ours
+        module.__dict__.update(real_mod.__dict__)
+        sys.modules[name] = module
+        _patch_can(module)
 
 
 class _SyntheticCanLoader:
