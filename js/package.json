@@ -19,6 +19,7 @@
     "dev": "tsc --watch",
     "examples": "vite examples",
     "build:pages": "vite build --config vite.config.js && cp -r examples/urdf examples/assets dist-pages/ && rm -f dist-pages/assets/meshes/.gitignore",
+    "deploy:1ms": "npm run build:pages && rsync -av --delete dist-pages/ ../../1ms-ai.github.io/static/openarm/",
     "prepublishOnly": "npm run build"
   },
   "keywords": [

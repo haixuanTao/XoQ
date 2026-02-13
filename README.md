@@ -206,13 +206,13 @@ The CAN MoQ server broadcasts CAN state to all subscribers (1-to-many) and accep
 Server (Linux with SocketCAN):
 
 ```bash
-# Dedicated MoQ server (recommended)
-cargo run --release --bin moq-can-server --features can -- \
-  can0 --relay https://172.18.133.111:4443 --insecure
-
-# Or use the unified can-server with --moq flag
+# Unified can-server with MoQ relay (recommended — supports multiple interfaces + iroh P2P)
 cargo run --release --bin can-server --features "iroh,can" -- \
-  can0:fd --moq --relay https://172.18.133.111:4443 --insecure
+  can0:fd can1:fd can2:fd can3:fd --moq-relay https://cdn.1ms.ai
+
+# Or dedicated MoQ-only server (single interface)
+cargo run --release --bin moq-can-server --features can -- \
+  can0 --relay https://cdn.1ms.ai
 ```
 
 The default broadcast path is `anon/xoq-can-<interface>/state` (e.g., `anon/xoq-can-can0/state`), and the command path is `anon/xoq-can-<interface>/cmd`.

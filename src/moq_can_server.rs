@@ -230,6 +230,7 @@ impl MoqCanServer {
 
                 // Single MoQ group write for the entire batch
                 state_writer.write(batch_buf.clone());
+                tokio::task::yield_now().await;
             }
             can_read_rx
         });
@@ -410,8 +411,12 @@ fn can_reader_thread_fd(
                         continue;
                     }
                 };
-                if tx.blocking_send(any_frame).is_err() {
-                    break;
+                match tx.try_send(any_frame) {
+                    Ok(_) => {}
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                        // Drop frame rather than blocking the reader thread
+                    }
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -465,8 +470,12 @@ fn can_reader_thread_std(
                         continue;
                     }
                 };
-                if tx.blocking_send(any_frame).is_err() {
-                    break;
+                match tx.try_send(any_frame) {
+                    Ok(_) => {}
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                        // Drop frame rather than blocking the reader thread
+                    }
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {

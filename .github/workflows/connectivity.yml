@@ -20,7 +20,7 @@ env:
 
 jobs:
   connectivity:
-    name: Hardware Connectivity Tests
+    name: MoQ Connectivity Check
     runs-on: ubuntu-latest
 
     steps:
@@ -32,67 +32,35 @@ jobs:
         with:
           key: connectivity
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libudev-dev libv4l-dev libasound2-dev nasm
 
-      - name: Create virtualenv
-        run: python -m venv .venv && echo "$PWD/.venv/bin" >> $GITHUB_PATH
+      - name: Build connectivity checker
+        run: cargo build --example moq_connectivity --release
 
-      - name: Install Python tools
-        run: pip install maturin pytest pytest-timeout numpy
-
-      - name: Build xoq-serial
-        working-directory: packages/serial
-        run: maturin develop --release
-
-      - name: Build xoq-opencv
-        working-directory: packages/cv2
-        run: maturin develop --release --no-default-features --features openh264
-
-      - name: Build xoq-can
-        working-directory: packages/can
-        run: maturin develop --release
-
-      - name: Build xoq-sounddevice
-        working-directory: packages/sounddevice
-        run: maturin develop --release
-
-      # Run each test class separately so one failure doesn't block others
-      - name: Test serial connectivity
-        id: test_serial
+      - name: Check CAN can0
+        id: check_can0
         if: always()
         continue-on-error: true
-        env:
-          XOQ_SERIAL_SERVER_ID: ${{ secrets.XOQ_SERIAL_SERVER_ID }}
-        run: pytest tests/test_connectivity.py::TestSerialConnectivity -v
+        run: cargo run --example moq_connectivity --release -- anon/xoq-can-can0/state:can
 
-      - name: Test camera connectivity
-        id: test_camera
+      - name: Check CAN can1
+        id: check_can1
         if: always()
         continue-on-error: true
-        env:
-          XOQ_CAMERA_SERVER_ID: ${{ secrets.XOQ_CAMERA_SERVER_ID }}
-        run: pytest tests/test_connectivity.py::TestCameraConnectivity -v
+        run: cargo run --example moq_connectivity --release -- anon/xoq-can-can1/state:can
 
-      - name: Test CAN connectivity
-        id: test_can
+      - name: Check RealSense video
+        id: check_realsense_video
         if: always()
         continue-on-error: true
-        env:
-          XOQ_CAN_SERVER_ID: ${{ secrets.XOQ_CAN_SERVER_ID }}
-        run: pytest tests/test_connectivity.py::TestCanConnectivity -v
+        run: cargo run --example moq_connectivity --release -- anon/realsense:video
 
-      - name: Test audio connectivity
-        id: test_audio
+      - name: Check RealSense depth
+        id: check_realsense_depth
         if: always()
         continue-on-error: true
-        env:
-          XOQ_AUDIO_SERVER_ID: ${{ secrets.XOQ_AUDIO_SERVER_ID }}
-        run: pytest tests/test_connectivity.py::TestAudioConnectivity -v
+        run: cargo run --example moq_connectivity --release -- anon/realsense:depth
 
       - name: Summary
         if: always()
@@ -102,44 +70,30 @@ jobs:
           echo "| Server | Status |" >> $GITHUB_STEP_SUMMARY
           echo "|--------|--------|" >> $GITHUB_STEP_SUMMARY
 
-          serial_status="${{ steps.test_serial.outcome }}"
-          camera_status="${{ steps.test_camera.outcome }}"
-          can_status="${{ steps.test_can.outcome }}"
-          audio_status="${{ steps.test_audio.outcome }}"
+          can0="${{ steps.check_can0.outcome }}"
+          can1="${{ steps.check_can1.outcome }}"
+          rs_video="${{ steps.check_realsense_video.outcome }}"
+          rs_depth="${{ steps.check_realsense_depth.outcome }}"
 
-          [ "$serial_status" = "success" ] && echo "| Serial (SO100) | :white_check_mark: Pass |" >> $GITHUB_STEP_SUMMARY || echo "| Serial (SO100) | :x: $serial_status |" >> $GITHUB_STEP_SUMMARY
-          [ "$camera_status" = "success" ] && echo "| Camera | :white_check_mark: Pass |" >> $GITHUB_STEP_SUMMARY || echo "| Camera | :x: $camera_status |" >> $GITHUB_STEP_SUMMARY
-          [ "$can_status" = "success" ] && echo "| CAN (openarm) | :white_check_mark: Pass |" >> $GITHUB_STEP_SUMMARY || echo "| CAN (openarm) | :x: $can_status |" >> $GITHUB_STEP_SUMMARY
-          [ "$audio_status" = "success" ] && echo "| Audio | :white_check_mark: Pass |" >> $GITHUB_STEP_SUMMARY || echo "| Audio | :x: $audio_status |" >> $GITHUB_STEP_SUMMARY
+          [ "$can0" = "success" ] && echo "| CAN can0 | :white_check_mark: Pass |" >> $GITHUB_STEP_SUMMARY || echo "| CAN can0 | :x: $can0 |" >> $GITHUB_STEP_SUMMARY
+          [ "$can1" = "success" ] && echo "| CAN can1 | :white_check_mark: Pass |" >> $GITHUB_STEP_SUMMARY || echo "| CAN can1 | :x: $can1 |" >> $GITHUB_STEP_SUMMARY
+          [ "$rs_video" = "success" ] && echo "| RealSense video | :white_check_mark: Pass |" >> $GITHUB_STEP_SUMMARY || echo "| RealSense video | :x: $rs_video |" >> $GITHUB_STEP_SUMMARY
+          [ "$rs_depth" = "success" ] && echo "| RealSense depth | :white_check_mark: Pass |" >> $GITHUB_STEP_SUMMARY || echo "| RealSense depth | :x: $rs_depth |" >> $GITHUB_STEP_SUMMARY
 
       - name: Check results
         if: always()
         run: |
-          # Count configured tests (secret is set) and failures
-          configured=0
           passed=0
+          total=4
 
-          if [ -n "${{ secrets.XOQ_SERIAL_SERVER_ID }}" ]; then
-            configured=$((configured + 1))
-            [ "${{ steps.test_serial.outcome }}" = "success" ] && passed=$((passed + 1))
-          fi
-          if [ -n "${{ secrets.XOQ_CAMERA_SERVER_ID }}" ]; then
-            configured=$((configured + 1))
-            [ "${{ steps.test_camera.outcome }}" = "success" ] && passed=$((passed + 1))
-          fi
-          if [ -n "${{ secrets.XOQ_CAN_SERVER_ID }}" ]; then
-            configured=$((configured + 1))
-            [ "${{ steps.test_can.outcome }}" = "success" ] && passed=$((passed + 1))
-          fi
-          if [ -n "${{ secrets.XOQ_AUDIO_SERVER_ID }}" ]; then
-            configured=$((configured + 1))
-            [ "${{ steps.test_audio.outcome }}" = "success" ] && passed=$((passed + 1))
-          fi
+          [ "${{ steps.check_can0.outcome }}" = "success" ] && passed=$((passed + 1))
+          [ "${{ steps.check_can1.outcome }}" = "success" ] && passed=$((passed + 1))
+          [ "${{ steps.check_realsense_video.outcome }}" = "success" ] && passed=$((passed + 1))
+          [ "${{ steps.check_realsense_depth.outcome }}" = "success" ] && passed=$((passed + 1))
 
-          echo "Configured: $configured, Passed: $passed"
+          echo "Passed: $passed/$total"
 
-          # Fail if any configured test failed
-          if [ "$configured" -gt 0 ] && [ "$passed" -lt "$configured" ]; then
-            echo "Some connectivity tests failed ($passed/$configured passed)"
+          if [ "$passed" -lt "$total" ]; then
+            echo "Some connectivity checks failed ($passed/$total passed)"
             exit 1
           fi

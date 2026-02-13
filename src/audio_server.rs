@@ -40,6 +40,7 @@ impl Default for Transport {
 /// Builder for creating an audio server.
 pub struct AudioServerBuilder {
     input_device: Option<usize>,
+    input_device_name: Option<String>,
     output_device: Option<usize>,
     sample_rate: u32,
     channels: u16,
@@ -55,6 +56,7 @@ impl AudioServerBuilder {
     pub fn new() -> Self {
         Self {
             input_device: None,
+            input_device_name: None,
             output_device: None,
             sample_rate: 48000,
             channels: 1,
@@ -69,6 +71,12 @@ impl AudioServerBuilder {
     /// Set input (microphone) device index.
     pub fn input_device(mut self, index: usize) -> Self {
         self.input_device = Some(index);
+        self
+    }
+
+    /// Set input device by name substring match (e.g. "Camera").
+    pub fn input_device_name(mut self, name: &str) -> Self {
+        self.input_device_name = Some(name.to_string());
         self
     }
 
@@ -183,8 +191,7 @@ impl AudioServerBuilder {
                 if let Some(url) = &relay_url {
                     builder = builder.relay(url);
                 }
-                let mut publisher = builder.connect_publisher().await?;
-                let mic_track = publisher.create_track("mic");
+                let (publisher, mic_track) = builder.connect_publisher_with_track("mic").await?;
 
                 AudioServerInner::Moq {
                     mic_track,
@@ -202,9 +209,12 @@ impl AudioServerBuilder {
     }
 
     fn build_separate_backend(&self, config: &AudioConfig) -> Result<AudioBackend> {
-        let input = match self.input_device {
-            Some(idx) => AudioInput::open_index(idx, config.clone())?,
-            None => AudioInput::open(config.clone())?,
+        let input = if let Some(name) = &self.input_device_name {
+            AudioInput::open_name(name, config.clone())?
+        } else if let Some(idx) = self.input_device {
+            AudioInput::open_index(idx, config.clone())?
+        } else {
+            AudioInput::open(config.clone())?
         };
 
         let output = match self.output_device {
@@ -341,19 +351,77 @@ impl AudioServer {
                     }
                 }
             }
-            AudioServerInner::Moq { mic_track, .. } => match &self.backend {
-                AudioBackend::Separate { input, .. } => loop {
-                    let frame = input.read()?;
-                    let data = frame.encode_moq();
-                    mic_track.write(data);
-                },
-                #[cfg(feature = "audio-macos")]
-                AudioBackend::VoiceProcessing(vpio) => loop {
-                    let frame = vpio.read()?;
-                    let data = frame.encode_moq();
-                    mic_track.write(data);
-                },
-            },
+            AudioServerInner::Moq {
+                mic_track,
+                _publisher,
+                ..
+            } => {
+                // Read audio in a dedicated thread to avoid blocking the tokio runtime
+                // (which needs to process MoQ/QUIC session keepalives)
+                let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+                match &self.backend {
+                    AudioBackend::Separate { input, .. } => {
+                        let input_ptr = input as *const AudioInput as usize;
+                        std::thread::spawn(move || {
+                            let input = unsafe { &*(input_ptr as *const AudioInput) };
+                            loop {
+                                match input.read() {
+                                    Ok(frame) => {
+                                        if tx.blocking_send(frame.encode_moq()).is_err() {
+                                            break;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("Audio read error: {}", e);
+                                        break;
+                                    }
+                                }
+                            }
+                        });
+                    }
+                    #[cfg(feature = "audio-macos")]
+                    AudioBackend::VoiceProcessing(vpio) => {
+                        let vpio_ptr = vpio as *const crate::audio_macos::AudioVoiceIO as usize;
+                        std::thread::spawn(move || {
+                            let vpio =
+                                unsafe { &*(vpio_ptr as *const crate::audio_macos::AudioVoiceIO) };
+                            loop {
+                                match vpio.read() {
+                                    Ok(frame) => {
+                                        if tx.blocking_send(frame.encode_moq()).is_err() {
+                                            break;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("Audio read error: {}", e);
+                                        break;
+                                    }
+                                }
+                            }
+                        });
+                    }
+                }
+
+                // Write audio frames and monitor session health
+                loop {
+                    tokio::select! {
+                        frame = rx.recv() => {
+                            match frame {
+                                Some(data) => mic_track.write(data),
+                                None => {
+                                    tracing::error!("Audio input channel closed");
+                                    break;
+                                }
+                            }
+                        }
+                        result = _publisher.closed() => {
+                            tracing::warn!("MoQ session closed: {:?}", result);
+                            break;
+                        }
+                    }
+                }
+                Ok(())
+            }
         }
     }
 }

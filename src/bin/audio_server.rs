@@ -20,6 +20,7 @@ fn print_usage() {
     println!("Options:");
     println!("  --list              List available audio devices and exit");
     println!("  --input <idx>       Input device index (default: system default)");
+    println!("  --device <name>     Input device by name substring (e.g. Camera)");
     println!("  --output <idx>      Output device index (default: system default)");
     println!("  --sample-rate <hz>  Sample rate (default: 48000)");
     println!("  --channels <n>      Number of channels (default: 1)");
@@ -77,6 +78,10 @@ async fn main() -> Result<()> {
         match args[i].as_str() {
             "--input" if i + 1 < args.len() => {
                 builder = builder.input_device(args[i + 1].parse()?);
+                i += 2;
+            }
+            "--device" if i + 1 < args.len() => {
+                builder = builder.input_device_name(&args[i + 1]);
                 i += 2;
             }
             "--output" if i + 1 < args.len() => {

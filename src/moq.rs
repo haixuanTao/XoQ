@@ -23,10 +23,10 @@ pub struct MoqBuilder {
 }
 
 impl MoqBuilder {
-    /// Create a new builder with default relay (cdn.moq.dev)
+    /// Create a new builder with default relay (cdn.1ms.ai)
     pub fn new() -> Self {
         Self {
-            relay_url: "https://cdn.moq.dev".to_string(),
+            relay_url: "https://cdn.1ms.ai".to_string(),
             token: None,
             path: "anon/xoq".to_string(),
             disable_tls_verify: false,

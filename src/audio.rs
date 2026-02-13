@@ -254,6 +254,19 @@ impl AudioInput {
         Self::open_device(&device, config)
     }
 
+    /// Open a specific input device by name substring match.
+    pub fn open_name(name: &str, config: AudioConfig) -> Result<Self> {
+        let host = cpal::default_host();
+        let device = host
+            .input_devices()
+            .map_err(|e| anyhow::anyhow!("Failed to enumerate input devices: {}", e))?
+            .find(|d| d.name().map(|n| n.contains(name)).unwrap_or(false))
+            .ok_or_else(|| anyhow::anyhow!("No input device matching '{}'", name))?;
+        let dev_name = device.name().unwrap_or_default();
+        tracing::info!("Opened input device: {}", dev_name);
+        Self::open_device(&device, config)
+    }
+
     fn open_device(device: &cpal::Device, config: AudioConfig) -> Result<Self> {
         let (tx, rx) = mpsc::channel::<AudioFrame>();
 

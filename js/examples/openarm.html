@@ -86,6 +86,10 @@
     #queryBtn.active { background: #2ed573; color: #000; border-color: #2ed573; }
     #queryBtn:hover:not(:disabled) { background: #444; }
     #queryBtn.active:hover:not(:disabled) { background: #26b860; }
+    #audioBtn { background: #2a2a4a; color: #888; border: 1px solid #444; }
+    #audioBtn.active { background: #a855f7; color: #fff; border-color: #a855f7; }
+    #audioBtn:hover:not(:disabled) { background: #444; }
+    #audioBtn.active:hover:not(:disabled) { background: #9333ea; }
 
     /* Main layout */
     .main {
@@ -167,33 +171,37 @@
       color: #888;
     }
 
-    /* Camera preview — same-type streams side-by-side */
-    #panelCamera.tab-visible {
-      display: block;
-      overflow-y: auto;
-    }
-    .cam-row {
-      display: flex;
-      gap: 4px;
-      margin-bottom: 2px;
-    }
-    .cam-row > div { flex: 1; text-align: center; min-width: 0; }
-    .cam-row canvas {
-      width: 100%;
-      height: auto;
-      aspect-ratio: 4/3;
-      border-radius: 3px;
+    /* Camera split view (desktop: side-by-side with 3D, mobile: overlay) */
+    .camera-split {
+      display: none;
+      flex-direction: column;
       background: #000;
     }
-    .cam-stats-row {
-      display: flex;
-      gap: 4px;
-      margin-bottom: 0.5rem;
-    }
-    .cam-stats-row > div {
+    .camera-split .camera-feed {
       flex: 1;
-      font-size: 0.7rem;
-      color: #888;
+      position: relative;
+      min-height: 0;
+    }
+    .camera-split .camera-feed video {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+    }
+    .camera-split .cam-label {
+      position: absolute;
+      top: 4px;
+      left: 6px;
+      font-size: 0.65rem;
+      color: rgba(255,255,255,0.5);
+      z-index: 1;
+    }
+    .camera-split.tab-visible {
+      display: flex;
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      bottom: 84px;
+      z-index: 100;
     }
 
     /* Stats */
@@ -295,6 +303,7 @@
     .toast-data    { border-left-color: #00d4ff; color: #00d4ff; }
     .toast-info    { border-left-color: #888; }
     .toast-chat    { border-left-color: #a855f7; color: #a855f7; }
+    .toast-sticky  { animation: toastIn 0.25s ease-out; }
 
     /* Chat bar (always visible above tab bar) */
     .chat-bar {
@@ -337,17 +346,42 @@
       .top-bar-config label { width: 100%; }
       .top-bar-config input[type="text"] { width: 100% !important; }
     }
+
+    /* ─── Desktop: 3D + camera split view ─────────────── */
+    @media (min-width: 1024px) {
+      .camera-split {
+        display: flex;
+        flex: none;
+        height: 100%;
+        aspect-ratio: 2/3;
+        max-width: 50%;
+      }
+      .camera-split.tab-visible {
+        position: static;
+        bottom: auto;
+        z-index: auto;
+      }
+      .tab-btn[data-tab="camera"] { display: none; }
+    }
   </style>
 </head>
 <body>
   <script>
     (function() {
-      var isChrome = /chrome/i.test(navigator.userAgent) && !/edg/i.test(navigator.userAgent);
-      if (!isChrome) {
+      var hasMSE = typeof MediaSource !== 'undefined';
+      var hasWebCodecs = typeof VideoDecoder !== 'undefined';
+      if (!hasMSE) {
         document.addEventListener('DOMContentLoaded', function() {
           var b = document.createElement('div');
           b.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:#b91c1c;color:#fff;padding:8px 16px;text-align:center;font:14px/1.4 system-ui,sans-serif;';
-          b.innerHTML = 'This app currently requires <b>Chrome</b> (desktop). Safari and Firefox support is coming soon.';
+          b.innerHTML = 'This browser does not support <b>MediaSource Extensions</b>. Color video playback requires MSE.';
+          document.body.prepend(b);
+        });
+      } else if (!hasWebCodecs) {
+        document.addEventListener('DOMContentLoaded', function() {
+          var b = document.createElement('div');
+          b.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:#d97706;color:#fff;padding:8px 16px;text-align:center;font:14px/1.4 system-ui,sans-serif;';
+          b.innerHTML = 'Depth and point cloud features are unavailable (WebCodecs not supported). Color video will work normally.';
           document.body.prepend(b);
         });
       }
@@ -359,7 +393,9 @@
       <button id="startBtn">Connect</button>
       <button id="stopBtn" disabled>Disconnect</button>
       <button id="queryBtn" disabled>Query Motors</button>
+      <button id="audioBtn" disabled title="Toggle audio playback">&#128263; Audio</button>
       <span id="statusText" style="color:#888; font-size:0.8rem;">Idle</span>
+      <span id="viewerCount" style="color:#888; font-size:0.8rem; margin-left:0.25rem;">0 viewers</span>
       <button id="settingsToggle" class="settings-toggle" aria-label="Settings">&#9881;</button>
     </div>
     <div class="top-bar-config" id="topBarConfig">
@@ -412,6 +448,10 @@
         Chat:
         <input type="text" id="chatPath" style="width:160px;" />
       </label>
+      <label>
+        Audio:
+        <input type="text" id="audioPath" style="width:160px;" />
+      </label>
     </div>
   </div>
 
@@ -420,6 +460,16 @@
       <canvas id="threeCanvas"></canvas>
       <div class="canvas-overlay">
         <span>Drag to orbit / Scroll to zoom / Right-drag to pan</span>
+      </div>
+    </div>
+    <div class="camera-split" id="cameraSplit">
+      <div class="camera-feed">
+        <span class="cam-label">Cam 1</span>
+        <video id="colorVideo" autoplay muted playsinline></video>
+      </div>
+      <div class="camera-feed">
+        <span class="cam-label">Cam 2</span>
+        <video id="colorVideo2" autoplay muted playsinline></video>
       </div>
     </div>
     <div class="side-panel">
@@ -437,35 +487,6 @@
           <span>Joint</span><span style="text-align:right;">Angle</span><span style="text-align:right;">Vel</span><span style="text-align:right;">Tau</span>
         </div>
         <div id="rightJointRows"></div>
-      </div>
-
-      <div class="panel-section" id="panelCamera">
-        <h3>Color</h3>
-        <div class="cam-row">
-          <div>
-            <div style="font-size:0.65rem; color:#666; margin-bottom:2px;">Cam 1</div>
-            <canvas id="colorPreview1" width="320" height="240"></canvas>
-          </div>
-          <div>
-            <div style="font-size:0.65rem; color:#666; margin-bottom:2px;">Cam 2</div>
-            <canvas id="colorPreview2" width="320" height="240"></canvas>
-          </div>
-        </div>
-        <h3>Depth</h3>
-        <div class="cam-row">
-          <div>
-            <div style="font-size:0.65rem; color:#666; margin-bottom:2px;">Cam 1</div>
-            <canvas id="depthPreview1" width="320" height="240"></canvas>
-          </div>
-          <div>
-            <div style="font-size:0.65rem; color:#666; margin-bottom:2px;">Cam 2</div>
-            <canvas id="depthPreview2" width="320" height="240"></canvas>
-          </div>
-        </div>
-        <div class="cam-stats-row">
-          <div id="pcStats1">No depth stream</div>
-          <div id="pcStats2">No depth stream</div>
-        </div>
       </div>
 
       <div class="panel-section" id="panelStats">
@@ -507,11 +528,6 @@
   </div>
   <div class="toast-container" id="toasts"></div>
 
-  <div style="position:fixed; top:-9999px;">
-    <video id="colorVideo" autoplay muted playsinline></video>
-    <video id="colorVideo2" autoplay muted playsinline></video>
-  </div>
-
   <script type="module">
     import * as THREE from "three";
     import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
@@ -541,8 +557,10 @@
     certHashInput.value  = ls("certHash", "");
 
     const chatPathInput = document.getElementById("chatPath");
+    const audioPathInput = document.getElementById("audioPath");
     const chatUsernameInput = document.getElementById("chatUsername");
     chatPathInput.value = ls("chatPath", "anon/openarm-chat");
+    audioPathInput.value = ls("audioPath", "anon/openarm-audio");
     if (!localStorage.getItem(LS_PREFIX + "chatUsername")) {
       localStorage.setItem(LS_PREFIX + "chatUsername", "anon");
     }
@@ -562,6 +580,7 @@
       queryRate: document.getElementById("queryRate"),
       ptSize: document.getElementById("ptSize"),
       chatPath: chatPathInput,
+      audioPath: audioPathInput,
     };
     for (const [key, el] of Object.entries(configInputs)) {
       const saved = localStorage.getItem(LS_PREFIX + key);
@@ -573,6 +592,7 @@
     const startBtn = document.getElementById("startBtn");
     const stopBtn = document.getElementById("stopBtn");
     const queryBtn = document.getElementById("queryBtn");
+    const audioBtn = document.getElementById("audioBtn");
     const statusText = document.getElementById("statusText");
 
     // ─── Joint definitions ────────────────────────────────
@@ -616,12 +636,22 @@
     let motorIdx = 0;
     let queryArm = 0; // alternates between arms
 
+    // ─── Audio state ──────────────────────────────────────
+    const audioState = {
+      conn: null,
+      audioCtx: null,
+      nextPlayTime: 0,
+      running: false,
+      enabled: localStorage.getItem(LS_PREFIX + "audioEnabled") === "true",
+      framesReceived: 0,
+    };
+
     // ─── Logging ──────────────────────────────────────────
     const toastsEl = document.getElementById("toasts");
     const TOAST_DURATION = 4000; // ms before fade-out starts
     const TOAST_MAX = 5;
 
-    function log(msg, type = "info") {
+    function log(msg, type = "info", { toast: showToast = true } = {}) {
       const entry = document.createElement("div");
       entry.className = `log-entry log-${type}`;
       entry.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
@@ -629,6 +659,7 @@
       if (logEl.children.length > 200) logEl.removeChild(logEl.firstChild);
       logEl.scrollTop = logEl.scrollHeight;
 
+      if (!showToast) return;
       // Toast notification
       const toast = document.createElement("div");
       toast.className = `toast toast-${type}`;
@@ -741,7 +772,9 @@
     // ─── Connect options helper ─────────────────────────
     function buildConnectOpts() {
       const certHash = certHashInput.value.trim();
-      const opts = {};
+      // Firefox WebTransport is unstable — use WebSocket fallback immediately
+      const wsDelay = /firefox/i.test(navigator.userAgent) ? 0 : 2000;
+      const opts = { websocket: { delay: wsDelay } };
       if (certHash) {
         const hex = certHash.replace(/[^0-9a-fA-F]/g, '');
         const hashBytes = new Uint8Array(hex.length / 2);
@@ -749,7 +782,7 @@
         opts.webtransport = {
           serverCertificateHashes: [{ algorithm: "sha-256", value: hashBytes.buffer }],
         };
-        log(`Using cert hash: ${hex.slice(0, 16)}...`, "data");
+        log(`Using cert hash: ${hex.slice(0, 16)}...`, "data", { toast: false });
       }
       return opts;
     }
@@ -848,7 +881,7 @@
         const w = b.writable.getWriter(), r = new RsStreamReader(b.readable.getReader());
         await w.write(rsConcat(rsEncodeVarInt(0), rsEncodeClientSetup()));
         const msg = await r.readMessage(); const br = new RsBufReader(msg);
-        log(`[depth] Server version: 0x${br.readVarInt().toString(16)}`, 'data');
+        log(`[depth] Server version: 0x${br.readVarInt().toString(16)}`, 'data', { toast: false });
       }
       async waitBroadcast() {
         const b = await this.transport.createBidirectionalStream();
@@ -857,7 +890,7 @@
         const msg = await r.readMessage(); const br = new RsBufReader(msg);
         const cnt = br.readVarInt(), paths = [];
         for (let i = 0; i < cnt; i++) paths.push(br.readString());
-        log(`[depth] Broadcasts: [${paths.map(p => `"${p}"`).join(', ')}]`, 'data');
+        log(`[depth] Broadcasts: [${paths.map(p => `"${p}"`).join(', ')}]`, 'data', { toast: false });
         if (cnt > 0) return paths[0];
         log('[depth] Waiting for publisher...', 'info');
         while (true) {
@@ -871,7 +904,7 @@
         const w = b.writable.getWriter(), r = new RsStreamReader(b.readable.getReader());
         await w.write(rsConcat(rsEncodeVarInt(2), rsEncodeSubscribe(id, bc, tk, 0)));
         await r.readMessage();
-        log(`[depth] Subscribed "${tk}" (id=${id})`, 'success'); return id;
+        log(`[depth] Subscribed "${tk}" (id=${id})`, 'success', { toast: false }); return id;
       }
       async receiveStreams() {
         const sr = this.transport.incomingUnidirectionalStreams.getReader();
@@ -955,14 +988,21 @@
     }
 
     // ─── WebCodecs depth decoder (10-bit precision) ──────
+    const HAS_WEBCODECS = typeof VideoDecoder !== 'undefined';
     class DepthDecoder {
       constructor() {
         this.decoder = null; this.configured = false; this.configuredCodec = null;
         this.latestY = null; // Uint16Array (10-bit) or Uint8Array (8-bit)
         this.is10bit = false; this.width = 0; this.height = 0;
         this.frameCount = 0; this.copyBuf = null;
+        this.disabled = !HAS_WEBCODECS;
+        if (this.disabled && !DepthDecoder._warned) {
+          DepthDecoder._warned = true;
+          log('Depth not available (WebCodecs not supported in this browser)', 'info');
+        }
       }
       onData(data) {
+        if (this.disabled) return;
         const d = new Uint8Array(data);
         const isInit = hasFtyp(d);
         if (isInit) {
@@ -990,7 +1030,7 @@
         this.decoder.configure({ codec, description: desc, hardwareAcceleration: 'prefer-software' });
         this.configured = true;
         this.configuredCodec = codec;
-        log(`Depth WebCodecs: ${codec}`, "data");
+        log(`Depth WebCodecs: ${codec}`, "data", { toast: false });
       }
       decodeSample(segData, isKey) {
         const mdat = findMdatContent(segData);
@@ -1003,39 +1043,106 @@
         try {
           const w = frame.displayWidth, h = frame.displayHeight;
           const ySize = w * h;
-          const fmt = frame.format; // e.g. "I420" (8-bit) or "I010" (10-bit) or null (GPU opaque)
-          if (!this.fmtLogged) { log(`Depth frame format: ${fmt}, ${w}x${h}`, "data"); this.fmtLogged = true; }
+          const fmt = frame.format; // Chrome: "I420"/"I010", Firefox: "BGRX", or null
 
           let is10bit = false;
 
           if (fmt) {
-            // Software-decoded frame with known format — use copyTo for Y plane
-            // Chrome uses various names: I010, P010, I420P10, etc.
-            is10bit = fmt.includes('10');
             const totalSize = frame.allocationSize();
             if (!this.copyBuf || this.copyBuf.byteLength < totalSize) this.copyBuf = new ArrayBuffer(totalSize);
             const layouts = await frame.copyTo(this.copyBuf);
             const yOff = layouts[0].offset, yStride = layouts[0].stride;
-            if (is10bit) {
-              if (!this.latestY || this.latestY.length !== ySize) this.latestY = new Uint16Array(ySize);
-              const stride16 = yStride / 2;
-              const src = new Uint16Array(this.copyBuf);
-              if (stride16 === w) {
-                this.latestY.set(new Uint16Array(this.copyBuf, yOff, ySize));
+            // Store raw diagnostics for dumpDepth
+            this._rawDiag = { fmt, w, h, totalSize, numLayouts: layouts.length,
+              layouts: layouts.map(l => ({offset: l.offset, stride: l.stride})),
+              codedWidth: frame.codedWidth, codedHeight: frame.codedHeight,
+              displayWidth: frame.displayWidth, displayHeight: frame.displayHeight };
+
+            // Firefox returns packed BGRX/BGRA; Safari may return RGBA/RGBX
+            const isPackedRGB = fmt.includes('BGR') || fmt.includes('RGB');
+
+            if (!this.fmtLogged) {
+              const pxPerRow = isPackedRGB ? Math.floor(yStride / 4) : yStride;
+              log(`Depth frame: fmt=${fmt}, ${w}x${h}, stride=${yStride}, pxPerRow=${pxPerRow}, packed=${isPackedRGB}`, "data");
+              this.fmtLogged = true;
+            }
+
+            if (isPackedRGB) {
+              // Firefox/Safari: packed BGRX with BT.709 color-space converted values.
+              // Known limitations vs Chrome's raw planar Y:
+              //  - Precision: 8-bit G → ~255 distinct depth values (vs ~960 from 10-bit Y)
+              //  - Range: BT.709 limited range clips Y>940 to G=255, so max recoverable = 940
+              //  - Half-width bug: Firefox AV1 monochrome copyTo has only the first
+              // w/2 cols per row contain real data; the rest leaks from adjacent rows.
+              // Detect by checking if the last row's second half is all-zero.
+              const src = new Uint8Array(this.copyBuf);
+              const bpp = 4;
+              if (!this._halfWidthDetected) {
+                const lastRowOff = yOff + (h - 1) * yStride;
+                let zeroCount = 0, checkCount = 0;
+                for (let c = Math.floor(w / 2); c < w; c += 10) {
+                  if (src[lastRowOff + c * bpp + 1] === 0) zeroCount++;
+                  checkCount++;
+                }
+                this._isHalfWidth = (checkCount > 0 && zeroCount / checkCount > 0.8);
+                this._halfWidthDetected = true;
+                if (this._isHalfWidth) log(`Depth BGRX: half-width bug detected, scaling ${w/2} → ${w}`, "info");
+              }
+              const srcW = this._isHalfWidth ? Math.floor(w / 2) : w;
+              const source10bit = this.configuredCodec && this.configuredCodec.endsWith('.10');
+              if (source10bit) {
+                // Reverse BT.709: G = (Y10 - 64) * 255 / 876 → Y10 = G * 3.435 + 64
+                if (!this.latestY || this.latestY.length !== ySize) this.latestY = new Uint16Array(ySize);
+                for (let row = 0; row < h; row++) {
+                  const rowOff = yOff + row * yStride;
+                  for (let col = 0; col < w; col++) {
+                    const srcCol = srcW < w ? Math.floor(col * srcW / w) : col;
+                    const g = src[rowOff + srcCol * bpp + 1];
+                    this.latestY[row * w + col] = g < 2 ? 0 : Math.min(1023, Math.round(g * 3.435 + 64));
+                  }
+                }
+                is10bit = true;
               } else {
-                for (let r = 0; r < h; r++) this.latestY.set(src.subarray(yOff/2 + r*stride16, yOff/2 + r*stride16 + w), r*w);
+                // Reverse BT.709: G = 1.164 * (Y - 16) → Y = G / 1.164 + 16
+                if (!this.latestY || this.latestY.length !== ySize) this.latestY = new Uint8Array(ySize);
+                for (let row = 0; row < h; row++) {
+                  const rowOff = yOff + row * yStride;
+                  for (let col = 0; col < w; col++) {
+                    const srcCol = srcW < w ? Math.floor(col * srcW / w) : col;
+                    const g = src[rowOff + srcCol * bpp + 1];
+                    this.latestY[row * w + col] = g < 2 ? 0 : Math.min(255, Math.round(g / 1.164 + 16));
+                  }
+                }
+                is10bit = false;
               }
             } else {
-              if (!this.latestY || this.latestY.length !== ySize) this.latestY = new Uint8Array(ySize);
-              const src = new Uint8Array(this.copyBuf);
-              if (yStride === w) {
-                this.latestY.set(new Uint8Array(this.copyBuf, yOff, ySize));
+              // Planar YUV — I420 (8-bit), I010/I420P10 (10-bit), NV12, etc.
+              is10bit = fmt.includes('10') || fmt.includes('12');
+              if (is10bit) {
+                if (!this.latestY || this.latestY.length !== ySize) this.latestY = new Uint16Array(ySize);
+                const stride16 = yStride / 2;
+                const src = new Uint16Array(this.copyBuf);
+                if (stride16 === w) {
+                  this.latestY.set(new Uint16Array(this.copyBuf, yOff, ySize));
+                } else {
+                  for (let r = 0; r < h; r++) this.latestY.set(src.subarray(yOff/2 + r*stride16, yOff/2 + r*stride16 + w), r*w);
+                }
               } else {
-                for (let r = 0; r < h; r++) this.latestY.set(src.subarray(yOff + r*yStride, yOff + r*yStride + w), r*w);
+                if (!this.latestY || this.latestY.length !== ySize) this.latestY = new Uint8Array(ySize);
+                const src = new Uint8Array(this.copyBuf);
+                if (yStride === w) {
+                  this.latestY.set(new Uint8Array(this.copyBuf, yOff, ySize));
+                } else {
+                  for (let r = 0; r < h; r++) this.latestY.set(src.subarray(yOff + r*yStride, yOff + r*yStride + w), r*w);
+                }
               }
             }
           } else {
-            // GPU-opaque frame (format=null) — draw to canvas and extract R channel (8-bit)
+            // Canvas fallback — GPU-opaque frame (format=null)
+            if (!this.fmtLogged) {
+              log(`Depth frame: fmt=null, ${w}x${h}, canvas fallback`, "info");
+              this.fmtLogged = true;
+            }
             if (!this.offCanvas || this.offCanvas.width !== w || this.offCanvas.height !== h) {
               this.offCanvas = new OffscreenCanvas(w, h);
               this.offCtx = this.offCanvas.getContext('2d', { willReadFrequently: true });
@@ -1043,9 +1150,8 @@
             this.offCtx.drawImage(frame, 0, 0);
             const rgba = this.offCtx.getImageData(0, 0, w, h).data;
             if (!this.latestY || this.latestY.length !== ySize) this.latestY = new Uint8Array(ySize);
-            for (let i = 0; i < ySize; i++) this.latestY[i] = rgba[i * 4]; // R channel = grayscale
+            for (let i = 0; i < ySize; i++) this.latestY[i] = rgba[i * 4]; // R channel
             is10bit = false;
-            if (!this.canvasFallbackLogged) { log(`Depth: GPU frame, using canvas fallback (8-bit)`, "info"); this.canvasFallbackLogged = true; }
           }
 
           this.is10bit = is10bit; this.width = w; this.height = h;
@@ -1126,7 +1232,7 @@
       ]);
     }
     const STALE_MS = 10000;
-    const RECONNECT_DELAY = 3000;
+    const RECONNECT_DELAY = 300;
 
     async function connectOneCameraOnce(cam, path, videoElId, label) {
       const relay = relayInput.value.trim();
@@ -1136,14 +1242,13 @@
       cam.depthDecoder = new DepthDecoder();
 
       const connectOpts = buildConnectOpts();
-      log(`[${label}] Connecting to ${fullUrl}...`);
+      log(`[${label}] Connecting to ${fullUrl}...`, 'info', { toast: false });
       cam.conn = await Moq.Connection.connect(new URL(fullUrl), connectOpts);
       log(`[${label}] Connected`, 'success');
 
       const broadcast = cam.conn.consume(Moq.Path.from(""));
       const videoTrack = broadcast.subscribe("video", 0);
-      const depthTrack = broadcast.subscribe("depth", 0);
-      log(`[${label}] Subscribed to video + depth tracks`, 'success');
+      const trackNames = ['video'];
 
       async function readTrack(track, handler, name) {
         while (cam.running) {
@@ -1157,10 +1262,17 @@
         }
       }
 
-      const videoPromise = readTrack(videoTrack, d => cam.colorPlayer.onData(d), 'video');
-      const depthPromise = readTrack(depthTrack, d => cam.depthDecoder.onData(d), 'depth');
-      log(`[${label}] Receiving frames...`, 'success');
-      await Promise.all([videoPromise, depthPromise]);
+      const promises = [readTrack(videoTrack, d => cam.colorPlayer.onData(d), 'video')];
+
+      if (HAS_WEBCODECS) {
+        const depthTrack = broadcast.subscribe("depth", 0);
+        promises.push(readTrack(depthTrack, d => cam.depthDecoder.onData(d), 'depth'));
+        trackNames.push('depth');
+      }
+
+      log(`[${label}] Subscribed to ${trackNames.join(' + ')} tracks`, 'success', { toast: false });
+      log(`[${label}] Receiving frames...`, 'success', { toast: false });
+      await Promise.all(promises);
     }
 
     function cleanupCam(cam) {
@@ -1172,18 +1284,20 @@
     async function connectOneCamera(cam, path, videoElId, label) {
       if (!path) return;
       cam.running = true;
+      let lastError = null;
       while (cam.running) {
         try {
           await connectOneCameraOnce(cam, path, videoElId, label);
           if (!cam.running) break;
+          lastError = null;  // successful session — reset
           log(`[${label}] Stream ended`, 'info');
         } catch (e) {
           if (!cam.running) break;
-          log(`[${label}] ${e.message}`, 'error');
+          if (lastError) log(`[${label}] ${e.message}`, 'error');
+          lastError = e;
         }
         cleanupCam(cam);
         if (!cam.running) break;
-        log(`[${label}] Reconnecting in ${RECONNECT_DELAY/1000}s...`, 'info');
         await new Promise(r => setTimeout(r, RECONNECT_DELAY));
       }
     }
@@ -1246,7 +1360,7 @@
       const cmdUrl = `${relay}/${basePath}/commands`;
       const cs = cmdState[label];
 
-      log(`[${label}] Connecting commands to ${cmdUrl}...`);
+      log(`[${label}] Connecting commands to ${cmdUrl}...`, 'info', { toast: false });
       const connectOpts = buildConnectOpts();
       cs.conn = await Promise.race([
         Moq.Connection.connect(new URL(cmdUrl), connectOpts),
@@ -1325,16 +1439,16 @@
       running: false,
     };
 
+    const chatSessionId = Math.random().toString(36).slice(2, 8);
     function getChatUsername() { return chatUsernameInput.value.trim() || "Anon"; }
+    function getChatPublishPath() { return `${getChatUsername()}_${chatSessionId}`; }
 
     function showChatMessage(msg) {
       const toast = document.createElement("div");
-      toast.className = "toast toast-chat";
-      toast.style.setProperty('--toast-duration', `${TOAST_DURATION}ms`);
+      toast.className = "toast toast-chat toast-sticky";
       toast.textContent = `${msg.name}: ${msg.text}`;
       toastsEl.prepend(toast);
       while (toastsEl.children.length > TOAST_MAX) toastsEl.lastChild.remove();
-      setTimeout(() => toast.remove(), TOAST_DURATION + 400);
     }
 
     function sendChatMessage(text) {
@@ -1355,7 +1469,7 @@
           if (!request) break;
           if (request.track.name === "messages") {
             chatState.track = request.track;
-            log(`[chat] Publish track active`, 'success');
+            log(`[chat] Publish track active`, 'success', { toast: false });
           } else {
             request.track.close(new Error("unknown track"));
           }
@@ -1370,7 +1484,7 @@
         const broadcast = chatState.conn.consume(Moq.Path.from(username));
         const track = broadcast.subscribe("messages", 0);
         chatState.subscribers.set(username, { broadcast, track });
-        log(`[chat] Subscribed to ${username}`, 'data');
+        log(`[chat] Subscribed to ${username}`, 'data', { toast: false });
         while (chatState.running) {
           const msg = await track.readJson();
           if (!msg) break;
@@ -1383,6 +1497,11 @@
       }
     }
 
+    function updateViewerCount() {
+      const count = chatState.subscribers.size + (chatState.running ? 1 : 0);
+      document.getElementById("viewerCount").textContent = count === 1 ? "1 viewer" : `${count} viewers`;
+    }
+
     async function discoverChatUsers() {
       try {
         chatState.announced = chatState.conn.announced();
@@ -1390,13 +1509,15 @@
           const entry = await chatState.announced.next();
           if (!entry) break;
           const path = entry.path;
-          if (path === Moq.Path.from(getChatUsername())) continue;
+          if (path === Moq.Path.from(getChatPublishPath())) continue;
           if (entry.active && !chatState.subscribers.has(path)) {
-            log(`[chat] User joined: ${path}`, 'data');
+            log(`[chat] User joined: ${String(path).replace(/_[a-z0-9]+$/, '')}`, 'data');
             subscribeToChatUser(path);
+            updateViewerCount();
           } else if (!entry.active) {
             chatState.subscribers.delete(path);
-            log(`[chat] User left: ${path}`, 'info');
+            log(`[chat] User left: ${String(path).replace(/_[a-z0-9]+$/, '')}`, 'info');
+            updateViewerCount();
           }
         }
       } catch (e) {
@@ -1417,8 +1538,9 @@
         log(`[chat] Connected`, 'success');
 
         chatState.broadcast = new Moq.Broadcast();
-        chatState.conn.publish(Moq.Path.from(getChatUsername()), chatState.broadcast);
-        log(`[chat] Publishing as "${getChatUsername()}"`, 'data');
+        chatState.conn.publish(Moq.Path.from(getChatPublishPath()), chatState.broadcast);
+        log(`[chat] Publishing as "${getChatUsername()}"`, 'data', { toast: false });
+        updateViewerCount();
 
         handleChatPublish();
         discoverChatUsers();
@@ -1437,6 +1559,7 @@
       if (chatState.track) { try { chatState.track.close(); } catch {} chatState.track = null; }
       if (chatState.broadcast) { try { chatState.broadcast.close(); } catch {} chatState.broadcast = null; }
       if (chatState.conn) { try { chatState.conn.close(); } catch {} chatState.conn = null; }
+      updateViewerCount();
     }
 
     // Chat input handlers
@@ -1445,6 +1568,165 @@
         e.preventDefault();
         sendChatMessage(e.target.value);
         e.target.value = '';
+      }
+    });
+
+    // ─── Audio: MoQ frame decoder + WebAudio playback ────
+    // 20-byte header: [u32 sample_rate][u16 channels][u16 sample_format][u32 frame_count][u32 timestamp_us][u32 data_length]
+    function decodeAudioMoqHeader(buf) {
+      if (buf.byteLength < 20) return null;
+      const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+      return {
+        sampleRate:   view.getUint32(0, true),
+        channels:     view.getUint16(4, true),
+        sampleFormat: view.getUint16(6, true),  // 0=I16, 1=F32
+        frameCount:   view.getUint32(8, true),
+        timestampUs:  view.getUint32(12, true),
+        dataLength:   view.getUint32(16, true),
+      };
+    }
+
+    function pcmToFloat32(pcmBytes, sampleFormat, frameCount, channels) {
+      const totalSamples = frameCount * channels;
+      if (sampleFormat === 1) {
+        // F32 passthrough
+        return new Float32Array(pcmBytes.buffer, pcmBytes.byteOffset, totalSamples);
+      }
+      // I16 → Float32
+      const i16 = new Int16Array(pcmBytes.buffer, pcmBytes.byteOffset, totalSamples);
+      const f32 = new Float32Array(totalSamples);
+      for (let i = 0; i < totalSamples; i++) f32[i] = i16[i] / 32768;
+      return f32;
+    }
+
+    function playAudioChunk(header, pcmData) {
+      const ctx = audioState.audioCtx;
+      if (!ctx) return;
+
+      const f32 = pcmToFloat32(pcmData, header.sampleFormat, header.frameCount, header.channels);
+      const audioBuf = ctx.createBuffer(header.channels, header.frameCount, header.sampleRate);
+
+      if (header.channels === 1) {
+        audioBuf.copyToChannel(f32, 0);
+      } else {
+        // Deinterleave
+        for (let ch = 0; ch < header.channels; ch++) {
+          const chData = new Float32Array(header.frameCount);
+          for (let i = 0; i < header.frameCount; i++) chData[i] = f32[i * header.channels + ch];
+          audioBuf.copyToChannel(chData, ch);
+        }
+      }
+
+      const src = ctx.createBufferSource();
+      src.buffer = audioBuf;
+      src.connect(ctx.destination);
+
+      // Snap forward if we've fallen behind (handles gaps/reconnects)
+      if (audioState.nextPlayTime < ctx.currentTime) {
+        audioState.nextPlayTime = ctx.currentTime;
+      }
+      src.start(audioState.nextPlayTime);
+      audioState.nextPlayTime += audioBuf.duration;
+    }
+
+    async function connectAudioOnce() {
+      const relay = relayInput.value.trim();
+      const audioPath = audioPathInput.value.trim();
+      if (!audioPath) return;
+
+      const fullUrl = `${relay}/${audioPath}`;
+      const connectOpts = buildConnectOpts();
+      log(`[audio] Connecting to ${fullUrl}...`, 'info', { toast: false });
+
+      audioState.conn = await Moq.Connection.connect(new URL(fullUrl), connectOpts);
+      log(`[audio] Connected`, 'success');
+
+      const broadcast = audioState.conn.consume(Moq.Path.from(""));
+      const track = broadcast.subscribe("mic", 0);
+      log(`[audio] Subscribed to "mic" track`, 'success', { toast: false });
+
+      while (audioState.running) {
+        const group = await withTimeout(track.nextGroup(), STALE_MS);
+        if (!group) { log(`[audio] Track ended`); break; }
+        while (audioState.running) {
+          const frame = await withTimeout(group.readFrame(), STALE_MS);
+          if (!frame) break;
+          const bytes = new Uint8Array(frame);
+          const header = decodeAudioMoqHeader(bytes);
+          if (!header || bytes.byteLength < 20 + header.dataLength) continue;
+
+          // Create AudioContext on first valid frame (fallback if not created by button click)
+          if (!audioState.audioCtx) {
+            audioState.audioCtx = new AudioContext({ sampleRate: header.sampleRate });
+            audioState.nextPlayTime = 0;
+            log(`[audio] AudioContext created: ${header.sampleRate}Hz, ${header.channels}ch`, 'data', { toast: false });
+          }
+          if (audioState.audioCtx.state === 'suspended') {
+            await audioState.audioCtx.resume();
+          }
+
+          const pcmData = bytes.subarray(20, 20 + header.dataLength);
+          playAudioChunk(header, pcmData);
+          audioState.framesReceived++;
+        }
+      }
+    }
+
+    async function connectAudio() {
+      audioState.running = true;
+      let lastError = null;
+      while (audioState.running) {
+        try {
+          await connectAudioOnce();
+          if (!audioState.running) break;
+          lastError = null;
+          log(`[audio] Stream ended`, 'info');
+        } catch (e) {
+          if (!audioState.running) break;
+          log(`[audio] ${e.message}`, 'error');
+          lastError = e;
+        }
+        disconnectAudioConn();
+        if (!audioState.running) break;
+        await new Promise(r => setTimeout(r, RECONNECT_DELAY));
+      }
+    }
+
+    function disconnectAudioConn() {
+      if (audioState.conn) { try { audioState.conn.close(); } catch {} audioState.conn = null; }
+    }
+
+    function disconnectAudio() {
+      audioState.running = false;
+      disconnectAudioConn();
+      if (audioState.audioCtx) { try { audioState.audioCtx.close(); } catch {} audioState.audioCtx = null; }
+      audioState.nextPlayTime = 0;
+      audioState.framesReceived = 0;
+    }
+
+    // Audio toggle button
+    if (audioState.enabled) {
+      audioBtn.classList.add('active');
+      audioBtn.innerHTML = '&#128266; Audio';
+    }
+    audioBtn.addEventListener('click', () => {
+      audioState.enabled = !audioState.enabled;
+      localStorage.setItem(LS_PREFIX + "audioEnabled", audioState.enabled);
+      if (audioState.enabled) {
+        // Create AudioContext eagerly during user gesture (Chrome autoplay policy)
+        if (!audioState.audioCtx) {
+          audioState.audioCtx = new AudioContext({ sampleRate: 48000 });
+          audioState.nextPlayTime = 0;
+          log(`[audio] AudioContext created: ${audioState.audioCtx.sampleRate}Hz`, 'data', { toast: false });
+        }
+        if (audioState.audioCtx.state === 'suspended') audioState.audioCtx.resume();
+        audioBtn.classList.add('active');
+        audioBtn.innerHTML = '&#128266; Audio';
+        if (running) connectAudio().catch(e => log(`[audio] ${e.message}`, 'error'));
+      } else {
+        audioBtn.classList.remove('active');
+        audioBtn.innerHTML = '&#128263; Audio';
+        disconnectAudio();
       }
     });
 
@@ -1571,20 +1853,12 @@
     colorCanvas.width = PC_W; colorCanvas.height = PC_H;
     const colorCtx = colorCanvas.getContext('2d', { willReadFrequently: true });
 
-    const colorPreviewCtx1 = document.getElementById('colorPreview1').getContext('2d');
-    const depthPreviewCtx1 = document.getElementById('depthPreview1').getContext('2d');
-    const pcStatsEl1 = document.getElementById('pcStats1');
-
-    const colorPreviewCtx2 = document.getElementById('colorPreview2').getContext('2d');
-    const depthPreviewCtx2 = document.getElementById('depthPreview2').getContext('2d');
-    const pcStatsEl2 = document.getElementById('pcStats2');
-
     // Offscreen canvas for cam2 color extraction
     const colorCanvas2 = document.createElement('canvas');
     colorCanvas2.width = PC_W; colorCanvas2.height = PC_H;
     const colorCtx2 = colorCanvas2.getContext('2d', { willReadFrequently: true });
 
-    function updatePointCloudGeneric(videoEl, decoder, cCtx, colorPrevCtx, depthPrevCtx, pArr, cArr, geom, statsEl, statsState) {
+    function updatePointCloudGeneric(videoEl, decoder, cCtx, pArr, cArr, geom) {
       if (!videoEl.videoWidth) return;
       if (!decoder || !decoder.latestY) return;
 
@@ -1594,24 +1868,7 @@
       const DEPTH_SHIFT = 0;
 
       cCtx.drawImage(videoEl, 0, 0, PC_W, PC_H);
-      colorPrevCtx.drawImage(videoEl, 0, 0, 320, 240);
-
       const dY = decoder.latestY;
-      const dW = decoder.width, dH = decoder.height;
-      const prevW = 320, prevH = 240;
-      const prevImg = depthPrevCtx.createImageData(prevW, prevH);
-      const prevPx = prevImg.data;
-      const sx = dW / prevW, sy = dH / prevH;
-      for (let py = 0; py < prevH; py++) {
-        for (let px = 0; px < prevW; px++) {
-          const g = dY[Math.floor(py*sy) * dW + Math.floor(px*sx)];
-          const v8 = decoder.is10bit ? (g >> 2) : g;
-          const pi = (py * prevW + px) * 4;
-          prevPx[pi] = v8; prevPx[pi+1] = v8; prevPx[pi+2] = v8; prevPx[pi+3] = 255;
-        }
-      }
-      depthPrevCtx.putImageData(prevImg, 0, 0);
-
       const cPx = cCtx.getImageData(0, 0, PC_W, PC_H).data;
 
       let n = 0;
@@ -1639,29 +1896,18 @@
       geom.attributes.color.needsUpdate = true;
       geom.setDrawRange(0, n);
       geom.computeBoundingSphere();
-
-      statsState.frames++;
-      if (!statsState.t0) statsState.t0 = performance.now();
-      const elapsed = (performance.now() - statsState.t0) / 1000;
-      const fps = elapsed > 0 ? (statsState.frames / elapsed).toFixed(1) : '0';
-      statsEl.textContent = `${n.toLocaleString()} pts | ${fps} fps | step=${step}`;
     }
-
-    const statsState1 = { frames: 0, t0: 0 };
-    const statsState2 = { frames: 0, t0: 0 };
 
     function updatePointCloud1() {
       updatePointCloudGeneric(
         document.getElementById("colorVideo"), cam1.depthDecoder,
-        colorCtx, colorPreviewCtx1, depthPreviewCtx1,
-        posArr, colArr, pcGeometry, pcStatsEl1, statsState1
+        colorCtx, posArr, colArr, pcGeometry
       );
     }
     function updatePointCloud2() {
       updatePointCloudGeneric(
         document.getElementById("colorVideo2"), cam2.depthDecoder,
-        colorCtx2, colorPreviewCtx2, depthPreviewCtx2,
-        posArr2, colArr2, pcGeometry2, pcStatsEl2, statsState2
+        colorCtx2, posArr2, colArr2, pcGeometry2
       );
     }
 
@@ -1816,11 +2062,54 @@
     }
     animate();
 
+    // ─── Debug: expose depth comparison for cross-browser testing ───
+    window.dumpDepth = function() {
+      const dec = cam1.depthDecoder;
+      if (!dec || !dec.latestY) { console.log('No depth data yet'); return; }
+      const Y = dec.latestY;
+      const w = dec.width, h = dec.height;
+      // Sample every 10th pixel from 5 evenly-spaced rows
+      const rows = [0, Math.floor(h/4), Math.floor(h/2), Math.floor(3*h/4), h-1];
+      const samples = {};
+      for (const r of rows) {
+        samples['row_'+r] = [];
+        for (let c = 0; c < w; c += 10) samples['row_'+r].push(Y[r * w + c]);
+      }
+      let min = Infinity, max = 0, nonzero = 0;
+      for (let i = 0; i < Y.length; i++) { const v = Y[i]; if (v > 0) { nonzero++; if (v < min) min = v; if (v > max) max = v; } }
+      // Raw byte samples from the copy buffer (first row, every 10th pixel, 8 bytes each)
+      let rawSamples = null;
+      if (dec.copyBuf && dec._rawDiag) {
+        const d = dec._rawDiag;
+        const src = new Uint8Array(dec.copyBuf);
+        const stride = d.layouts[0].stride;
+        const off = d.layouts[0].offset;
+        rawSamples = { row0: [], midRow: [] };
+        const midR = Math.floor(h / 2);
+        for (let c = 0; c < w && c < d.codedWidth; c += 10) {
+          // 8 raw bytes at this pixel position
+          const i0 = off + 0 * stride + c * 4;
+          const iM = off + midR * stride + c * 4;
+          rawSamples.row0.push(Array.from(src.slice(i0, i0 + 4)));
+          rawSamples.midRow.push(Array.from(src.slice(iM, iM + 4)));
+        }
+      }
+      const result = {
+        browser: navigator.userAgent.includes('Firefox') ? 'Firefox' : navigator.userAgent.includes('Chrome') ? 'Chrome' : 'Other',
+        format: dec.fmtLogged ? 'see log' : 'unknown', codec: dec.configuredCodec,
+        width: w, height: h, is10bit: dec.is10bit, totalPixels: w*h, nonzeroPixels: nonzero, min, max,
+        rawDiag: dec._rawDiag || null, rawSamples, samples
+      };
+      console.log(JSON.stringify(result));
+      navigator.clipboard.writeText(JSON.stringify(result, null, 2)).then(() => console.log('Copied to clipboard'));
+      return result;
+    };
+
     // ─── Subscribe to one arm's CAN stream ────────────────
     async function subscribeArmOnce(label, path, jointState) {
       const relay = relayInput.value;
       const fullUrl = `${relay}/${path}`;
-      log(`[${label}] Connecting to ${fullUrl}...`);
+      log(`[${label}] Connecting to ${fullUrl}...`, 'info', { toast: false });
 
       const connectOpts = buildConnectOpts();
       const conn = await Promise.race([
@@ -1832,7 +2121,7 @@
 
       const broadcast = conn.consume(Moq.Path.from(""));
       const track = broadcast.subscribe("can", 0);
-      log(`[${label}] Subscribed to 'can' track`, "success");
+      log(`[${label}] Subscribed to 'can' track`, "success", { toast: false });
 
       while (running) {
         const group = await withTimeout(track.nextGroup(), STALE_MS);
@@ -1862,17 +2151,19 @@
     }
 
     async function subscribeArm(label, path, jointState) {
+      let lastError = null;
       while (running) {
         try {
           await subscribeArmOnce(label, path, jointState);
           if (!running) break;
+          lastError = null;  // successful session — reset
           log(`[${label}] Stream ended`, 'info');
         } catch (e) {
           if (!running) break;
-          log(`[${label}] ${e.message}`, 'error');
+          if (lastError) log(`[${label}] ${e.message}`, 'error');
+          lastError = e;
         }
         if (!running) break;
-        log(`[${label}] Reconnecting in ${RECONNECT_DELAY/1000}s...`, 'info');
         await new Promise(r => setTimeout(r, RECONNECT_DELAY));
       }
     }
@@ -1895,7 +2186,7 @@
         connections = [];
 
         setStatus("Connecting...");
-        log(`WebTransport: ${typeof WebTransport !== 'undefined' ? 'supported' : 'NOT supported'}`, "data");
+        log(`WebTransport: ${typeof WebTransport !== 'undefined' ? 'supported' : 'NOT supported'}`, "data", { toast: false });
 
         const relay = relayInput.value;
         const certHash = certHashInput.value.trim();
@@ -1916,6 +2207,17 @@
         // Connect chat
         subs.push(connectChat().catch(e => log(`[chat] ${e.message}`, "error")));
 
+        // Connect audio if enabled — create AudioContext here (in Start button click = user gesture)
+        audioBtn.disabled = false;
+        if (audioState.enabled) {
+          if (!audioState.audioCtx) {
+            audioState.audioCtx = new AudioContext({ sampleRate: 48000 });
+            audioState.nextPlayTime = 0;
+          }
+          if (audioState.audioCtx.state === 'suspended') audioState.audioCtx.resume();
+          subs.push(connectAudio().catch(e => log(`[audio] ${e.message}`, 'error')));
+        }
+
         queryBtn.disabled = false;
         setStatus("Streaming");
 
@@ -1934,6 +2236,8 @@
         }
         disconnectRealSense();
         disconnectChat();
+        disconnectAudio();
+        audioBtn.disabled = true;
         queryBtn.disabled = true;
         startBtn.disabled = false;
         stopBtn.disabled = true;
@@ -1952,6 +2256,8 @@
       setStatus("Stopping...");
       disconnectRealSense();
       disconnectChat();
+      disconnectAudio();
+      audioBtn.disabled = true;
       for (const conn of connections) { try { conn.close(); } catch (e) {} }
       connections = [];
       startBtn.disabled = false;
@@ -2001,9 +2307,9 @@
     const tabBar = document.getElementById('tabBar');
     const sidePanel = document.querySelector('.side-panel');
     const logPanel = document.getElementById('log');
+    const cameraSplit = document.getElementById('cameraSplit');
     const panelMap = {
       arms: [document.getElementById('panelLeft'), document.getElementById('panelRight')],
-      camera: [document.getElementById('panelCamera')],
       stats: [document.getElementById('panelStats')],
     };
     const allPanels = Object.values(panelMap).flat();
@@ -2021,12 +2327,16 @@
       sidePanel.classList.remove('tab-visible');
       allPanels.forEach(p => p.classList.remove('tab-visible'));
       logPanel.classList.remove('tab-visible');
+      cameraSplit.classList.remove('tab-visible');
       view3dEl.style.display = '';
 
       if (tab === '3d') {
         requestAnimationFrame(onResize);
       } else if (tab === 'log') {
         logPanel.classList.add('tab-visible');
+        view3dEl.style.display = 'none';
+      } else if (tab === 'camera') {
+        cameraSplit.classList.add('tab-visible');
         view3dEl.style.display = 'none';
       } else if (tab in panelMap) {
         sidePanel.classList.add('tab-visible');
