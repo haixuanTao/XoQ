@@ -22,7 +22,7 @@ pub enum Transport {
     Moq {
         /// MoQ path for the stream (e.g., "anon/my-camera")
         path: String,
-        /// Optional custom relay URL (default: <https://cdn.moq.dev>)
+        /// Optional custom relay URL (default: <https://cdn.1ms.ai>)
         relay_url: Option<String>,
     },
 }

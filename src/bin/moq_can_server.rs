@@ -31,7 +31,7 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let mut relay = "https://cdn.moq.dev".to_string();
+    let mut relay = "https://cdn.1ms.ai".to_string();
     let mut interface_arg: Option<String> = None;
     let mut moq_path: Option<String> = None;
     let mut insecure = false;
@@ -110,7 +110,7 @@ fn print_usage() {
     println!();
     println!("Options:");
     println!("  :fd                 Append to interface name to enable CAN FD");
-    println!("  --relay <url>       MoQ relay URL (default: https://cdn.moq.dev)");
+    println!("  --relay <url>       MoQ relay URL (default: https://cdn.1ms.ai)");
     println!("  --insecure          Disable TLS verification (for self-signed certs)");
     println!();
     println!("Available CAN interfaces:");

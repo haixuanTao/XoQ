@@ -68,7 +68,7 @@ async fn run_moq_server(port_name: &str, baud_rate: u32, moq_path: &str) -> Resu
     tracing::info!("Serial port opened: {} @ {} baud", port_name, baud_rate);
 
     // Connect via MoqStream (waits for client, no timeout)
-    let relay = "https://cdn.moq.dev";
+    let relay = "https://cdn.1ms.ai";
     tracing::info!(
         "Connecting to MoQ relay at '{}' path '{}'...",
         relay,

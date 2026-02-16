@@ -15,10 +15,22 @@
 use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use xoq::iroh::IrohServerBuilder;
 use xoq::MoqBuilder;
+
+fn stamp(data: Vec<u8>) -> Vec<u8> {
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let mut out = Vec::with_capacity(8 + data.len());
+    out.extend_from_slice(&ms.to_le_bytes());
+    out.extend_from_slice(&data);
+    out
+}
 
 // Platform-conditional camera imports
 #[cfg(feature = "camera")]
@@ -116,7 +128,7 @@ fn parse_args() -> Option<(Vec<CameraConfig>, PathBuf)> {
     let mut bitrate = 2_000_000u32; // 2 Mbps default
     let mut use_h264 = false;
     let mut moq_path: Option<String> = None;
-    let mut relay = String::from("https://cdn.moq.dev");
+    let mut relay = String::from("https://cdn.1ms.ai");
     let mut insecure = false;
     let mut i = 1;
 
@@ -312,7 +324,7 @@ fn print_usage() {
     println!("  --h264            Use H.264 encoding (NVENC on Linux, VideoToolbox on macOS)");
     println!("  --bitrate <bps>   H.264 bitrate in bps (default: 2000000)");
     println!("  --moq [path]      Use MoQ relay transport (default: anon/camera-<index>)");
-    println!("  --relay <url>     MoQ relay URL (default: https://cdn.moq.dev)");
+    println!("  --relay <url>     MoQ relay URL (default: https://cdn.1ms.ai)");
     println!("  --insecure        Disable TLS verification (for self-signed certs)");
     println!();
     print_cameras();
@@ -442,7 +454,7 @@ async fn run_camera_server_moq(config: &CameraConfig, moq_path: &str) -> Result<
         buf.extend_from_slice(&(timestamp_us as u32).to_le_bytes());
         buf.extend_from_slice(&jpeg);
 
-        track.write(buf);
+        track.write(stamp(buf));
 
         frame_count += 1;
     }
@@ -511,7 +523,7 @@ async fn run_camera_server_moq_h264_vtenc(config: &CameraConfig, moq_path: &str)
         if init_segment.is_none() {
             if let (Some(ref sps), Some(ref pps)) = (&encoded.sps, &encoded.pps) {
                 let init = muxer.create_init_segment(sps, pps, actual_width, actual_height);
-                track.write(init.clone());
+                track.write(stamp(init.clone()));
                 init_segment = Some(init);
                 tracing::info!("[cam{}] Sent CMAF init segment", cam_idx);
             }
@@ -540,12 +552,12 @@ async fn run_camera_server_moq_h264_vtenc(config: &CameraConfig, moq_path: &str)
                 if let Some(ref init) = init_segment {
                     let mut combined = init.clone();
                     combined.extend_from_slice(&segment);
-                    track.write(combined);
+                    track.write(stamp(combined));
                 } else {
-                    track.write(segment);
+                    track.write(stamp(segment));
                 }
             } else {
-                track.write(segment);
+                track.write(stamp(segment));
             }
         }
 
@@ -647,7 +659,7 @@ async fn run_camera_server_moq_h264_nvenc(config: &CameraConfig, moq_path: &str)
         if init_segment.is_none() {
             if let Some(ref seq_hdr) = parsed.sequence_header {
                 let init = muxer.create_init_segment(seq_hdr, actual_width, actual_height);
-                track.write(init.clone());
+                track.write(stamp(init.clone()));
                 init_segment = Some(init);
                 tracing::info!("[cam{}] Sent AV1 CMAF init segment", cam_idx);
             }
@@ -666,12 +678,12 @@ async fn run_camera_server_moq_h264_nvenc(config: &CameraConfig, moq_path: &str)
                 if let Some(ref init) = init_segment {
                     let mut combined = init.clone();
                     combined.extend_from_slice(&segment);
-                    track.write(combined);
+                    track.write(stamp(combined));
                 } else {
-                    track.write(segment);
+                    track.write(stamp(segment));
                 }
             } else {
-                track.write(segment);
+                track.write(stamp(segment));
             }
         }
 

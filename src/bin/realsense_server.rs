@@ -20,10 +20,22 @@
 //! - NVIDIA GPU with NVENC (RTX 30+ for AV1)
 
 use anyhow::Result;
+use std::time::{SystemTime, UNIX_EPOCH};
 use xoq::cmaf::{parse_av1_frame, Av1CmafMuxer, CmafConfig};
 use xoq::nvenc_av1::NvencAv1Encoder;
 use xoq::realsense::RealSenseCamera;
 use xoq::MoqBuilder;
+
+fn stamp(data: Vec<u8>) -> Vec<u8> {
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let mut out = Vec::with_capacity(8 + data.len());
+    out.extend_from_slice(&ms.to_le_bytes());
+    out.extend_from_slice(&data);
+    out
+}
 
 // ============================================================================
 // Depth → P010 conversion (10-bit)
@@ -145,7 +157,7 @@ struct Args {
 fn parse_args() -> Args {
     let args: Vec<String> = std::env::args().collect();
     let mut result = Args {
-        relay: "https://cdn.moq.dev".to_string(),
+        relay: "https://cdn.1ms.ai".to_string(),
         path: "anon/realsense".to_string(),
         serial: None,
         width: 640,
@@ -215,7 +227,7 @@ fn print_usage() {
     println!("Usage: realsense_server [options]");
     println!();
     println!("Options:");
-    println!("  --relay <url>           MoQ relay URL (default: https://cdn.moq.dev)");
+    println!("  --relay <url>           MoQ relay URL (default: https://cdn.1ms.ai)");
     println!("  --path <path>           MoQ broadcast path (default: anon/realsense)");
     println!("  --width <px>            Resolution width (default: 640)");
     println!("  --height <px>           Resolution height (default: 480)");
@@ -434,7 +446,7 @@ async fn main() -> Result<()> {
                 if let Some(ref seq_hdr) = parsed.sequence_header {
                     let init =
                         color_muxer.create_init_segment(seq_hdr, frames.width, frames.height);
-                    video_track.write(init.clone());
+                    video_track.write(stamp(init.clone()));
                     color_init_segment = Some(init);
                     tracing::info!("Sent AV1 CMAF init segment (color)");
                 }
@@ -451,12 +463,12 @@ async fn main() -> Result<()> {
                     if let Some(ref init) = color_init_segment {
                         let mut combined = init.clone();
                         combined.extend_from_slice(&segment);
-                        video_track.write(combined);
+                        video_track.write(stamp(combined));
                     } else {
-                        video_track.write(segment);
+                        video_track.write(stamp(segment));
                     }
                 } else {
-                    video_track.write(segment);
+                    video_track.write(stamp(segment));
                 }
             }
 
@@ -476,7 +488,7 @@ async fn main() -> Result<()> {
                 if let Some(ref seq_hdr) = depth_parsed.sequence_header {
                     let init =
                         depth_muxer.create_init_segment(seq_hdr, frames.width, frames.height);
-                    depth_track.write(init.clone());
+                    depth_track.write(stamp(init.clone()));
                     depth_init_segment = Some(init);
                     tracing::info!("Sent AV1 CMAF init segment (depth, 10-bit)");
                 }
@@ -493,12 +505,12 @@ async fn main() -> Result<()> {
                     if let Some(ref init) = depth_init_segment {
                         let mut combined = init.clone();
                         combined.extend_from_slice(&segment);
-                        depth_track.write(combined);
+                        depth_track.write(stamp(combined));
                     } else {
-                        depth_track.write(segment);
+                        depth_track.write(stamp(segment));
                     }
                 } else {
-                    depth_track.write(segment);
+                    depth_track.write(stamp(segment));
                 }
             }
 

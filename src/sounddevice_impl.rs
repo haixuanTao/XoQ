@@ -64,7 +64,7 @@ impl AudioStreamBuilder {
         // Auto-detect transport: "/" in source → MoQ, else → iroh
         let transport = if source.contains('/') {
             Transport::Moq {
-                relay: "https://cdn.moq.dev".to_string(),
+                relay: "https://cdn.1ms.ai".to_string(),
                 token: None,
                 insecure: false,
             }
