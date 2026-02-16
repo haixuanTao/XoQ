@@ -44,6 +44,7 @@
     }
     .top-bar-config.open { display: flex; }
     .settings-toggle {
+      margin-left: auto;
       background: #2a2a4a;
       color: #aaa;
       border: 1px solid #444;
@@ -90,6 +91,9 @@
     #audioBtn.active { background: #a855f7; color: #fff; border-color: #a855f7; }
     #audioBtn:hover:not(:disabled) { background: #444; }
     #audioBtn.active:hover:not(:disabled) { background: #9333ea; }
+    .ping-good { color: #2ed573; }
+    .ping-warn { color: #ffa502; }
+    .ping-bad  { color: #ff4757; }
 
     /* Main layout */
     .main {
@@ -396,6 +400,7 @@
       <button id="audioBtn" disabled title="Toggle audio playback">&#128263; Audio</button>
       <span id="statusText" style="color:#888; font-size:0.8rem;">Idle</span>
       <span id="viewerCount" style="color:#888; font-size:0.8rem; margin-left:0.25rem;">0 viewers</span>
+      <span style="font-size:0.8rem; margin-left:0.25rem;" title="Video stream latency and FPS"><span id="streamPing" style="color:#555; display:inline-block; width:5.5em; text-align:right;">--</span> <span id="streamFps" style="color:#555; display:inline-block; width:3.5em; text-align:right;">--</span></span>
       <button id="settingsToggle" class="settings-toggle" aria-label="Settings">&#9881;</button>
     </div>
     <div class="top-bar-config" id="topBarConfig">
@@ -550,8 +555,8 @@
     const certHashInput = document.getElementById("certHash");
 
     relayInput.value     = ls("relay", "https://cdn.1ms.ai");
-    leftPathInput.value  = params.has("left") ? (params.get("left") || "") : (params.get("path") || localStorage.getItem(LS_PREFIX + "left") || "anon/xoq-can-can0/state");
-    rightPathInput.value = ls("right", "anon/xoq-can-can1/state");
+    leftPathInput.value  = params.has("left") ? (params.get("left") || "") : (params.get("path") || localStorage.getItem(LS_PREFIX + "left") || "");
+    rightPathInput.value = ls("right", "");
     depthPathInput.value = ls("depth", "anon/realsense");
     depth2PathInput.value = ls("depth2", "");
     certHashInput.value  = ls("certHash", "");
@@ -976,6 +981,20 @@
       return data.subarray(i + 8, i + sz);
     }
 
+    function stripTimestamp(bytes) {
+      if (bytes.length < 8) return bytes;
+      const lo = bytes[0]|(bytes[1]<<8)|(bytes[2]<<16)|(bytes[3]<<24);
+      const hi = bytes[4]|(bytes[5]<<8)|(bytes[6]<<16)|(bytes[7]<<24);
+      const ms = (hi >>> 0) * 4294967296 + (lo >>> 0);
+      if (ms > 1700000000000 && ms < Date.now() + 60000) {
+        latencyMs = Date.now() - ms;
+        latencyLastUpdate = Date.now();
+        latencySum += latencyMs;
+        latencySamples++;
+      }
+      return bytes.subarray(8);
+    }
+
     // Extract av1C box content (raw AV1CodecConfigurationRecord, without box header)
     function extractAv1C(data) {
       for (let i = 0; i < data.length - 11; i++) {
@@ -1224,6 +1243,15 @@
     const cam1 = { conn: null, colorPlayer: null, depthDecoder: null, running: false };
     const cam2 = { conn: null, colorPlayer: null, depthDecoder: null, running: false };
 
+    let latencyMs = null;
+    let latencyLastUpdate = 0;
+    let latencySum = 0;
+    let latencySamples = 0;
+    let latencyDisplay = null;
+    let videoFpsCount = 0;
+    let videoFpsValue = null;
+    let videoFpsLastTime = performance.now();
+
     // ─── RealSense connection (via @moq/lite — supports WebSocket fallback) ─────────
     function withTimeout(promise, ms) {
       return Promise.race([
@@ -1257,12 +1285,12 @@
           while (cam.running) {
             const frame = await withTimeout(group.readFrame(), STALE_MS);
             if (!frame) break;
-            handler(new Uint8Array(frame));
+            handler(stripTimestamp(new Uint8Array(frame)));
           }
         }
       }
 
-      const promises = [readTrack(videoTrack, d => cam.colorPlayer.onData(d), 'video')];
+      const promises = [readTrack(videoTrack, d => { videoFpsCount++; cam.colorPlayer.onData(d); }, 'video')];
 
       if (HAS_WEBCODECS) {
         const depthTrack = broadcast.subscribe("depth", 0);
@@ -2031,6 +2059,34 @@
 
       document.getElementById("lastUpdate").textContent =
         new Date().toLocaleTimeString().split(" ")[0];
+
+      // Update stream stats (ping + fps) — refresh once per second
+      const vfpsNow = performance.now();
+      if (vfpsNow - videoFpsLastTime >= 1000) {
+        videoFpsValue = videoFpsCount;
+        videoFpsCount = 0;
+        latencyDisplay = latencySamples > 0 ? Math.round(latencySum / latencySamples) : null;
+        latencySum = 0;
+        latencySamples = 0;
+        videoFpsLastTime = vfpsNow;
+
+        const pingEl = document.getElementById('streamPing');
+        const fpsEl = document.getElementById('streamFps');
+        const hasLatency = latencyDisplay !== null && Date.now() - latencyLastUpdate <= 5000;
+        if (hasLatency) {
+          const v = Math.max(0, latencyDisplay);
+          pingEl.textContent = 'ping ' + v + 'ms';
+          pingEl.style.color = v < 50 ? '#2ed573' : v < 150 ? '#ffa502' : '#ff4757';
+        } else {
+          pingEl.textContent = '--'; pingEl.style.color = '#555';
+        }
+        if (videoFpsValue !== null) {
+          fpsEl.textContent = videoFpsValue + ' fps';
+          fpsEl.style.color = '#aaa';
+        } else {
+          fpsEl.textContent = '--'; fpsEl.style.color = '#555';
+        }
+      }
     }
 
     // ─── Resize handler ───────────────────────────────────
@@ -2257,6 +2313,13 @@
       disconnectRealSense();
       disconnectChat();
       disconnectAudio();
+      latencyMs = null;
+      latencyLastUpdate = 0;
+      latencySum = 0;
+      latencySamples = 0;
+      latencyDisplay = null;
+      videoFpsCount = 0;
+      videoFpsValue = null;
       audioBtn.disabled = true;
       for (const conn of connections) { try { conn.close(); } catch (e) {} }
       connections = [];

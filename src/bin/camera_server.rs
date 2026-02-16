@@ -21,11 +21,14 @@ use tokio::task::JoinSet;
 use xoq::iroh::IrohServerBuilder;
 use xoq::MoqBuilder;
 
-fn stamp(data: Vec<u8>) -> Vec<u8> {
-    let ms = SystemTime::now()
+fn now_ms() -> u64 {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
-        .as_millis() as u64;
+        .as_millis() as u64
+}
+
+fn stamp(data: Vec<u8>, ms: u64) -> Vec<u8> {
     let mut out = Vec::with_capacity(8 + data.len());
     out.extend_from_slice(&ms.to_le_bytes());
     out.extend_from_slice(&data);
@@ -446,6 +449,7 @@ async fn run_camera_server_moq(config: &CameraConfig, moq_path: &str) -> Result<
             let jpeg = frame.to_jpeg(quality)?;
             (jpeg, frame.width, frame.height, frame.timestamp_us)
         };
+        let wall_ms = now_ms();
 
         // MoQ frame format: width(4) + height(4) + timestamp(4) + JPEG data
         let mut buf = Vec::with_capacity(12 + jpeg.len());
@@ -454,7 +458,7 @@ async fn run_camera_server_moq(config: &CameraConfig, moq_path: &str) -> Result<
         buf.extend_from_slice(&(timestamp_us as u32).to_le_bytes());
         buf.extend_from_slice(&jpeg);
 
-        track.write(stamp(buf));
+        track.write(stamp(buf, wall_ms));
 
         frame_count += 1;
     }
@@ -518,12 +522,13 @@ async fn run_camera_server_moq_h264_vtenc(config: &CameraConfig, moq_path: &str)
             let pixel_buffer = cam.capture_pixel_buffer()?;
             encoder.encode_pixel_buffer_nals(pixel_buffer.as_ptr(), pixel_buffer.timestamp_us)?
         };
+        let wall_ms = now_ms();
 
         // On first keyframe with SPS/PPS: create and send init segment
         if init_segment.is_none() {
             if let (Some(ref sps), Some(ref pps)) = (&encoded.sps, &encoded.pps) {
                 let init = muxer.create_init_segment(sps, pps, actual_width, actual_height);
-                track.write(stamp(init.clone()));
+                track.write(stamp(init.clone(), wall_ms));
                 init_segment = Some(init);
                 tracing::info!("[cam{}] Sent CMAF init segment", cam_idx);
             }
@@ -552,12 +557,12 @@ async fn run_camera_server_moq_h264_vtenc(config: &CameraConfig, moq_path: &str)
                 if let Some(ref init) = init_segment {
                     let mut combined = init.clone();
                     combined.extend_from_slice(&segment);
-                    track.write(stamp(combined));
+                    track.write(stamp(combined, wall_ms));
                 } else {
-                    track.write(stamp(segment));
+                    track.write(stamp(segment, wall_ms));
                 }
             } else {
-                track.write(stamp(segment));
+                track.write(stamp(segment, wall_ms));
             }
         }
 
@@ -651,6 +656,7 @@ async fn run_camera_server_moq_h264_nvenc(config: &CameraConfig, moq_path: &str)
                 encoder.encode_rgb(&frame.data, frame.timestamp_us)?
             }
         };
+        let wall_ms = now_ms();
 
         // Parse AV1 output into structured frame info
         let parsed = parse_av1_frame(&av1_data);
@@ -659,7 +665,7 @@ async fn run_camera_server_moq_h264_nvenc(config: &CameraConfig, moq_path: &str)
         if init_segment.is_none() {
             if let Some(ref seq_hdr) = parsed.sequence_header {
                 let init = muxer.create_init_segment(seq_hdr, actual_width, actual_height);
-                track.write(stamp(init.clone()));
+                track.write(stamp(init.clone(), wall_ms));
                 init_segment = Some(init);
                 tracing::info!("[cam{}] Sent AV1 CMAF init segment", cam_idx);
             }
@@ -678,12 +684,12 @@ async fn run_camera_server_moq_h264_nvenc(config: &CameraConfig, moq_path: &str)
                 if let Some(ref init) = init_segment {
                     let mut combined = init.clone();
                     combined.extend_from_slice(&segment);
-                    track.write(stamp(combined));
+                    track.write(stamp(combined, wall_ms));
                 } else {
-                    track.write(stamp(segment));
+                    track.write(stamp(segment, wall_ms));
                 }
             } else {
-                track.write(stamp(segment));
+                track.write(stamp(segment, wall_ms));
             }
         }
 

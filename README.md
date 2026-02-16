@@ -384,6 +384,54 @@ Clients target macOS, Linux, and Windows. Future: C/C++ bindings via Rust ABI.
 | `realsense`     | Intel RealSense depth camera (Linux server)      |
 | `image`         | Image processing support                         |
 
+### Prerequisites
+
+#### Intel RealSense SDK (for depth cameras)
+
+```bash
+# Add Intel RealSense repo
+sudo mkdir -p /etc/apt/keyrings
+curl -sSf https://librealsense.intel.com/Debian/librealsense.pgp | sudo tee /etc/apt/keyrings/librealsense.pgp > /dev/null
+echo "deb [signed-by=/etc/apt/keyrings/librealsense.pgp] https://librealsense.intel.com/Debian/apt-repo `lsb_release -cs` main" | \
+  sudo tee /etc/apt/sources.list.d/librealsense.list
+sudo apt update
+
+# Install
+sudo apt install librealsense2-dev librealsense2-utils
+```
+
+#### NVIDIA Video Codec SDK (for NVENC AV1/H.264 encoding)
+
+```bash
+sudo apt install nvidia-cuda-toolkit
+```
+
+The NVENC headers are bundled in `packages/nvidia-video-codec-sdk/`. Requires an NVIDIA GPU with NVENC support (GTX 1650+, RTX 20+ for H.264; RTX 30+ for AV1).
+
+#### CAN Bus Setup (Linux, PCAN USB Pro FD)
+
+```bash
+# 1. Stop the can-server first (it holds stale socket handles)
+systemctl --user stop can-server
+
+# 2. Bring all interfaces down
+sudo ip link set can0 down
+sudo ip link set can1 down
+sudo ip link set can2 down
+sudo ip link set can3 down
+
+# 3. Bring them up: CAN FD (1 Mbps nominal, 5 Mbps data) + auto-restart from BUS-OFF
+sudo ip link set can0 up type can bitrate 1000000 dbitrate 5000000 fd on restart-ms 100
+sudo ip link set can1 up type can bitrate 1000000 dbitrate 5000000 fd on restart-ms 100
+sudo ip link set can2 up type can bitrate 1000000 dbitrate 5000000 fd on restart-ms 100
+sudo ip link set can3 up type can bitrate 1000000 dbitrate 5000000 fd on restart-ms 100
+
+# 4. Start the CAN server
+can-server can0:fd can1:fd --moq-relay https://cdn.1ms.ai
+```
+
+> **Important:** Always stop the can-server before reconfiguring interfaces — otherwise it holds stale sockets and writes fail with "No such device or address". The `restart-ms 100` flag is critical for auto-recovery from BUS-OFF state.
+
 ### License
 
 Apache-2.0
