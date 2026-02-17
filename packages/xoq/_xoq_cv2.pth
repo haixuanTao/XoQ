@@ -1,1 +1,0 @@
-import xoq._cv2_hook as _h; _h.install()

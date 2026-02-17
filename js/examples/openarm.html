@@ -621,7 +621,7 @@
     // ─── State (per arm) ─────────────────────────────────
     function makeJointState() {
       return new Array(8).fill(null).map(() => ({
-        angle: 0, velocity: 0, torque: 0, tempMos: 0, tempRotor: 0, updated: false,
+        angle: 0, targetAngle: 0, velocity: 0, torque: 0, tempMos: 0, tempRotor: 0, updated: false,
       }));
     }
     const leftJointState = makeJointState();
@@ -2018,9 +2018,17 @@
         GRIPPER_JOINT_OPEN_M * (motorRad / GRIPPER_MOTOR_OPEN_RAD)));
     }
 
-    // ─── Apply joint angles (both arms) ──────────────────
+    // ─── Apply joint angles (both arms) with lerp smoothing ──
+    const LERP_FACTOR = 0.2;  // per-frame blend toward target (0.2 = smooth, 1.0 = instant)
+    function lerpJointStates(states) {
+      for (const s of states) {
+        s.angle += (s.targetAngle - s.angle) * LERP_FACTOR;
+      }
+    }
     function updateArmPose() {
       if (!robot) return;
+      lerpJointStates(leftJointState);
+      lerpJointStates(rightJointState);
       for (let i = 0; i < 7; i++) {
         if (robot.joints[L_JOINT_NAMES[i]]) robot.joints[L_JOINT_NAMES[i]].setJointValue(leftJointState[i].angle);
         if (robot.joints[R_JOINT_NAMES[i]]) robot.joints[R_JOINT_NAMES[i]].setJointValue(rightJointState[i].angle);
@@ -2195,7 +2203,7 @@
           if (jointIdx < 0) continue;
           const state = parseDamiaoState(parsed.data);
           if (!state) continue;
-          jointState[jointIdx].angle = state.qRad;
+          jointState[jointIdx].targetAngle = state.qRad;
           jointState[jointIdx].velocity = state.vel;
           jointState[jointIdx].torque = state.tau;
           jointState[jointIdx].tempMos = state.tempMos;

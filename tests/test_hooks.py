@@ -30,6 +30,10 @@ def _fresh_import(name):
 # CAN hook tests
 # ---------------------------------------------------------------------------
 
+@pytest.mark.skipif(
+    importlib.util.find_spec("xoq_can") is None,
+    reason="xoq-can not installed",
+)
 class TestCanHook:
     """Test the xoq_can import hook dispatching logic."""
 
@@ -134,6 +138,10 @@ class TestCanHook:
 # Serial hook tests
 # ---------------------------------------------------------------------------
 
+@pytest.mark.skipif(
+    importlib.util.find_spec("xoq_serial") is None,
+    reason="xoq-serial not installed",
+)
 class TestSerialHook:
     """Test the xoq_serial import hook dispatching logic."""
 
@@ -209,6 +217,10 @@ class TestSerialHook:
 # CV2 hook tests (for completeness)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.skipif(
+    importlib.util.find_spec("xoq_cv2") is None,
+    reason="xoq-cv2 not installed",
+)
 class TestCv2Hook:
     """Test the xoq_cv2 import hook dispatching logic."""
 

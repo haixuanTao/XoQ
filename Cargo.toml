@@ -169,6 +169,11 @@ path = "examples/audio_client.rs"
 required-features = ["audio-remote"]
 
 [[bin]]
+name = "fake-can-server"
+path = "src/bin/fake_can_server.rs"
+required-features = ["iroh"]
+
+[[bin]]
 name = "realsense-server"
 path = "src/bin/realsense_server.rs"
 required-features = ["realsense"]

@@ -18,6 +18,38 @@ Robot Hardware          Network              Clients
   XoQ Server                                XoQ Client
 ```
 
+### OpenArm Example
+
+```mermaid
+flowchart TD
+    subgraph leader["OpenArm Linux (leader)"]
+        cam1[RealSense Camera]
+        can1[CAN Bus / Motors]
+    end
+
+    subgraph follower["OpenArm Linux (follower)"]
+        cam2[RealSense Camera]
+        can2[CAN Bus / Motors]
+    end
+
+    relay((MoQ Relay<br/>cdn.1ms.ai))
+
+    cam1 -- "AV1 video + depth (MoQ)" --> relay
+    can1 -- "CAN state (MoQ)" --> relay
+    relay -- "motor commands (MoQ)" --> can1
+
+    cam2 -- "AV1 video + depth (MoQ)" --> relay
+    can2 -- "CAN state (MoQ)" --> relay
+    relay -- "motor commands (MoQ)" --> can2
+
+    relay <-- "WebTransport (MoQ)" --> hf["🤗 HuggingFace Space<br/>openarm.html"]
+    relay <-- "WebTransport (MoQ)" --> browser["Browser Viewer"]
+    relay <-- "QUIC (MoQ)" --> mac["macOS Client"]
+
+    leader <-- "P2P serial (iroh)" --> follower
+    leader <-- "P2P serial (iroh)" --> mac
+```
+
 ## Comparison Table
 
 |                         | XoQ                                 | WebRTC                                      | rosbridge       | gRPC               | ROS 2 (DDS)         |
