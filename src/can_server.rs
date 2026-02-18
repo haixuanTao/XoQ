@@ -14,6 +14,30 @@ use crate::can::{CanFdFrame, CanFrame};
 use crate::can_types::{wire, AnyCanFrame};
 use crate::iroh::{IrohConnection, IrohServerBuilder};
 
+/// Read the CAN bus error state by parsing sysfs or `ip -details link show`.
+/// Returns e.g. "ERROR-ACTIVE", "ERROR-PASSIVE", "BUS-OFF", or None if unknown.
+fn can_bus_state(interface: &str) -> Option<String> {
+    if let Ok(s) = std::fs::read_to_string(format!("/sys/class/net/{}/can_state", interface)) {
+        return Some(s.trim().to_uppercase());
+    }
+    let output = std::process::Command::new("ip")
+        .args(["-details", "link", "show", interface])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("can ") {
+            if let Some(pos) = rest.find("state ") {
+                let after = &rest[pos + 6..];
+                let state = after.split_whitespace().next()?;
+                return Some(state.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// A server that bridges a local CAN interface to remote clients over iroh P2P.
 /// Optionally broadcasts CAN state via MoQ for browser monitoring.
 pub struct CanServer {
@@ -285,6 +309,24 @@ impl CanServer {
         moq_path: Option<&str>,
         moq_insecure: bool,
     ) -> Result<Self> {
+        // Check CAN bus state on startup — bail early if not healthy
+        match can_bus_state(interface) {
+            Some(ref state) if state == "ERROR-ACTIVE" => {
+                tracing::info!("[{}] CAN bus state: {}", interface, state);
+            }
+            Some(ref state) => {
+                anyhow::bail!(
+                    "[{}] CAN bus is {} — interface may be down or motors unpowered. \
+                     Fix: sudo ip link set {} down && sudo ip link set {} up type can bitrate 1000000 dbitrate 5000000 fd on restart-ms 100",
+                    interface, state, interface, interface,
+                );
+            }
+            None => tracing::warn!(
+                "[{}] Could not read CAN bus state (will continue anyway)",
+                interface
+            ),
+        }
+
         let (can_read_tx, can_read_rx) = tokio::sync::mpsc::channel::<AnyCanFrame>(16);
         let (can_write_tx, can_write_rx) = tokio::sync::mpsc::channel::<AnyCanFrame>(1);
         let write_count = Arc::new(AtomicU64::new(0));
