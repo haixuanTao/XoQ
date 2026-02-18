@@ -46,7 +46,6 @@ pub struct CanServer {
     can_write_tx: tokio::sync::mpsc::Sender<AnyCanFrame>,
     can_read_rx: std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<AnyCanFrame>>>,
     endpoint: Arc<crate::iroh::IrohServer>,
-    moq_tx: Option<tokio::sync::mpsc::Sender<AnyCanFrame>>,
     moq_read_rx: std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<AnyCanFrame>>>,
     moq_relay: Option<String>,
     moq_path: String,
@@ -57,6 +56,7 @@ pub struct CanServer {
 fn can_reader_thread_fd(
     socket: Arc<socketcan::CanFdSocket>,
     tx: tokio::sync::mpsc::Sender<AnyCanFrame>,
+    moq_tx: Option<tokio::sync::mpsc::Sender<AnyCanFrame>>,
     write_count: Arc<AtomicU64>,
 ) {
     let mut last_read = Instant::now();
@@ -101,6 +101,9 @@ fn can_reader_thread_fd(
                         continue;
                     }
                 };
+                if let Some(ref moq) = moq_tx {
+                    let _ = moq.try_send(any_frame.clone());
+                }
                 if tx.blocking_send(any_frame).is_err() {
                     break;
                 }
@@ -125,6 +128,7 @@ fn can_reader_thread_fd(
 fn can_reader_thread_std(
     socket: Arc<socketcan::CanSocket>,
     tx: tokio::sync::mpsc::Sender<AnyCanFrame>,
+    moq_tx: Option<tokio::sync::mpsc::Sender<AnyCanFrame>>,
     write_count: Arc<AtomicU64>,
 ) {
     let mut last_read = Instant::now();
@@ -157,6 +161,9 @@ fn can_reader_thread_std(
                         continue;
                     }
                 };
+                if let Some(ref moq) = moq_tx {
+                    let _ = moq.try_send(any_frame.clone());
+                }
                 if tx.blocking_send(any_frame).is_err() {
                     break;
                 }
@@ -350,9 +357,12 @@ impl CanServer {
 
             let socket_reader = Arc::clone(&socket);
             let wc_reader = Arc::clone(&write_count);
+            let moq_reader_tx = moq_tx.clone();
             std::thread::Builder::new()
                 .name(format!("can-read-{}", interface))
-                .spawn(move || can_reader_thread_fd(socket_reader, can_read_tx, wc_reader))?;
+                .spawn(move || {
+                    can_reader_thread_fd(socket_reader, can_read_tx, moq_reader_tx, wc_reader)
+                })?;
 
             let socket_writer = Arc::clone(&socket);
             let wc_writer = Arc::clone(&write_count);
@@ -371,9 +381,12 @@ impl CanServer {
 
             let socket_reader = Arc::clone(&socket);
             let wc_reader = Arc::clone(&write_count);
+            let moq_reader_tx = moq_tx.clone();
             std::thread::Builder::new()
                 .name(format!("can-read-{}", interface))
-                .spawn(move || can_reader_thread_std(socket_reader, can_read_tx, wc_reader))?;
+                .spawn(move || {
+                    can_reader_thread_std(socket_reader, can_read_tx, moq_reader_tx, wc_reader)
+                })?;
 
             let socket_writer = Arc::clone(&socket);
             let wc_writer = Arc::clone(&write_count);
@@ -399,7 +412,6 @@ impl CanServer {
             can_write_tx,
             can_read_rx: std::sync::Mutex::new(Some(can_read_rx)),
             endpoint: Arc::new(server),
-            moq_tx,
             moq_read_rx: std::sync::Mutex::new(moq_rx),
             moq_relay: moq_relay.map(|s| s.to_string()),
             moq_path,
@@ -486,11 +498,9 @@ impl CanServer {
             let cancel = CancellationToken::new();
             let cancel_clone = cancel.clone();
             let write_tx = self.can_write_tx.clone();
-            let moq_tx = self.moq_tx.clone();
 
             let handle = tokio::spawn(async move {
-                let (result, rx) =
-                    handle_connection(conn, rx, write_tx, moq_tx, cancel_clone).await;
+                let (result, rx) = handle_connection(conn, rx, write_tx, cancel_clone).await;
                 if let Err(e) = &result {
                     tracing::error!("Connection error: {}", e);
                 }
@@ -525,10 +535,9 @@ impl CanServer {
                 .expect("CAN read receiver should be available");
 
             let write_tx = self.can_write_tx.clone();
-            let moq_tx = self.moq_tx.clone();
             let cancel = CancellationToken::new();
 
-            let (result, rx) = handle_connection(conn, rx, write_tx, moq_tx, cancel).await;
+            let (result, rx) = handle_connection(conn, rx, write_tx, cancel).await;
 
             self.can_read_rx.lock().unwrap().replace(rx);
 
@@ -548,7 +557,6 @@ async fn handle_connection(
     conn: IrohConnection,
     mut can_read_rx: tokio::sync::mpsc::Receiver<AnyCanFrame>,
     can_write_tx: tokio::sync::mpsc::Sender<AnyCanFrame>,
-    moq_tx: Option<tokio::sync::mpsc::Sender<AnyCanFrame>>,
     cancel: CancellationToken,
 ) -> (Result<()>, tokio::sync::mpsc::Receiver<AnyCanFrame>) {
     let stream = tokio::select! {
@@ -600,18 +608,12 @@ async fn handle_connection(
                 }
             };
 
-            if let Some(ref moq_tx) = moq_tx {
-                let _ = moq_tx.try_send(first.clone());
-            }
             batch_buf.extend_from_slice(&wire::encode(&first));
 
             // Greedily collect more ready frames (up to 8 total)
             for _ in 1..8 {
                 match can_read_rx.try_recv() {
                     Ok(frame) => {
-                        if let Some(ref moq_tx) = moq_tx {
-                            let _ = moq_tx.try_send(frame.clone());
-                        }
                         batch_buf.extend_from_slice(&wire::encode(&frame));
                     }
                     Err(_) => break,
