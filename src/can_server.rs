@@ -393,6 +393,21 @@ impl CanServer {
             None
         };
 
+        // Spawn MoQ command subscriber if configured
+        let _moq_cmd_handle = if self.moq_relay.is_some() {
+            let relay = self.moq_relay.clone().unwrap();
+            let path = self.moq_path.clone();
+            let insecure = self.moq_insecure;
+            let write_tx = self.can_write_tx.clone();
+            Some(tokio::spawn(async move {
+                if let Err(e) = moq_command_subscriber(&relay, &path, insecure, write_tx).await {
+                    tracing::error!("MoQ command subscriber error: {}", e);
+                }
+            }))
+        } else {
+            None
+        };
+
         let mut current_conn: Option<(
             CancellationToken,
             tokio::task::JoinHandle<tokio::sync::mpsc::Receiver<AnyCanFrame>>,
@@ -721,4 +736,129 @@ async fn moq_state_publisher(
         while rx.try_recv().is_ok() {}
     }
     Ok(())
+}
+
+/// Subscribe to MoQ commands and forward them to the CAN writer thread.
+/// Uses `try_send()` so iroh commands always have priority — MoQ commands are
+/// dropped (with a log) if the channel is full (iroh command pending).
+/// Automatically reconnects on disconnect.
+async fn moq_command_subscriber(
+    relay: &str,
+    path: &str,
+    insecure: bool,
+    can_write_tx: tokio::sync::mpsc::Sender<AnyCanFrame>,
+) -> Result<()> {
+    use crate::moq::MoqBuilder;
+
+    let mut builder = MoqBuilder::new().relay(relay);
+    if insecure {
+        builder = builder.disable_tls_verify();
+    }
+
+    let cmd_path = format!("{}/commands", path);
+
+    loop {
+        tracing::info!("MoQ command subscriber connecting on {}...", cmd_path);
+
+        let cmd_sub = match builder.clone().path(&cmd_path).connect_subscriber().await {
+            Ok(sub) => sub,
+            Err(e) => {
+                tracing::warn!("MoQ command subscriber connect error: {}, retrying...", e);
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+        };
+
+        let (cmd_reader, cmd_sub) = match tokio::time::timeout(Duration::from_secs(5), async {
+            let mut sub = cmd_sub;
+            let result = sub.subscribe_track("can").await;
+            (result, sub)
+        })
+        .await
+        {
+            Ok((Ok(Some(reader)), sub)) => {
+                tracing::info!("MoQ command subscriber connected on {}", cmd_path);
+                (reader, sub)
+            }
+            Ok((Ok(None), sub)) => {
+                tracing::debug!("Command broadcast ended, retrying...");
+                drop(sub);
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+            Ok((Err(e), sub)) => {
+                tracing::debug!("Command subscribe error: {}, retrying...", e);
+                drop(sub);
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+            Err(_) => {
+                tracing::debug!("No command publisher yet, retrying...");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+        };
+        let mut cmd_reader = cmd_reader;
+        let _cmd_sub = cmd_sub; // keep alive while reading
+
+        let mut pending = Vec::new();
+        loop {
+            match cmd_reader.read().await {
+                Ok(Some(data)) => {
+                    pending.extend_from_slice(&data);
+
+                    while pending.len() >= 6 {
+                        match wire::encoded_size(&pending) {
+                            Ok(frame_size) if pending.len() >= frame_size => {
+                                match wire::decode(&pending) {
+                                    Ok((frame, consumed)) => {
+                                        match can_write_tx.try_send(frame) {
+                                            Ok(_) => {
+                                                tracing::debug!("MoQ command forwarded to CAN");
+                                            }
+                                            Err(tokio::sync::mpsc::error::TrySendError::Full(
+                                                _,
+                                            )) => {
+                                                tracing::debug!(
+                                                    "MoQ command dropped (iroh has priority)"
+                                                );
+                                            }
+                                            Err(
+                                                tokio::sync::mpsc::error::TrySendError::Closed(_),
+                                            ) => {
+                                                tracing::error!("CAN writer thread died");
+                                                return Ok(());
+                                            }
+                                        }
+                                        pending.drain(..consumed);
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("MoQ command decode error: {}", e);
+                                        pending.clear();
+                                        break;
+                                    }
+                                }
+                            }
+                            Ok(_) => break,
+                            Err(e) => {
+                                tracing::error!("MoQ command frame size error: {}", e);
+                                pending.clear();
+                                break;
+                            }
+                        }
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!("MoQ command stream ended, will reconnect...");
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!("MoQ command read error: {}, will reconnect...", e);
+                    break;
+                }
+            }
+        }
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 }
