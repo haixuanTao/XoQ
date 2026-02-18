@@ -398,6 +398,7 @@
       <button id="stopBtn" disabled>Disconnect</button>
       <button id="queryBtn" disabled>Query Motors</button>
       <button id="audioBtn" disabled title="Toggle audio playback">&#128263; Audio</button>
+      <span id="audioLevel" style="color:#555; font-size:0.65rem; font-family:monospace; letter-spacing:-1px; white-space:nowrap;" title="Audio level (RMS)">--</span>
       <span id="statusText" style="color:#888; font-size:0.8rem;">Idle</span>
       <span id="viewerCount" style="color:#888; font-size:0.8rem; margin-left:0.25rem;">0 viewers</span>
       <span style="font-size:0.8rem; margin-left:0.25rem;" title="Video stream latency and FPS"><span id="streamPing" style="color:#555; display:inline-block; width:5.5em; text-align:right;">--</span> <span id="streamFps" style="color:#555; display:inline-block; width:3.5em; text-align:right;">--</span></span>
@@ -1696,6 +1697,24 @@
           const pcmData = bytes.subarray(20, 20 + header.dataLength);
           playAudioChunk(header, pcmData);
           audioState.framesReceived++;
+
+          // Update audio level indicator
+          const f32 = pcmToFloat32(pcmData, header.sampleFormat, header.frameCount, header.channels);
+          let sum = 0, peak = 0;
+          for (let s = 0; s < f32.length; s++) {
+            sum += f32[s] * f32[s];
+            const a = Math.abs(f32[s]);
+            if (a > peak) peak = a;
+          }
+          const rms = Math.sqrt(sum / f32.length);
+          const rmsDb = rms > 0 ? Math.max(-60, 20 * Math.log10(rms)) : -60;
+          const barLen = Math.round(((rmsDb + 60) / 60) * 6); // 0-6 bars
+          const bar = '\u2588'.repeat(Math.max(0, barLen)) + '\u2591'.repeat(6 - Math.max(0, barLen));
+          const levelEl = document.getElementById('audioLevel');
+          if (levelEl) {
+            levelEl.textContent = bar;
+            levelEl.style.color = rmsDb > -10 ? '#f44' : rmsDb > -30 ? '#4f4' : '#555';
+          }
         }
       }
     }
@@ -1730,6 +1749,8 @@
       if (audioState.audioCtx) { try { audioState.audioCtx.close(); } catch {} audioState.audioCtx = null; }
       audioState.nextPlayTime = 0;
       audioState.framesReceived = 0;
+      const levelEl = document.getElementById('audioLevel');
+      if (levelEl) { levelEl.textContent = '--'; levelEl.style.color = '#555'; }
     }
 
     // Audio toggle button
@@ -1802,8 +1823,7 @@
     scene.add(axesHelper);
 
     // ─── Point Cloud Geometry ─────────────────────────────
-    const PC_W = 640, PC_H = 480;
-    const maxPts = PC_W * PC_H;
+    const maxPts = 1280 * 720; // supports up to 720p depth
     const posArr = new Float32Array(maxPts * 3);
     const colArr = new Float32Array(maxPts * 3);
 
@@ -1855,8 +1875,8 @@
       const DEPTH_SHIFT_F = 0;
       const nearM = 0.3;
       const farM  = (1023 << DEPTH_SHIFT_F) * 0.001;
-      const nw = nearM * (PC_W / 2) / fx, nh = nearM * (PC_H / 2) / fy;
-      const fw = farM  * (PC_W / 2) / fx, fh = farM  * (PC_H / 2) / fy;
+      const nw = nearM * 320 / fx, nh = nearM * 240 / fy;
+      const fw = farM  * 320 / fx, fh = farM  * 240 / fy;
       const verts = new Float32Array([
         -nw,  nh, nearM,   nw,  nh, nearM,   nw, -nh, nearM,  -nw, -nh, nearM,
         -fw,  fh, farM,    fw,  fh, farM,    fw, -fh, farM,   -fw, -fh, farM,
@@ -1878,31 +1898,37 @@
 
     // Offscreen canvases for pixel extraction
     const colorCanvas = document.createElement('canvas');
-    colorCanvas.width = PC_W; colorCanvas.height = PC_H;
+    colorCanvas.width = 640; colorCanvas.height = 480;
     const colorCtx = colorCanvas.getContext('2d', { willReadFrequently: true });
 
     // Offscreen canvas for cam2 color extraction
     const colorCanvas2 = document.createElement('canvas');
-    colorCanvas2.width = PC_W; colorCanvas2.height = PC_H;
+    colorCanvas2.width = 640; colorCanvas2.height = 480;
     const colorCtx2 = colorCanvas2.getContext('2d', { willReadFrequently: true });
 
     function updatePointCloudGeneric(videoEl, decoder, cCtx, pArr, cArr, geom) {
       if (!videoEl.videoWidth) return;
       if (!decoder || !decoder.latestY) return;
 
+      const dW = decoder.width, dH = decoder.height;
       const step = 1;
-      const fx = 604.2, fy = 603.5;  // RealSense D435 intrinsics
-      const cx = 322.7, cy = 252.7;
+      // Scale intrinsics from 640x480 baseline to actual depth resolution
+      const fx = 604.2 * dW / 640, fy = 603.5 * dH / 480;
+      const cx = 322.7 * dW / 640, cy = 252.7 * dH / 480;
       const DEPTH_SHIFT = 0;
 
-      cCtx.drawImage(videoEl, 0, 0, PC_W, PC_H);
+      // Resize canvas to match depth resolution
+      if (cCtx.canvas.width !== dW || cCtx.canvas.height !== dH) {
+        cCtx.canvas.width = dW; cCtx.canvas.height = dH;
+      }
+      cCtx.drawImage(videoEl, 0, 0, dW, dH);
       const dY = decoder.latestY;
-      const cPx = cCtx.getImageData(0, 0, PC_W, PC_H).data;
+      const cPx = cCtx.getImageData(0, 0, dW, dH).data;
 
       let n = 0;
-      for (let v = 0; v < PC_H; v += step) {
-        for (let u = 0; u < PC_W; u += step) {
-          const dIdx = v * PC_W + u;
+      for (let v = 0; v < dH; v += step) {
+        for (let u = 0; u < dW; u += step) {
+          const dIdx = v * dW + u;
           const gray = dY[dIdx];
           if (gray < 2) continue;
 
@@ -1912,7 +1938,7 @@
           pArr[i3 + 1] = -(v - cy) * depth / fy;
           pArr[i3 + 2] = depth;
 
-          const cIdx = (v * PC_W + u) * 4;
+          const cIdx = (v * dW + u) * 4;
           cArr[i3]     = cPx[cIdx] / 255;
           cArr[i3 + 1] = cPx[cIdx + 1] / 255;
           cArr[i3 + 2] = cPx[cIdx + 2] / 255;
@@ -2082,9 +2108,10 @@
         const fpsEl = document.getElementById('streamFps');
         const hasLatency = latencyDisplay !== null && Date.now() - latencyLastUpdate <= 5000;
         if (hasLatency) {
-          const v = Math.max(0, latencyDisplay);
-          pingEl.textContent = 'ping ' + v + 'ms';
-          pingEl.style.color = v < 50 ? '#2ed573' : v < 150 ? '#ffa502' : '#ff4757';
+          const v = latencyDisplay;
+          const abs = Math.abs(v);
+          pingEl.textContent = (v < 0 ? '~' : '') + 'ping ' + abs + 'ms';
+          pingEl.style.color = abs < 50 ? '#2ed573' : abs < 150 ? '#ffa502' : '#ff4757';
         } else {
           pingEl.textContent = '--'; pingEl.style.color = '#555';
         }
