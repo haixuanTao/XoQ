@@ -59,12 +59,18 @@ PACKAGES=(
     build-essential
     pkg-config
     libssl-dev
-    libasound2-dev
     libv4l-dev
     can-utils
     clang
     curl
 )
+
+# ALSA dev package: renamed from libasound2-dev to libasound-dev in Ubuntu 24.04+
+if apt-cache show libasound-dev &>/dev/null 2>&1; then
+    PACKAGES+=(libasound-dev)
+else
+    PACKAGES+=(libasound2-dev)
+fi
 
 MISSING=()
 for pkg in "${PACKAGES[@]}"; do
@@ -82,7 +88,32 @@ else
 fi
 
 # ============================================================================
-# 2. CUDA toolkit (provides nvcc)
+# 2. CAN sudoers (passwordless ip link set for CAN interfaces)
+# ============================================================================
+section "CAN sudoers"
+
+# Only configure if CAN interfaces are detected
+CAN_FOUND=false
+for iface in /sys/class/net/can*; do
+    [ -e "$iface" ] && CAN_FOUND=true && break
+done
+
+if [ "$CAN_FOUND" = true ]; then
+    SUDOERS_FILE="/etc/sudoers.d/xoq-can"
+    if [ -f "$SUDOERS_FILE" ]; then
+        echo "CAN sudoers already configured."
+    else
+        echo "Adding passwordless sudo for 'ip link set can*'..."
+        echo "${SUDO_USER:-$USER} ALL=(root) NOPASSWD: /usr/sbin/ip link set can*" | sudo tee "$SUDOERS_FILE" >/dev/null
+        sudo chmod 0440 "$SUDOERS_FILE"
+        echo "CAN sudoers configured for ${SUDO_USER:-$USER}."
+    fi
+else
+    echo "No CAN interfaces detected, skipping."
+fi
+
+# ============================================================================
+# 3. CUDA toolkit (provides nvcc)
 # ============================================================================
 section "CUDA toolkit"
 
@@ -110,7 +141,7 @@ if [ "$NVENC_FOUND" = false ]; then
 fi
 
 # ============================================================================
-# 3. Intel RealSense SDK
+# 4. Intel RealSense SDK
 # ============================================================================
 section "Intel RealSense SDK"
 
@@ -136,7 +167,7 @@ else
 fi
 
 # ============================================================================
-# 4. Rust (via rustup)
+# 5. Rust (via rustup)
 # ============================================================================
 section "Rust toolchain"
 
@@ -157,7 +188,7 @@ if ! check_cmd cargo; then
 fi
 
 # ============================================================================
-# 5. Clone repo
+# 6. Clone repo
 # ============================================================================
 if [ "$SKIP_BUILD" = false ]; then
     section "Clone repository"
@@ -171,7 +202,7 @@ if [ "$SKIP_BUILD" = false ]; then
     fi
 
     # ========================================================================
-    # 6. Build
+    # 7. Build
     # ========================================================================
     section "Build"
 
@@ -188,7 +219,7 @@ if [ "$SKIP_BUILD" = false ]; then
     echo "Build succeeded."
 
     # ========================================================================
-    # 7. Verify
+    # 8. Verify
     # ========================================================================
     section "Verify"
 

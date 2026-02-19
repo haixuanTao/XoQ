@@ -14,6 +14,9 @@
 
 set -euo pipefail
 
+# Save original args for re-exec after git pull
+ORIGINAL_ARGS=("$@")
+
 # ============================================================================
 # Platform detection
 # ============================================================================
@@ -102,6 +105,17 @@ if [ -z "${XOQ_MACHINE_ID:-}" ]; then
 fi
 
 # ============================================================================
+# Ensure cargo and CUDA are in PATH
+# ============================================================================
+if [ -f "${HOME}/.cargo/env" ]; then
+    # shellcheck source=/dev/null
+    source "${HOME}/.cargo/env"
+fi
+if [ -d "/usr/local/cuda/bin" ]; then
+    export PATH="/usr/local/cuda/bin:${PATH}"
+fi
+
+# ============================================================================
 # Colors
 # ============================================================================
 RED='\033[0;31m'
@@ -147,11 +161,26 @@ discover_can() {
 
 discover_realsense() {
     local serials=()
+
+    # Method 1: rs-enumerate-devices (if librealsense2-utils is installed)
     if command -v rs-enumerate-devices &>/dev/null; then
         while IFS= read -r serial; do
             serials+=("$serial")
-        done < <(rs-enumerate-devices --compact 2>/dev/null | grep -oE 'Serial Number:[[:space:]]*[0-9]+' | grep -oE '[0-9]+' || true)
+        done < <(rs-enumerate-devices --compact 2>/dev/null | grep -E '^\s+Serial Number' | grep -oE '[0-9]{6,}' || true)
     fi
+
+    # Method 2: fallback to realsense-server binary (it logs connected devices on startup)
+    # Run with a dummy serial so it exits immediately after printing device list
+    if [ ${#serials[@]} -eq 0 ]; then
+        local rs_bin
+        rs_bin=$(find_bin realsense-server)
+        if [ -n "$rs_bin" ]; then
+            while IFS= read -r serial; do
+                serials+=("$serial")
+            done < <(timeout 3 "$rs_bin" --serial 0000000000 2>&1 | grep -oE '\(serial: [0-9]+\)' | grep -oE '[0-9]+' || true)
+        fi
+    fi
+
     echo "${serials[@]}"
 }
 
@@ -175,15 +204,11 @@ discover_v4l2_cameras() {
             continue
         fi
 
-        # Exclude RealSense devices (Intel vendor 8086)
-        local syspath
-        syspath=$(udevadm info -q path -n "$dev" 2>/dev/null || true)
-        if [ -n "$syspath" ]; then
-            local vendor
-            vendor=$(udevadm info -a -p "$syspath" 2>/dev/null | grep -m1 'ATTR{idVendor}' | grep -oP '"\K[^"]+' || true)
-            if [ "$vendor" = "8086" ]; then
-                continue
-            fi
+        # Exclude Intel RealSense devices (vendor 8086)
+        local vendor
+        vendor=$(udevadm info -n "$dev" 2>/dev/null | grep -oP 'ID_VENDOR_ID=\K.*' || true)
+        if [ "$vendor" = "8086" ]; then
+            continue
         fi
 
         cameras+=("$idx")
@@ -232,6 +257,34 @@ do_build() {
     local rs_serials=($2)
     local cam_indices=($3)
     local has_audio="$4"
+
+    # Pull latest changes from git
+    header "Updating Source"
+    if [ -d "${PROJECT_ROOT}/.git" ]; then
+        local current_branch
+        current_branch=$(git -C "${PROJECT_ROOT}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+        local before_hash
+        before_hash=$(git -C "${PROJECT_ROOT}" rev-parse HEAD 2>/dev/null || echo "unknown")
+
+        if [ "$DRY_RUN" = true ]; then
+            info "Would run: git -C ${PROJECT_ROOT} pull --ff-only"
+        else
+            git -C "${PROJECT_ROOT}" pull --ff-only || warn "git pull failed (dirty tree?), building with current code"
+        fi
+
+        local after_hash
+        after_hash=$(git -C "${PROJECT_ROOT}" rev-parse HEAD 2>/dev/null || echo "unknown")
+        if [ "$before_hash" = "$after_hash" ]; then
+            ok "Already up to date (${current_branch} @ ${before_hash:0:8})"
+        else
+            ok "Updated ${current_branch}: ${before_hash:0:8} → ${after_hash:0:8}"
+            # Re-exec with the updated script so new deploy logic takes effect
+            info "Re-executing updated deploy script..."
+            exec bash "${PROJECT_ROOT}/scripts/deploy.sh" "${ORIGINAL_ARGS[@]}"
+        fi
+    else
+        warn "Not a git repository, skipping pull"
+    fi
 
     header "Building Binaries"
 
@@ -412,7 +465,7 @@ EOF
 }
 
 generate_can_template() {
-    cat > "${XOQ_SYSTEMD_DIR}/xoq-can@.service" <<'UNIT'
+    cat > "${XOQ_SYSTEMD_DIR}/xoq-can@.service" <<UNIT
 [Unit]
 Description=XoQ CAN Server (%i)
 PartOf=xoq.target
@@ -421,12 +474,12 @@ StartLimitBurst=10
 
 [Service]
 Type=simple
-EnvironmentFile=%h/.config/xoq/env
 ExecStartPre=-/usr/bin/sudo /usr/sbin/ip link set %i down
 ExecStartPre=/usr/bin/sudo /usr/sbin/ip link set %i up type can bitrate 1000000 dbitrate 5000000 fd on restart-ms 100
-ExecStart=${XOQ_BIN_DIR}/can-server %i:fd --key-dir ${XOQ_KEY_DIR} --moq-relay ${XOQ_RELAY} --moq-path anon/${XOQ_MACHINE_ID}/xoq-can-%i
+ExecStart=${BIN_DIR}/can-server %i:fd --key-dir ${XOQ_KEY_DIR} --moq-relay ${XOQ_RELAY} --moq-path anon/${XOQ_MACHINE_ID}/xoq-can-%i
 Restart=always
 RestartSec=5
+Environment=RUST_LOG=xoq=info,warn
 
 [Install]
 WantedBy=xoq.target
@@ -434,7 +487,7 @@ UNIT
 }
 
 generate_realsense_template() {
-    cat > "${XOQ_SYSTEMD_DIR}/xoq-realsense@.service" <<'UNIT'
+    cat > "${XOQ_SYSTEMD_DIR}/xoq-realsense@.service" <<UNIT
 [Unit]
 Description=XoQ RealSense Server (%i)
 PartOf=xoq.target
@@ -443,10 +496,10 @@ StartLimitBurst=10
 
 [Service]
 Type=simple
-EnvironmentFile=%h/.config/xoq/env
-ExecStart=${XOQ_BIN_DIR}/realsense-server --relay ${XOQ_RELAY} --path anon/${XOQ_MACHINE_ID}/realsense-%i --serial %i
+ExecStart=${BIN_DIR}/realsense-server --relay ${XOQ_RELAY} --path anon/${XOQ_MACHINE_ID}/realsense-%i --serial %i
 Restart=always
 RestartSec=5
+Environment=RUST_LOG=xoq=info,warn
 
 [Install]
 WantedBy=xoq.target
@@ -454,7 +507,7 @@ UNIT
 }
 
 generate_camera_template() {
-    cat > "${XOQ_SYSTEMD_DIR}/xoq-camera@.service" <<'UNIT'
+    cat > "${XOQ_SYSTEMD_DIR}/xoq-camera@.service" <<UNIT
 [Unit]
 Description=XoQ Camera Server (%i)
 PartOf=xoq.target
@@ -463,10 +516,10 @@ StartLimitBurst=10
 
 [Service]
 Type=simple
-EnvironmentFile=%h/.config/xoq/env
-ExecStart=${XOQ_BIN_DIR}/camera-server %i --key-dir ${XOQ_KEY_DIR} --moq anon/${XOQ_MACHINE_ID}/camera-%i --relay ${XOQ_RELAY} --insecure
+ExecStart=${BIN_DIR}/camera-server %i --key-dir ${XOQ_KEY_DIR} --moq anon/${XOQ_MACHINE_ID}/camera-%i --relay ${XOQ_RELAY} --insecure
 Restart=always
 RestartSec=5
+Environment=RUST_LOG=xoq=info,warn
 
 [Install]
 WantedBy=xoq.target
@@ -474,7 +527,7 @@ UNIT
 }
 
 generate_audio_service() {
-    cat > "${XOQ_SYSTEMD_DIR}/xoq-audio.service" <<'UNIT'
+    cat > "${XOQ_SYSTEMD_DIR}/xoq-audio.service" <<UNIT
 [Unit]
 Description=XoQ Audio Server
 PartOf=xoq.target
@@ -483,10 +536,10 @@ StartLimitBurst=10
 
 [Service]
 Type=simple
-EnvironmentFile=%h/.config/xoq/env
-ExecStart=${XOQ_BIN_DIR}/audio-server --identity ${XOQ_KEY_DIR}/.xoq_audio_server_key --moq anon/${XOQ_MACHINE_ID}/audio
+ExecStart=${BIN_DIR}/audio-server --identity ${XOQ_KEY_DIR}/.xoq_audio_server_key --moq anon/${XOQ_MACHINE_ID}/audio
 Restart=always
 RestartSec=5
+Environment=RUST_LOG=xoq=info,warn
 
 [Install]
 WantedBy=xoq.target
@@ -551,13 +604,26 @@ EOF
 # ============================================================================
 # Check CAN sudo access (Linux only)
 # ============================================================================
-check_can_sudo() {
-    if ! sudo -n ip link show &>/dev/null 2>&1; then
-        warn "CAN interfaces require passwordless sudo for 'ip link set'."
-        warn "Run: echo '${USER} ALL=(root) NOPASSWD: /usr/sbin/ip link set can*' | sudo tee /etc/sudoers.d/xoq-can"
+setup_can_sudo() {
+    # Already have passwordless sudo?
+    if sudo -n ip link show &>/dev/null 2>&1; then
+        return 0
+    fi
+
+    # No passwordless sudo — set up the sudoers entry
+    local sudoers_file="/etc/sudoers.d/xoq-can"
+    info "Setting up passwordless sudo for CAN interfaces..."
+    info "This requires your password once (creates ${sudoers_file})"
+    echo "${USER} ALL=(root) NOPASSWD: /usr/sbin/ip link set can*" | sudo tee "$sudoers_file" >/dev/null && sudo chmod 0440 "$sudoers_file"
+
+    # Verify it worked
+    if sudo -n ip link show &>/dev/null 2>&1; then
+        ok "CAN sudoers configured"
+        return 0
+    else
+        warn "Failed to configure passwordless sudo for CAN"
         return 1
     fi
-    return 0
 }
 
 # ============================================================================
@@ -657,7 +723,7 @@ generate_machine_json() {
     done
     json+="],"
 
-    # Audio
+    # Audio (MoQ only, no iroh NodeId)
     if [ "$has_audio" = "yes" ]; then
         local label
         if [ "$PLATFORM" = "linux" ]; then
@@ -665,10 +731,7 @@ generate_machine_json() {
         else
             label="com.xoq.audio"
         fi
-        local node_id
-        node_id=$(extract_node_id "$label")
         json+="\"audio\":{\"moq_path\":\"anon/${XOQ_MACHINE_ID}/audio\","
-        json+="\"iroh_node_id\":\"${node_id}\","
         json+="\"unit\":\"${label}\"}"
     else
         json+="\"audio\":null"
@@ -692,16 +755,42 @@ deploy_linux() {
     local rs_serials=("${RS_SERIALS[@]}")
     local cam_indices=("${CAM_INDICES[@]}")
 
-    # --- CAN sudo check ---
+    # --- CAN sudo setup ---
     if [ ${#can_ifaces[@]} -gt 0 ]; then
-        header "CAN Sudo Check"
-        if check_can_sudo; then
+        header "CAN Setup"
+        if setup_can_sudo; then
             ok "Passwordless sudo for ip link: available"
         else
-            err "Cannot configure CAN without passwordless sudo. Aborting."
-            exit 1
+            warn "Skipping CAN services (no sudo access)."
+            can_ifaces=()
+            CAN_IFACES=()
         fi
     fi
+
+    # --- Stop and clean up previous deployment ---
+    header "Cleaning Previous Deployment"
+    systemctl --user stop xoq.target 2>/dev/null || true
+    for unit_file in "${XOQ_SYSTEMD_DIR}"/xoq-*.service; do
+        [ -f "$unit_file" ] || continue
+        local unit_name
+        unit_name=$(basename "$unit_file")
+        # Stop all running instances of template services
+        if [[ "$unit_name" == *@.service ]]; then
+            local prefix="${unit_name%%@.service}"
+            for running in $(systemctl --user list-units --no-legend "${prefix}@*" 2>/dev/null | awk '{print $1}'); do
+                systemctl --user stop "$running" 2>/dev/null || true
+                systemctl --user disable "$running" 2>/dev/null || true
+                systemctl --user reset-failed "$running" 2>/dev/null || true
+            done
+        else
+            systemctl --user stop "$unit_name" 2>/dev/null || true
+            systemctl --user disable "$unit_name" 2>/dev/null || true
+        fi
+        rm -f "$unit_file"
+    done
+    rm -f "${XOQ_SYSTEMD_DIR}/xoq.target"
+    systemctl --user daemon-reload
+    ok "Previous services stopped and removed"
 
     # --- Create directories ---
     mkdir -p "${XOQ_CONFIG_DIR}" "${XOQ_KEY_DIR}" "${XOQ_SYSTEMD_DIR}"
@@ -782,6 +871,19 @@ deploy_linux() {
 deploy_macos() {
     local rs_serials=("${RS_SERIALS[@]}")
     local cam_indices=("${CAM_INDICES[@]}")
+
+    # --- Stop and clean up previous deployment ---
+    header "Cleaning Previous Deployment"
+    for dir in "${XOQ_AGENTS_DIR}" "${XOQ_LAUNCHD_DIR}"; do
+        for plist in "${dir}"/com.xoq.*.plist; do
+            [ -f "$plist" ] || continue
+            local label
+            label=$(basename "$plist" .plist)
+            launchctl bootout "gui/$(id -u)/${label}" 2>/dev/null || true
+            rm -f "$plist"
+        done
+    done
+    ok "Previous services stopped and removed"
 
     # With --boot: plists go to ~/Library/LaunchAgents (auto-loads on login)
     # Without:     plists go to ~/.config/xoq/agents (manual load only)
