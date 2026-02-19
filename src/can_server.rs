@@ -70,7 +70,7 @@ fn can_reader_thread_fd(
                 let writes_now = write_count.load(Ordering::Relaxed);
                 let writes_during = writes_now - writes_at_gap_start;
                 if gap > Duration::from_millis(50) && writes_during >= 3 {
-                    tracing::warn!(
+                    tracing::debug!(
                         "CAN response delay: {:.1}ms ({} timed_out, {} would_block, {} writes during gap)",
                         gap.as_secs_f64() * 1000.0,
                         timed_outs,
@@ -142,7 +142,7 @@ fn can_reader_thread_std(
                 let writes_now = write_count.load(Ordering::Relaxed);
                 let writes_during = writes_now - writes_at_gap_start;
                 if gap > Duration::from_millis(50) && writes_during >= 3 {
-                    tracing::warn!(
+                    tracing::debug!(
                         "CAN response delay: {:.1}ms ({} timed_out, {} would_block, {} writes during gap)",
                         gap.as_secs_f64() * 1000.0,
                         timed_outs,
@@ -228,7 +228,7 @@ fn can_writer_thread_fd(
         let recv_gap = last_recv.elapsed();
         last_recv = Instant::now();
         if recv_gap > Duration::from_millis(50) {
-            tracing::warn!(
+            tracing::debug!(
                 "CAN writer: {:.1}ms gap between commands from network",
                 recv_gap.as_secs_f64() * 1000.0,
             );
@@ -237,7 +237,7 @@ fn can_writer_thread_fd(
         write_fn(&frame);
         let write_dur = write_start.elapsed();
         if write_dur > Duration::from_millis(5) {
-            tracing::warn!(
+            tracing::debug!(
                 "CAN writer: write_frame took {:.1}ms",
                 write_dur.as_secs_f64() * 1000.0,
             );
@@ -286,7 +286,7 @@ fn can_writer_thread_std(
         let recv_gap = last_recv.elapsed();
         last_recv = Instant::now();
         if recv_gap > Duration::from_millis(50) {
-            tracing::warn!(
+            tracing::debug!(
                 "CAN writer: {:.1}ms gap between commands from network",
                 recv_gap.as_secs_f64() * 1000.0,
             );
@@ -295,7 +295,7 @@ fn can_writer_thread_std(
         write_fn(&frame);
         let write_dur = write_start.elapsed();
         if write_dur > Duration::from_millis(5) {
-            tracing::warn!(
+            tracing::debug!(
                 "CAN writer: write_frame took {:.1}ms",
                 write_dur.as_secs_f64() * 1000.0,
             );
@@ -647,7 +647,7 @@ async fn handle_connection(
                     Ok(Some(n)) if n > 0 => {
                         let net_gap = last_net_read.elapsed();
                         if net_gap > Duration::from_millis(50) {
-                            tracing::warn!(
+                            tracing::debug!(
                                 "Net→CAN: {:.1}ms gap between QUIC reads ({} bytes)",
                                 net_gap.as_secs_f64() * 1000.0,
                                 n,
@@ -802,7 +802,7 @@ async fn moq_command_subscriber(
     let cmd_path = format!("{}/commands", path);
 
     loop {
-        tracing::info!("MoQ command subscriber connecting on {}...", cmd_path);
+        tracing::debug!("MoQ command subscriber connecting on {}...", cmd_path);
 
         let cmd_sub = match builder.clone().path(&cmd_path).connect_subscriber().await {
             Ok(sub) => sub,
