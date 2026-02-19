@@ -416,6 +416,16 @@ Clients target macOS, Linux, and Windows. Future: C/C++ bindings via Rust ABI.
 | `realsense`     | Intel RealSense depth camera (Linux server)      |
 | `image`         | Image processing support                         |
 
+### Quick Setup (NVIDIA Linux Server)
+
+For a fresh Ubuntu server with an NVIDIA GPU, the setup script installs all dependencies (CUDA toolkit, RealSense SDK, Rust, system libs), clones, and builds:
+
+```bash
+bash setup-nvidia-server.sh              # Full setup + build with realsense feature
+bash setup-nvidia-server.sh --skip-build # Install deps only
+bash setup-nvidia-server.sh --all-features # Build with all Linux features
+```
+
 ### Prerequisites
 
 #### Intel RealSense SDK (for depth cameras)
