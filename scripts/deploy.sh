@@ -416,6 +416,8 @@ generate_can_template() {
 [Unit]
 Description=XoQ CAN Server (%i)
 PartOf=xoq.target
+StartLimitIntervalSec=60
+StartLimitBurst=10
 
 [Service]
 Type=simple
@@ -425,8 +427,6 @@ ExecStartPre=/usr/bin/sudo /usr/sbin/ip link set %i up type can bitrate 1000000 
 ExecStart=${XOQ_BIN_DIR}/can-server %i:fd --key-dir ${XOQ_KEY_DIR} --moq-relay ${XOQ_RELAY} --moq-path anon/${XOQ_MACHINE_ID}/xoq-can-%i
 Restart=always
 RestartSec=5
-StartLimitIntervalSec=60
-StartLimitBurst=10
 
 [Install]
 WantedBy=xoq.target
@@ -438,6 +438,8 @@ generate_realsense_template() {
 [Unit]
 Description=XoQ RealSense Server (%i)
 PartOf=xoq.target
+StartLimitIntervalSec=60
+StartLimitBurst=10
 
 [Service]
 Type=simple
@@ -445,8 +447,6 @@ EnvironmentFile=%h/.config/xoq/env
 ExecStart=${XOQ_BIN_DIR}/realsense-server --relay ${XOQ_RELAY} --path anon/${XOQ_MACHINE_ID}/realsense-%i --serial %i
 Restart=always
 RestartSec=5
-StartLimitIntervalSec=60
-StartLimitBurst=10
 
 [Install]
 WantedBy=xoq.target
@@ -458,6 +458,8 @@ generate_camera_template() {
 [Unit]
 Description=XoQ Camera Server (%i)
 PartOf=xoq.target
+StartLimitIntervalSec=60
+StartLimitBurst=10
 
 [Service]
 Type=simple
@@ -465,8 +467,6 @@ EnvironmentFile=%h/.config/xoq/env
 ExecStart=${XOQ_BIN_DIR}/camera-server %i --key-dir ${XOQ_KEY_DIR} --moq anon/${XOQ_MACHINE_ID}/camera-%i --relay ${XOQ_RELAY} --insecure
 Restart=always
 RestartSec=5
-StartLimitIntervalSec=60
-StartLimitBurst=10
 
 [Install]
 WantedBy=xoq.target
@@ -478,6 +478,8 @@ generate_audio_service() {
 [Unit]
 Description=XoQ Audio Server
 PartOf=xoq.target
+StartLimitIntervalSec=60
+StartLimitBurst=10
 
 [Service]
 Type=simple
@@ -485,8 +487,6 @@ EnvironmentFile=%h/.config/xoq/env
 ExecStart=${XOQ_BIN_DIR}/audio-server --identity ${XOQ_KEY_DIR}/.xoq_audio_server_key --moq anon/${XOQ_MACHINE_ID}/audio
 Restart=always
 RestartSec=5
-StartLimitIntervalSec=60
-StartLimitBurst=10
 
 [Install]
 WantedBy=xoq.target
