@@ -1,0 +1,1 @@
+import xoq_realsense._rs_hook as _h; _h.install()

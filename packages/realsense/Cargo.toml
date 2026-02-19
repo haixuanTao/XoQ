@@ -1,0 +1,16 @@
+[package]
+name = "xoq-realsense"
+version = "0.1.0"
+edition = "2021"
+description = "Drop-in replacement for pyrealsense2 - remote RealSense cameras over MoQ"
+license = "Apache-2.0"
+repository = "https://github.com/haixuantao/xoq"
+
+[lib]
+name = "xoq_realsense"
+crate-type = ["cdylib"]
+
+[dependencies]
+xoq = { path = "../..", features = ["realsense-remote"] }
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py38"] }
+numpy = "0.22"

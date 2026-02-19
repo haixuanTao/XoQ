@@ -241,6 +241,7 @@ fn print_usage() {
     println!("  --insecure              Disable TLS verification");
     println!();
     println!("Tracks published:");
+    println!("  \"metadata\" - Intrinsics JSON (on keyframes)");
     println!("  \"video\" - Color AV1/CMAF (fMP4), 8-bit");
     println!(
         "  \"depth\" - Depth AV1/CMAF (fMP4), 10-bit P010, gray10 = depth_mm >> {} ({}mm/step, max {}mm)",
@@ -287,7 +288,7 @@ async fn main() -> Result<()> {
         1u32 << DEPTH_SHIFT,
         1023u32 << DEPTH_SHIFT,
     );
-    println!("Tracks:    \"video\" (AV1/CMAF), \"depth\" (AV1 10-bit/CMAF)");
+    println!("Tracks:    \"video\" (AV1/CMAF), \"depth\" (AV1 10-bit/CMAF), \"metadata\" (JSON)");
     println!("========================================");
     println!();
 
@@ -417,7 +418,8 @@ async fn main() -> Result<()> {
         let mut publisher = publisher.unwrap();
         let mut video_track = publisher.create_track("video");
         let mut depth_track = publisher.create_track("depth");
-        tracing::info!("MoQ connected, tracks: video + depth");
+        let mut metadata_track = publisher.create_track("metadata");
+        tracing::info!("MoQ connected, tracks: video + depth + metadata");
         moq_delay = std::time::Duration::from_secs(1); // reset backoff on success
 
         // Fresh muxers + init segments so new subscribers get clean state on reconnect
@@ -516,6 +518,16 @@ async fn main() -> Result<()> {
                 } else {
                     depth_track.write(stamp(segment, wall_ms));
                 }
+            }
+
+            // Publish metadata (intrinsics JSON) on keyframes
+            if parsed.is_keyframe {
+                let metadata_json = format!(
+                    r#"{{"fx":{:.1},"fy":{:.1},"ppx":{:.1},"ppy":{:.1},"width":{},"height":{},"depth_shift":{}}}"#,
+                    intr.fx, intr.fy, intr.ppx, intr.ppy,
+                    camera.width(), camera.height(), DEPTH_SHIFT,
+                );
+                metadata_track.write(metadata_json.into_bytes());
             }
 
             frame_count += 1;

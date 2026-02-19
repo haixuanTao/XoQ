@@ -93,6 +93,7 @@ impl MoqBuilder {
         Ok(MoqConnection {
             broadcast: broadcast.producer,
             origin_consumer: origin.consumer,
+            cached_broadcast: None,
             _session: session,
         })
     }
@@ -165,6 +166,7 @@ impl MoqBuilder {
 
         Ok(MoqSubscriber {
             origin_consumer: origin.consumer,
+            cached_broadcast: None,
             _session: session,
         })
     }
@@ -180,6 +182,7 @@ impl Default for MoqBuilder {
 pub struct MoqConnection {
     broadcast: moq_lite::BroadcastProducer,
     origin_consumer: moq_lite::OriginConsumer,
+    cached_broadcast: Option<moq_lite::BroadcastConsumer>,
     _session: moq_lite::Session,
 }
 
@@ -194,16 +197,25 @@ impl MoqConnection {
     }
 
     /// Subscribe to a track by name (waits for announce).
+    ///
+    /// The broadcast announcement is cached after the first call, so
+    /// multiple tracks can be subscribed without timing out.
     pub async fn subscribe_track(&mut self, track_name: &str) -> Result<Option<MoqTrackReader>> {
-        let broadcast = match tokio::time::timeout(
-            Duration::from_secs(10),
-            wait_for_broadcast(&mut self.origin_consumer),
-        )
-        .await
-        {
-            Ok(Some(broadcast)) => broadcast,
-            Ok(None) => return Ok(None),
-            Err(_) => anyhow::bail!("Timed out waiting for broadcast announcement (10s)"),
+        let broadcast = if let Some(ref bc) = self.cached_broadcast {
+            bc.clone()
+        } else {
+            let bc = match tokio::time::timeout(
+                Duration::from_secs(10),
+                wait_for_broadcast(&mut self.origin_consumer),
+            )
+            .await
+            {
+                Ok(Some(broadcast)) => broadcast,
+                Ok(None) => return Ok(None),
+                Err(_) => anyhow::bail!("Timed out waiting for broadcast announcement (10s)"),
+            };
+            self.cached_broadcast = Some(bc.clone());
+            bc
         };
 
         let track_consumer = broadcast.subscribe_track(&Track::new(track_name));
@@ -239,21 +251,31 @@ impl MoqPublisher {
 /// A subscribe-only MoQ connection
 pub struct MoqSubscriber {
     origin_consumer: moq_lite::OriginConsumer,
+    cached_broadcast: Option<moq_lite::BroadcastConsumer>,
     _session: moq_lite::Session,
 }
 
 impl MoqSubscriber {
     /// Subscribe to a track by name (waits for announce from relay).
+    ///
+    /// The broadcast announcement is cached after the first call, so
+    /// multiple tracks can be subscribed without timing out.
     pub async fn subscribe_track(&mut self, track_name: &str) -> Result<Option<MoqTrackReader>> {
-        let broadcast = match tokio::time::timeout(
-            Duration::from_secs(10),
-            wait_for_broadcast(&mut self.origin_consumer),
-        )
-        .await
-        {
-            Ok(Some(broadcast)) => broadcast,
-            Ok(None) => return Ok(None),
-            Err(_) => anyhow::bail!("Timed out waiting for broadcast announcement (10s)"),
+        let broadcast = if let Some(ref bc) = self.cached_broadcast {
+            bc.clone()
+        } else {
+            let bc = match tokio::time::timeout(
+                Duration::from_secs(10),
+                wait_for_broadcast(&mut self.origin_consumer),
+            )
+            .await
+            {
+                Ok(Some(broadcast)) => broadcast,
+                Ok(None) => return Ok(None),
+                Err(_) => anyhow::bail!("Timed out waiting for broadcast announcement (10s)"),
+            };
+            self.cached_broadcast = Some(bc.clone());
+            bc
         };
 
         let track_consumer = broadcast.subscribe_track(&Track::new(track_name));

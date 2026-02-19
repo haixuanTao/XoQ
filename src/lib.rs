@@ -119,6 +119,14 @@ pub mod nvenc_av1;
 #[cfg(feature = "realsense")]
 pub mod realsense;
 
+// AV1 decoder (dav1d)
+#[cfg(feature = "dav1d")]
+pub mod dav1d_decoder;
+
+// Remote RealSense client (MoQ + dav1d)
+#[cfg(feature = "realsense-remote")]
+pub mod realsense_client;
+
 // Audio device abstraction (cpal)
 #[cfg(feature = "audio")]
 pub mod audio;
@@ -304,6 +312,10 @@ pub use audio_client::SyncAudioClient;
 
 #[cfg(feature = "audio-remote")]
 pub use sounddevice::{AudioStreamBuilder, RemoteAudioStream};
+
+// Remote RealSense client
+#[cfg(feature = "realsense-remote")]
+pub use realsense_client::{RealSenseClient, SyncRealSenseClient};
 
 // Re-export token generation
 pub use moq_token;

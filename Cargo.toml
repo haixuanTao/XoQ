@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "packages/serial", "packages/cv2", "packages/can", "packages/sounddevice"]
+members = [".", "packages/serial", "packages/cv2", "packages/can", "packages/sounddevice", "packages/realsense"]
 
 [package]
 name = "xoq"
@@ -36,6 +36,10 @@ serial-remote = ["iroh"]
 camera-remote = ["iroh", "image"]
 can-remote = ["iroh"]
 audio-remote = ["iroh", "audio"]
+# dav1d AV1 decoder (cross-platform, for consuming AV1 streams)
+dav1d = ["dep:dav1d"]
+# Remote RealSense client (MoQ subscriber + dav1d decode)
+realsense-remote = ["dav1d", "image"]
 
 [dependencies]
 moq-transport = "0.12"
@@ -73,6 +77,8 @@ objc2-foundation = { version = "0.3", optional = true, features = ["NSString", "
 objc2-av-foundation = { version = "0.3", optional = true, features = ["AVCaptureDevice", "AVCaptureSession", "AVCaptureInput", "AVCaptureOutput", "AVMediaFormat"] }
 block2 = { version = "0.6", optional = true }
 dispatch = { version = "0.2", optional = true }
+# AV1 decoder (cross-platform, wraps libdav1d)
+dav1d = { version = "0.11", optional = true }
 # Software H.264 decoder (cross-platform, no GPU required)
 openh264 = { version = "0.6", features = ["source"], optional = true }
 # Hardware video encoding/decoding - macOS VideoToolbox (optional)
