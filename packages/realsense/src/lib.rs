@@ -36,8 +36,16 @@ impl config {
     }
 
     #[pyo3(signature = (stream_type, width=0, height=0, format=0, framerate=0))]
-    fn enable_stream(&mut self, stream_type: i32, width: i32, height: i32, format: i32, framerate: i32) {
-        self.streams.push((stream_type, width, height, format, framerate));
+    fn enable_stream(
+        &mut self,
+        stream_type: i32,
+        width: i32,
+        height: i32,
+        format: i32,
+        framerate: i32,
+    ) {
+        self.streams
+            .push((stream_type, width, height, format, framerate));
     }
 }
 
@@ -65,15 +73,17 @@ impl pipeline {
     }
 
     fn start(&self, cfg: &config) -> PyResult<pipeline_profile> {
-        let serial = cfg
-            .device_serial
-            .as_deref()
-            .ok_or_else(|| PyRuntimeError::new_err("No device configured. Call config.enable_device() first."))?;
+        let serial = cfg.device_serial.as_deref().ok_or_else(|| {
+            PyRuntimeError::new_err("No device configured. Call config.enable_device() first.")
+        })?;
 
         let client = SyncRealSenseClient::connect_auto(serial)
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to connect: {}", e)))?;
 
-        let mut guard = self.inner.lock().map_err(|e| PyRuntimeError::new_err(format!("{}", e)))?;
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(format!("{}", e)))?;
         *guard = Some(PipelineInner {
             client,
             last_intrinsics: None,
@@ -84,7 +94,10 @@ impl pipeline {
 
     fn wait_for_frames(&self, py: Python<'_>) -> PyResult<frameset> {
         let mut pipeline_inner = {
-            let mut guard = self.inner.lock().map_err(|e| PyRuntimeError::new_err(format!("{}", e)))?;
+            let mut guard = self
+                .inner
+                .lock()
+                .map_err(|e| PyRuntimeError::new_err(format!("{}", e)))?;
             guard.take()
         };
 
@@ -95,7 +108,10 @@ impl pipeline {
             }
             match res {
                 Ok(frames) => Ok((frames, pi.last_intrinsics)),
-                Err(e) => Err(PyRuntimeError::new_err(format!("read_frames failed: {}", e))),
+                Err(e) => Err(PyRuntimeError::new_err(format!(
+                    "read_frames failed: {}",
+                    e
+                ))),
             }
         } else {
             Err(PyRuntimeError::new_err("Pipeline not started"))
@@ -103,7 +119,10 @@ impl pipeline {
 
         // Put client back
         if let Some(pi) = pipeline_inner {
-            let mut guard = self.inner.lock().map_err(|e| PyRuntimeError::new_err(format!("{}", e)))?;
+            let mut guard = self
+                .inner
+                .lock()
+                .map_err(|e| PyRuntimeError::new_err(format!("{}", e)))?;
             *guard = Some(pi);
         }
 
@@ -128,7 +147,10 @@ impl pipeline {
     }
 
     fn stop(&self) -> PyResult<()> {
-        let mut guard = self.inner.lock().map_err(|e| PyRuntimeError::new_err(format!("{}", e)))?;
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(format!("{}", e)))?;
         *guard = None;
         Ok(())
     }
@@ -352,7 +374,9 @@ pub struct align {
 impl align {
     #[new]
     fn new(align_to: i32) -> Self {
-        Self { _align_to: align_to }
+        Self {
+            _align_to: align_to,
+        }
     }
 
     fn process(&self, frames: &frameset) -> frameset {
@@ -380,11 +404,17 @@ pub struct stream {}
 #[pymethods]
 impl stream {
     #[classattr]
-    fn color() -> i32 { STREAM_COLOR }
+    fn color() -> i32 {
+        STREAM_COLOR
+    }
     #[classattr]
-    fn depth() -> i32 { STREAM_DEPTH }
+    fn depth() -> i32 {
+        STREAM_DEPTH
+    }
     #[classattr]
-    fn infrared() -> i32 { STREAM_INFRARED }
+    fn infrared() -> i32 {
+        STREAM_INFRARED
+    }
 }
 
 #[pyclass]
@@ -393,13 +423,21 @@ pub struct format {}
 #[pymethods]
 impl format {
     #[classattr]
-    fn rgb8() -> i32 { 1 }
+    fn rgb8() -> i32 {
+        1
+    }
     #[classattr]
-    fn z16() -> i32 { 2 }
+    fn z16() -> i32 {
+        2
+    }
     #[classattr]
-    fn bgr8() -> i32 { 3 }
+    fn bgr8() -> i32 {
+        3
+    }
     #[classattr]
-    fn any() -> i32 { 0 }
+    fn any() -> i32 {
+        0
+    }
 }
 
 // ============================================================================

@@ -6,8 +6,8 @@
 
 use anyhow::Result;
 
-use crate::nvdec_av1_decoder::{self, NvdecAv1Decoder};
 use crate::moq::{MoqBuilder, MoqSubscriber, MoqTrackReader};
+use crate::nvdec_av1_decoder::{self, NvdecAv1Decoder};
 
 /// Camera intrinsics received from the metadata track.
 #[derive(Debug, Clone, Copy)]
@@ -60,7 +60,12 @@ impl RealSenseClient {
 
         let (relay_url, moq_path) = if relay.contains("://") {
             let url = url::Url::parse(&relay)?;
-            let base = format!("{}://{}:{}", url.scheme(), url.host_str().unwrap_or("localhost"), url.port().unwrap_or(443));
+            let base = format!(
+                "{}://{}:{}",
+                url.scheme(),
+                url.host_str().unwrap_or("localhost"),
+                url.port().unwrap_or(443)
+            );
             let p = url.path().trim_start_matches('/').to_string();
             (base, if p.is_empty() { path.to_string() } else { p })
         } else {
@@ -88,7 +93,7 @@ impl RealSenseClient {
         let metadata_reader = subscriber.subscribe_track("metadata").await.ok().flatten();
 
         let video_decoder = Box::new(NvdecAv1Decoder::new(false)?); // 8-bit NV12 for color
-        let depth_decoder = Box::new(NvdecAv1Decoder::new(true)?);  // 10-bit P016 for depth
+        let depth_decoder = Box::new(NvdecAv1Decoder::new(true)?); // 10-bit P016 for depth
 
         Ok(Self {
             video_reader,
@@ -273,7 +278,9 @@ impl SyncRealSenseClient {
     }
 
     fn reconnect(&mut self) -> Result<()> {
-        let client = self.runtime.block_on(RealSenseClient::connect_moq(&self.source))?;
+        let client = self
+            .runtime
+            .block_on(RealSenseClient::connect_moq(&self.source))?;
         self.inner = client;
         Ok(())
     }

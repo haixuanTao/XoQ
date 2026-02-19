@@ -163,10 +163,10 @@ fn parse_args() -> Args {
         relay: "https://cdn.1ms.ai".to_string(),
         path: "anon/realsense".to_string(),
         serial: None,
-        width: 640,
-        height: 480,
+        width: 1280,
+        height: 720,
         fps: 30,
-        color_bitrate: 8_000_000,
+        color_bitrate: 4_000_000,
         depth_qp: 10,
         insecure: false,
     };
@@ -188,11 +188,11 @@ fn parse_args() -> Args {
                 i += 2;
             }
             "--width" if i + 1 < args.len() => {
-                result.width = args[i + 1].parse().unwrap_or(640);
+                result.width = args[i + 1].parse().unwrap_or(1280);
                 i += 2;
             }
             "--height" if i + 1 < args.len() => {
-                result.height = args[i + 1].parse().unwrap_or(480);
+                result.height = args[i + 1].parse().unwrap_or(720);
                 i += 2;
             }
             "--fps" if i + 1 < args.len() => {
@@ -200,7 +200,7 @@ fn parse_args() -> Args {
                 i += 2;
             }
             "--bitrate" if i + 1 < args.len() => {
-                result.color_bitrate = args[i + 1].parse().unwrap_or(8_000_000);
+                result.color_bitrate = args[i + 1].parse().unwrap_or(4_000_000);
                 i += 2;
             }
             "--depth-qp" if i + 1 < args.len() => {
@@ -232,10 +232,10 @@ fn print_usage() {
     println!("Options:");
     println!("  --relay <url>           MoQ relay URL (default: https://cdn.1ms.ai)");
     println!("  --path <path>           MoQ broadcast path (default: anon/realsense)");
-    println!("  --width <px>            Resolution width (default: 640)");
-    println!("  --height <px>           Resolution height (default: 480)");
+    println!("  --width <px>            Resolution width (default: 1280)");
+    println!("  --height <px>           Resolution height (default: 720)");
     println!("  --fps <rate>            Framerate (default: 30)");
-    println!("  --bitrate <bps>         AV1 color bitrate (default: 8000000)");
+    println!("  --bitrate <bps>         AV1 color bitrate (default: 4000000)");
     println!("  --depth-qp <qp>        AV1 depth QP (0=lossless, 20=high quality, default: 20)");
     println!("  --serial <serial>       RealSense serial number (default: first device)");
     println!("  --insecure              Disable TLS verification");
@@ -524,8 +524,13 @@ async fn main() -> Result<()> {
             if parsed.is_keyframe {
                 let metadata_json = format!(
                     r#"{{"fx":{:.1},"fy":{:.1},"ppx":{:.1},"ppy":{:.1},"width":{},"height":{},"depth_shift":{}}}"#,
-                    intr.fx, intr.fy, intr.ppx, intr.ppy,
-                    camera.width(), camera.height(), DEPTH_SHIFT,
+                    intr.fx,
+                    intr.fy,
+                    intr.ppx,
+                    intr.ppy,
+                    camera.width(),
+                    camera.height(),
+                    DEPTH_SHIFT,
                 );
                 metadata_track.write(metadata_json.into_bytes());
             }

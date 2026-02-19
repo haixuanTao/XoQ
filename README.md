@@ -421,9 +421,13 @@ Clients target macOS, Linux, and Windows. Future: C/C++ bindings via Rust ABI.
 For a fresh Ubuntu server with an NVIDIA GPU, the setup script installs all dependencies (CUDA toolkit, RealSense SDK, Rust, system libs), clones, and builds:
 
 ```bash
-bash setup-nvidia-server.sh              # Full setup + build with realsense feature
-bash setup-nvidia-server.sh --skip-build # Install deps only
-bash setup-nvidia-server.sh --all-features # Build with all Linux features
+bash scripts/setup-nvidia-server.sh              # Full setup + build with realsense feature
+bash scripts/setup-nvidia-server.sh --skip-build # Install deps only
+bash scripts/setup-nvidia-server.sh --all-features # Build with all Linux features
+
+# Configure CAN interfaces (auto-detects available interfaces)
+bash scripts/setup-can.sh              # All detected CAN interfaces
+bash scripts/setup-can.sh can0 can1    # Specific interfaces only
 ```
 
 ### Prerequisites

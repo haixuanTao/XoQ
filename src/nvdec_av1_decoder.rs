@@ -197,8 +197,7 @@ impl NvdecAv1Decoder {
         create_info.ChromaFormat = format.chroma_format;
         create_info.ulCreationFlags = 0;
         create_info.OutputFormat = output_format;
-        create_info.DeinterlaceMode =
-            cudaVideoDeinterlaceMode::cudaVideoDeinterlaceMode_Adaptive;
+        create_info.DeinterlaceMode = cudaVideoDeinterlaceMode::cudaVideoDeinterlaceMode_Adaptive;
         create_info.ulTargetWidth = format.coded_width as u64;
         create_info.ulTargetHeight = format.coded_height as u64;
         create_info.ulNumOutputSurfaces = 4;
@@ -234,10 +233,7 @@ impl NvdecAv1Decoder {
         num_surfaces as i32
     }
 
-    extern "C" fn decode_callback(
-        user_data: *mut c_void,
-        pic_params: *mut CUVIDPICPARAMS,
-    ) -> i32 {
+    extern "C" fn decode_callback(user_data: *mut c_void, pic_params: *mut CUVIDPICPARAMS) -> i32 {
         let decoder = unsafe { &mut *(user_data as *mut NvdecAv1Decoder) };
         if decoder.decoder.is_null() {
             return 0;
@@ -291,8 +287,7 @@ impl NvdecAv1Decoder {
 
         // Copy Y plane row by row (GPU pitch may differ from width)
         for y in 0..height {
-            let src = (dev_ptr + (y as u64) * (pitch as u64))
-                as cudarc::driver::sys::CUdeviceptr;
+            let src = (dev_ptr + (y as u64) * (pitch as u64)) as cudarc::driver::sys::CUdeviceptr;
             let dst = unsafe { frame_data.as_mut_ptr().add(y * row_bytes) as *mut c_void };
             let r = unsafe { cudarc::driver::sys::cuMemcpyDtoH_v2(dst, src, row_bytes) };
             if r != CUDA_SUCCESS {
@@ -307,7 +302,8 @@ impl NvdecAv1Decoder {
         for y in 0..uv_height {
             let src = (dev_ptr + ((height + y) as u64) * (pitch as u64))
                 as cudarc::driver::sys::CUdeviceptr;
-            let dst = unsafe { frame_data.as_mut_ptr().add(uv_offset + y * row_bytes) as *mut c_void };
+            let dst =
+                unsafe { frame_data.as_mut_ptr().add(uv_offset + y * row_bytes) as *mut c_void };
             let r = unsafe { cudarc::driver::sys::cuMemcpyDtoH_v2(dst, src, row_bytes) };
             if r != CUDA_SUCCESS {
                 tracing::error!("[nvdec-av1] UV row {} copy failed: {:?}", y, r);
