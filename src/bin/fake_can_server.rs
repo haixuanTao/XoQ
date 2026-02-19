@@ -41,7 +41,9 @@ struct MotorState {
 type Motors = Arc<Mutex<[MotorState; 8]>>;
 
 fn motor_index(can_id: u32) -> Option<usize> {
-    if (0x11..=0x18).contains(&can_id) {
+    if (0x01..=0x08).contains(&can_id) {
+        Some((can_id - 0x01) as usize)
+    } else if (0x11..=0x18).contains(&can_id) {
         Some((can_id - 0x11) as usize)
     } else {
         None
@@ -122,18 +124,19 @@ fn process_command(motors: &Motors, can_id: u32, data: &[u8]) -> Option<Vec<u8>>
 
     let mut motors = motors.lock().unwrap();
 
+    let resp_id = can_id + 0x10; // real motors respond on cmd_id + 0x10
+
     if data == ENABLE_MIT {
         motors[idx].enabled = true;
         tracing::info!("Motor 0x{:02X} enabled", can_id);
-        // Return a response at current position
-        let resp = encode_damiao_response(can_id as u8, motors[idx].pos, 0.0, 0.0, 45, 50);
-        return Some(encode_wire_frame(can_id, &resp));
+        let resp = encode_damiao_response(resp_id as u8, motors[idx].pos, 0.0, 0.0, 45, 50);
+        return Some(encode_wire_frame(resp_id, &resp));
     }
     if data == DISABLE_MIT {
         motors[idx].enabled = false;
         tracing::info!("Motor 0x{:02X} disabled", can_id);
-        let resp = encode_damiao_response(can_id as u8, motors[idx].pos, 0.0, 0.0, 45, 50);
-        return Some(encode_wire_frame(can_id, &resp));
+        let resp = encode_damiao_response(resp_id as u8, motors[idx].pos, 0.0, 0.0, 45, 50);
+        return Some(encode_wire_frame(resp_id, &resp));
     }
 
     if !motors[idx].enabled {
@@ -149,14 +152,14 @@ fn process_command(motors: &Motors, can_id: u32, data: &[u8]) -> Option<Vec<u8>>
     motors[idx].tau = cmd_tau;
 
     let resp = encode_damiao_response(
-        can_id as u8,
+        resp_id as u8,
         motors[idx].pos,
         motors[idx].vel,
         motors[idx].tau,
         45,
         50,
     );
-    Some(encode_wire_frame(can_id, &resp))
+    Some(encode_wire_frame(resp_id, &resp))
 }
 
 struct Args {
@@ -240,6 +243,7 @@ async fn handle_connection(
 
     let mut buf = vec![0u8; 1024];
     let mut pending = Vec::new();
+    let mut last_moq_positions = [f64::NAN; 8];
 
     loop {
         tokio::select! {
@@ -265,9 +269,20 @@ async fn handle_connection(
                             }
                             tokio::task::yield_now().await;
 
-                            // Also publish to MoQ
+                            // Only publish to MoQ when positions changed
                             if let Some(ref writer) = moq_writer {
-                                writer.lock().unwrap().write(response_batch);
+                                let mg = motors.lock().unwrap();
+                                let changed = mg.iter().enumerate().any(|(i, m)| {
+                                    last_moq_positions[i].is_nan()
+                                        || (m.pos - last_moq_positions[i]).abs() > 1e-10
+                                });
+                                if changed {
+                                    for (i, m) in mg.iter().enumerate() {
+                                        last_moq_positions[i] = m.pos;
+                                    }
+                                    drop(mg);
+                                    writer.lock().unwrap().write(response_batch);
+                                }
                             }
                         }
                     }
@@ -305,7 +320,7 @@ async fn main() -> Result<()> {
     } else {
         println!("MoQ:       disabled");
     }
-    println!("Motors:    0x11–0x18 (8 Damiao MIT)");
+    println!("Motors:    0x01–0x08 (8 Damiao MIT, respond on 0x11–0x18)");
     println!("========================================");
     println!();
 
