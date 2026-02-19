@@ -3,6 +3,7 @@
 //! Drop-in replacement for can-server that doesn't need CAN hardware.
 //! Accepts iroh connections from clients (teleop, etc.), simulates motor
 //! responses, and optionally publishes state to MoQ for browser monitoring.
+//! MoQ commands are also received and processed (via BridgeServer).
 //!
 //! Usage:
 //!   fake-can-server [options]
@@ -15,9 +16,8 @@
 
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
-use tokio_util::sync::CancellationToken;
-use xoq::iroh::{IrohConnection, IrohServerBuilder};
-use xoq::{MoqBuilder, MoqPublisher, MoqTrackWriter};
+use tokio::sync::mpsc;
+use xoq::bridge_server::{BridgeServer, MoqConfig};
 
 // Damiao MIT protocol ranges
 const POS_MIN: f64 = -12.5;
@@ -227,74 +227,54 @@ fn print_usage() {
     println!("  fake-can-server --moq-relay https://cdn.1ms.ai              # iroh + MoQ");
 }
 
-/// Handle a single iroh connection: read commands, simulate motors, send responses.
-async fn handle_connection(
-    conn: IrohConnection,
+/// Motor simulation backend task.
+///
+/// Receives wire-encoded CAN commands from write_rx (from both iroh and MoQ),
+/// processes them through the motor simulation, and sends wire-encoded responses
+/// to read_tx (for iroh) and moq_read_tx (for MoQ state publishing).
+async fn motor_sim_task(
     motors: Motors,
-    moq_writer: Option<Arc<Mutex<MoqTrackWriter>>>,
-    cancel: CancellationToken,
-) -> Result<()> {
-    let stream = tokio::select! {
-        result = conn.accept_stream() => result?,
-        _ = cancel.cancelled() => return Ok(()),
-    };
-
-    let (mut send, mut recv) = stream.split();
-
-    let mut buf = vec![0u8; 1024];
+    mut write_rx: mpsc::Receiver<Vec<u8>>,
+    read_tx: mpsc::Sender<Vec<u8>>,
+    moq_read_tx: Option<mpsc::Sender<Vec<u8>>>,
+) {
     let mut pending = Vec::new();
     let mut last_moq_positions = [f64::NAN; 8];
 
-    loop {
-        tokio::select! {
-            _ = cancel.cancelled() => break,
-            read_result = recv.read(&mut buf) => {
-                match read_result {
-                    Ok(Some(n)) if n > 0 => {
-                        pending.extend_from_slice(&buf[..n]);
+    while let Some(data) = write_rx.recv().await {
+        pending.extend_from_slice(&data);
 
-                        let mut response_batch = Vec::new();
+        let mut response_batch = Vec::new();
 
-                        while let Some((can_id, data, consumed)) = decode_wire_frame(&pending) {
-                            if let Some(resp) = process_command(&motors, can_id, &data) {
-                                response_batch.extend_from_slice(&resp);
-                            }
-                            pending.drain(..consumed);
-                        }
+        while let Some((can_id, frame_data, consumed)) = decode_wire_frame(&pending) {
+            if let Some(resp) = process_command(&motors, can_id, &frame_data) {
+                response_batch.extend_from_slice(&resp);
+            }
+            pending.drain(..consumed);
+        }
 
-                        if !response_batch.is_empty() {
-                            // Send response back over iroh stream
-                            if send.write_all(&response_batch).await.is_err() {
-                                break;
-                            }
-                            tokio::task::yield_now().await;
+        if !response_batch.is_empty() {
+            // Send response to network (via BridgeServer)
+            if read_tx.send(response_batch.clone()).await.is_err() {
+                break;
+            }
 
-                            // Only publish to MoQ when positions changed
-                            if let Some(ref writer) = moq_writer {
-                                let mg = motors.lock().unwrap();
-                                let changed = mg.iter().enumerate().any(|(i, m)| {
-                                    last_moq_positions[i].is_nan()
-                                        || (m.pos - last_moq_positions[i]).abs() > 1e-10
-                                });
-                                if changed {
-                                    for (i, m) in mg.iter().enumerate() {
-                                        last_moq_positions[i] = m.pos;
-                                    }
-                                    drop(mg);
-                                    writer.lock().unwrap().write(response_batch);
-                                }
-                            }
-                        }
+            // Send to MoQ only when motor positions changed
+            if let Some(ref moq_tx) = moq_read_tx {
+                let mg = motors.lock().unwrap();
+                let changed = mg.iter().enumerate().any(|(i, m)| {
+                    last_moq_positions[i].is_nan() || (m.pos - last_moq_positions[i]).abs() > 1e-10
+                });
+                if changed {
+                    for (i, m) in mg.iter().enumerate() {
+                        last_moq_positions[i] = m.pos;
                     }
-                    Ok(Some(_)) => continue,
-                    Ok(None) => break,
-                    Err(e) => return Err(anyhow::anyhow!("Read error: {}", e)),
+                    drop(mg);
+                    let _ = moq_tx.try_send(response_batch);
                 }
             }
         }
     }
-
-    Ok(())
 }
 
 #[tokio::main]
@@ -317,6 +297,7 @@ async fn main() -> Result<()> {
         println!("MoQ relay: {}", relay);
         println!("MoQ path:  {}", args.moq_path);
         println!("MoQ state: {}/state", args.moq_path);
+        println!("MoQ cmds:  {}/commands", args.moq_path);
     } else {
         println!("MoQ:       disabled");
     }
@@ -324,81 +305,50 @@ async fn main() -> Result<()> {
     println!("========================================");
     println!();
 
-    // Start iroh server
-    let identity_path = format!("{}/.xoq_fake_can_server_key", args.key_dir);
-    let server = IrohServerBuilder::new()
-        .identity_path(&identity_path)
-        .bind()
-        .await?;
-
-    let server_id = server.id().to_string();
-    tracing::info!("Server ID: {}", server_id);
-    println!("Server ID: {}", server_id);
-    println!();
-
-    let server = Arc::new(server);
     let motors: Motors = Arc::new(Mutex::new(Default::default()));
 
-    // Connect MoQ state publisher
-    // IMPORTANT: MoqPublisher holds the MoQ session — it must stay alive
-    // for the writer to work. Dropping it closes the session.
-    let (moq_writer, _moq_publisher): (Option<Arc<Mutex<MoqTrackWriter>>>, Option<MoqPublisher>) =
-        if let Some(ref relay) = args.moq_relay {
-            let mut builder = MoqBuilder::new().relay(relay);
-            if args.moq_insecure {
-                builder = builder.disable_tls_verify();
-            }
+    // Create channels between motor sim backend and BridgeServer
+    let (write_tx, write_rx) = mpsc::channel::<Vec<u8>>(1);
+    let (read_tx, read_rx) = mpsc::channel::<Vec<u8>>(16);
 
-            match builder
-                .path(&format!("{}/state", args.moq_path))
-                .connect_publisher_with_track("can")
-                .await
-            {
-                Ok((publisher, writer)) => {
-                    tracing::info!("MoQ state publisher connected on {}/state", args.moq_path);
-                    (Some(Arc::new(Mutex::new(writer))), Some(publisher))
-                }
-                Err(e) => {
-                    tracing::warn!("MoQ connect failed (continuing without): {}", e);
-                    (None, None)
-                }
-            }
-        } else {
-            (None, None)
-        };
+    let (moq_read_tx, moq_read_rx) = if args.moq_relay.is_some() {
+        let (tx, rx) = mpsc::channel(128);
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
 
-    // Accept iroh connections
+    // Spawn motor simulation backend task
+    let motors_clone = Arc::clone(&motors);
+    tokio::spawn(async move {
+        motor_sim_task(motors_clone, write_rx, read_tx, moq_read_tx).await;
+    });
+
+    // Create MoQ config
+    let moq_config = args.moq_relay.as_ref().map(|relay| MoqConfig {
+        relay: relay.clone(),
+        path: args.moq_path.clone(),
+        insecure: args.moq_insecure,
+        state_subpath: "state".to_string(),
+        command_subpath: "commands".to_string(),
+        track_name: "can".to_string(),
+    });
+
+    // Create and run BridgeServer
+    let identity_path = format!("{}/.xoq_fake_can_server_key", args.key_dir);
+    let bridge = BridgeServer::new(
+        Some(&identity_path),
+        write_tx,
+        read_rx,
+        moq_read_rx,
+        moq_config,
+    )
+    .await?;
+
+    tracing::info!("Server ID: {}", bridge.id());
+    println!("Server ID: {}", bridge.id());
+    println!();
+
     tracing::info!("Waiting for iroh connections...");
-
-    let mut current_conn: Option<(CancellationToken, tokio::task::JoinHandle<()>)> = None;
-
-    loop {
-        let conn = match server.accept().await? {
-            Some(c) => c,
-            None => continue,
-        };
-
-        tracing::info!("Client connected: {}", conn.remote_id());
-
-        // Cancel previous connection
-        if let Some((cancel, handle)) = current_conn.take() {
-            tracing::info!("New client connected, closing previous connection");
-            cancel.cancel();
-            let _ = handle.await;
-        }
-
-        let cancel = CancellationToken::new();
-        let cancel_clone = cancel.clone();
-        let motors = Arc::clone(&motors);
-        let moq_writer = moq_writer.clone();
-
-        let handle = tokio::spawn(async move {
-            if let Err(e) = handle_connection(conn, motors, moq_writer, cancel_clone).await {
-                tracing::error!("Connection error: {}", e);
-            }
-            tracing::info!("Client disconnected");
-        });
-
-        current_conn = Some((cancel, handle));
-    }
+    bridge.run().await
 }

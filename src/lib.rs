@@ -54,6 +54,9 @@ pub mod moq;
 #[cfg(feature = "iroh")]
 pub mod iroh;
 
+#[cfg(feature = "iroh")]
+pub mod bridge_server;
+
 // Frame type (available when image feature is enabled)
 #[cfg(feature = "image")]
 pub mod frame;
@@ -223,6 +226,9 @@ pub use moq::{
     MoqBuilder, MoqConnection, MoqPublisher, MoqStream, MoqSubscriber, MoqTrackReader,
     MoqTrackWriter,
 };
+
+#[cfg(feature = "iroh")]
+pub use bridge_server::{BridgeServer, MoqConfig};
 
 #[cfg(feature = "iroh")]
 pub use iroh::{

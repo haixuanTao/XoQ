@@ -1,18 +1,17 @@
 //! CAN bridge server - bridges local CAN interface to remote clients over iroh P2P.
 //!
-//! Architecture: 2 persistent OS threads (reader + writer) communicate with async
-//! connection tasks via channels.
+//! Architecture: 2 persistent OS threads (reader + writer) communicate with the
+//! BridgeServer via Vec<u8> channels. Wire encoding/decoding happens in the threads.
 
 use anyhow::Result;
 use socketcan::Socket;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio_util::sync::CancellationToken;
 
+use crate::bridge_server::{BridgeServer, MoqConfig};
 use crate::can::{CanFdFrame, CanFrame};
 use crate::can_types::{wire, AnyCanFrame};
-use crate::iroh::{IrohConnection, IrohServerBuilder};
 
 /// Read the CAN bus error state by parsing sysfs or `ip -details link show`.
 /// Returns e.g. "ERROR-ACTIVE", "ERROR-PASSIVE", "BUS-OFF", or None if unknown.
@@ -42,21 +41,14 @@ fn can_bus_state(interface: &str) -> Option<String> {
 /// Optionally broadcasts CAN state via MoQ for browser monitoring.
 pub struct CanServer {
     interface: String,
-    server_id: String,
-    can_write_tx: tokio::sync::mpsc::Sender<AnyCanFrame>,
-    can_read_rx: std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<AnyCanFrame>>>,
-    endpoint: Arc<crate::iroh::IrohServer>,
-    moq_read_rx: std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<AnyCanFrame>>>,
-    moq_relay: Option<String>,
-    moq_path: String,
-    moq_insecure: bool,
+    bridge: BridgeServer,
 }
 
-/// Reader thread for CAN FD sockets.
+/// Reader thread for CAN FD sockets. Encodes frames to wire format Vec<u8>.
 fn can_reader_thread_fd(
     socket: Arc<socketcan::CanFdSocket>,
-    tx: tokio::sync::mpsc::Sender<AnyCanFrame>,
-    moq_tx: Option<tokio::sync::mpsc::Sender<AnyCanFrame>>,
+    tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    moq_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
     write_count: Arc<AtomicU64>,
 ) {
     let mut last_read = Instant::now();
@@ -101,10 +93,11 @@ fn can_reader_thread_fd(
                         continue;
                     }
                 };
+                let bytes = wire::encode(&any_frame);
                 if let Some(ref moq) = moq_tx {
-                    let _ = moq.try_send(any_frame.clone());
+                    let _ = moq.try_send(bytes.clone());
                 }
-                if tx.blocking_send(any_frame).is_err() {
+                if tx.blocking_send(bytes).is_err() {
                     break;
                 }
             }
@@ -124,11 +117,11 @@ fn can_reader_thread_fd(
     }
 }
 
-/// Reader thread for standard CAN sockets.
+/// Reader thread for standard CAN sockets. Encodes frames to wire format Vec<u8>.
 fn can_reader_thread_std(
     socket: Arc<socketcan::CanSocket>,
-    tx: tokio::sync::mpsc::Sender<AnyCanFrame>,
-    moq_tx: Option<tokio::sync::mpsc::Sender<AnyCanFrame>>,
+    tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    moq_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
     write_count: Arc<AtomicU64>,
 ) {
     let mut last_read = Instant::now();
@@ -161,10 +154,11 @@ fn can_reader_thread_std(
                         continue;
                     }
                 };
+                let bytes = wire::encode(&any_frame);
                 if let Some(ref moq) = moq_tx {
-                    let _ = moq.try_send(any_frame.clone());
+                    let _ = moq.try_send(bytes.clone());
                 }
-                if tx.blocking_send(any_frame).is_err() {
+                if tx.blocking_send(bytes).is_err() {
                     break;
                 }
             }
@@ -184,14 +178,13 @@ fn can_reader_thread_std(
     }
 }
 
-/// Writer thread for CAN FD sockets.
+/// Writer thread for CAN FD sockets. Decodes wire format Vec<u8> to frames.
 fn can_writer_thread_fd(
     socket: Arc<socketcan::CanFdSocket>,
-    mut rx: tokio::sync::mpsc::Receiver<AnyCanFrame>,
+    mut rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
     write_count: Arc<AtomicU64>,
 ) {
     let write_count_ref = &write_count;
-    let mut last_recv = Instant::now();
     let write_fn = |frame: &AnyCanFrame| {
         for attempt in 0..4u32 {
             let result = match frame {
@@ -224,7 +217,9 @@ fn can_writer_thread_fd(
         }
     };
 
-    while let Some(frame) = rx.blocking_recv() {
+    let mut pending = Vec::new();
+    let mut last_recv = Instant::now();
+    while let Some(data) = rx.blocking_recv() {
         let recv_gap = last_recv.elapsed();
         last_recv = Instant::now();
         if recv_gap > Duration::from_millis(50) {
@@ -233,22 +228,44 @@ fn can_writer_thread_fd(
                 recv_gap.as_secs_f64() * 1000.0,
             );
         }
-        let write_start = Instant::now();
-        write_fn(&frame);
-        let write_dur = write_start.elapsed();
-        if write_dur > Duration::from_millis(5) {
-            tracing::debug!(
-                "CAN writer: write_frame took {:.1}ms",
-                write_dur.as_secs_f64() * 1000.0,
-            );
+        pending.extend_from_slice(&data);
+
+        while pending.len() >= 6 {
+            match wire::encoded_size(&pending) {
+                Ok(frame_size) if pending.len() >= frame_size => match wire::decode(&pending) {
+                    Ok((frame, consumed)) => {
+                        let write_start = Instant::now();
+                        write_fn(&frame);
+                        let write_dur = write_start.elapsed();
+                        if write_dur > Duration::from_millis(5) {
+                            tracing::debug!(
+                                "CAN writer: write_frame took {:.1}ms",
+                                write_dur.as_secs_f64() * 1000.0,
+                            );
+                        }
+                        pending.drain(..consumed);
+                    }
+                    Err(e) => {
+                        tracing::error!("CAN wire decode error: {}", e);
+                        pending.clear();
+                        break;
+                    }
+                },
+                Ok(_) => break,
+                Err(e) => {
+                    tracing::error!("CAN wire frame size error: {}", e);
+                    pending.clear();
+                    break;
+                }
+            }
         }
     }
 }
 
-/// Writer thread for standard CAN sockets.
+/// Writer thread for standard CAN sockets. Decodes wire format Vec<u8> to frames.
 fn can_writer_thread_std(
     socket: Arc<socketcan::CanSocket>,
-    mut rx: tokio::sync::mpsc::Receiver<AnyCanFrame>,
+    mut rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
     write_count: Arc<AtomicU64>,
 ) {
     let write_count_ref = &write_count;
@@ -281,8 +298,9 @@ fn can_writer_thread_std(
         }
     };
 
+    let mut pending = Vec::new();
     let mut last_recv = Instant::now();
-    while let Some(frame) = rx.blocking_recv() {
+    while let Some(data) = rx.blocking_recv() {
         let recv_gap = last_recv.elapsed();
         last_recv = Instant::now();
         if recv_gap > Duration::from_millis(50) {
@@ -291,14 +309,36 @@ fn can_writer_thread_std(
                 recv_gap.as_secs_f64() * 1000.0,
             );
         }
-        let write_start = Instant::now();
-        write_fn(&frame);
-        let write_dur = write_start.elapsed();
-        if write_dur > Duration::from_millis(5) {
-            tracing::debug!(
-                "CAN writer: write_frame took {:.1}ms",
-                write_dur.as_secs_f64() * 1000.0,
-            );
+        pending.extend_from_slice(&data);
+
+        while pending.len() >= 6 {
+            match wire::encoded_size(&pending) {
+                Ok(frame_size) if pending.len() >= frame_size => match wire::decode(&pending) {
+                    Ok((frame, consumed)) => {
+                        let write_start = Instant::now();
+                        write_fn(&frame);
+                        let write_dur = write_start.elapsed();
+                        if write_dur > Duration::from_millis(5) {
+                            tracing::debug!(
+                                "CAN writer: write_frame took {:.1}ms",
+                                write_dur.as_secs_f64() * 1000.0,
+                            );
+                        }
+                        pending.drain(..consumed);
+                    }
+                    Err(e) => {
+                        tracing::error!("CAN wire decode error: {}", e);
+                        pending.clear();
+                        break;
+                    }
+                },
+                Ok(_) => break,
+                Err(e) => {
+                    tracing::error!("CAN wire frame size error: {}", e);
+                    pending.clear();
+                    break;
+                }
+            }
         }
     }
 }
@@ -334,8 +374,9 @@ impl CanServer {
             ),
         }
 
-        let (can_read_tx, can_read_rx) = tokio::sync::mpsc::channel::<AnyCanFrame>(16);
-        let (can_write_tx, can_write_rx) = tokio::sync::mpsc::channel::<AnyCanFrame>(1);
+        // Channels between CAN threads and BridgeServer (Vec<u8> wire-encoded)
+        let (read_tx, read_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+        let (write_tx, write_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
         let write_count = Arc::new(AtomicU64::new(0));
 
         let (moq_tx, moq_rx) = if moq_relay.is_some() {
@@ -361,14 +402,14 @@ impl CanServer {
             std::thread::Builder::new()
                 .name(format!("can-read-{}", interface))
                 .spawn(move || {
-                    can_reader_thread_fd(socket_reader, can_read_tx, moq_reader_tx, wc_reader)
+                    can_reader_thread_fd(socket_reader, read_tx, moq_reader_tx, wc_reader)
                 })?;
 
             let socket_writer = Arc::clone(&socket);
             let wc_writer = Arc::clone(&write_count);
             std::thread::Builder::new()
                 .name(format!("can-write-{}", interface))
-                .spawn(move || can_writer_thread_fd(socket_writer, can_write_rx, wc_writer))?;
+                .spawn(move || can_writer_thread_fd(socket_writer, write_rx, wc_writer))?;
         } else {
             let socket = socketcan::CanSocket::open(interface).map_err(|e| {
                 anyhow::anyhow!("Failed to open CAN socket on {}: {}", interface, e)
@@ -385,43 +426,41 @@ impl CanServer {
             std::thread::Builder::new()
                 .name(format!("can-read-{}", interface))
                 .spawn(move || {
-                    can_reader_thread_std(socket_reader, can_read_tx, moq_reader_tx, wc_reader)
+                    can_reader_thread_std(socket_reader, read_tx, moq_reader_tx, wc_reader)
                 })?;
 
             let socket_writer = Arc::clone(&socket);
             let wc_writer = Arc::clone(&write_count);
             std::thread::Builder::new()
                 .name(format!("can-write-{}", interface))
-                .spawn(move || can_writer_thread_std(socket_writer, can_write_rx, wc_writer))?;
+                .spawn(move || can_writer_thread_std(socket_writer, write_rx, wc_writer))?;
         }
 
-        let mut builder = IrohServerBuilder::new();
-        if let Some(path) = identity_path {
-            builder = builder.identity_path(path);
-        }
-        let server = builder.bind().await?;
-        let server_id = server.id().to_string();
-
-        let moq_path = moq_path
+        let moq_path_str = moq_path
             .map(|p| p.to_string())
             .unwrap_or_else(|| format!("anon/xoq-can-{}", interface));
 
+        let moq_config = moq_relay.map(|relay| MoqConfig {
+            relay: relay.to_string(),
+            path: moq_path_str.clone(),
+            insecure: moq_insecure,
+            state_subpath: "state".to_string(),
+            command_subpath: "commands".to_string(),
+            track_name: "can".to_string(),
+        });
+
+        let bridge =
+            BridgeServer::new(identity_path, write_tx, read_rx, moq_rx, moq_config).await?;
+
         Ok(Self {
             interface: interface.to_string(),
-            server_id,
-            can_write_tx,
-            can_read_rx: std::sync::Mutex::new(Some(can_read_rx)),
-            endpoint: Arc::new(server),
-            moq_read_rx: std::sync::Mutex::new(moq_rx),
-            moq_relay: moq_relay.map(|s| s.to_string()),
-            moq_path,
-            moq_insecure,
+            bridge,
         })
     }
 
     /// Get the server's endpoint ID (share this with clients).
     pub fn id(&self) -> &str {
-        &self.server_id
+        self.bridge.id()
     }
 
     /// Run the bridge server (blocks forever, handling connections).
@@ -429,480 +468,17 @@ impl CanServer {
         tracing::info!(
             "[{}] CAN bridge server running. ID: {}",
             self.interface,
-            self.server_id
+            self.bridge.id()
         );
-
-        // Spawn MoQ state publisher if configured
-        let _moq_handle = if self.moq_relay.is_some() {
-            let rx = self.moq_read_rx.lock().unwrap().take().unwrap();
-            let relay = self.moq_relay.clone().unwrap();
-            let path = self.moq_path.clone();
-            let insecure = self.moq_insecure;
-            Some(tokio::spawn(async move {
-                if let Err(e) = moq_state_publisher(&relay, &path, insecure, rx).await {
-                    tracing::error!("MoQ publisher error: {}", e);
-                }
-            }))
-        } else {
-            None
-        };
-
-        // Spawn MoQ command subscriber if configured
-        let _moq_cmd_handle = if self.moq_relay.is_some() {
-            let relay = self.moq_relay.clone().unwrap();
-            let path = self.moq_path.clone();
-            let insecure = self.moq_insecure;
-            let write_tx = self.can_write_tx.clone();
-            Some(tokio::spawn(async move {
-                if let Err(e) = moq_command_subscriber(&relay, &path, insecure, write_tx).await {
-                    tracing::error!("MoQ command subscriber error: {}", e);
-                }
-            }))
-        } else {
-            None
-        };
-
-        let mut current_conn: Option<(
-            CancellationToken,
-            tokio::task::JoinHandle<tokio::sync::mpsc::Receiver<AnyCanFrame>>,
-        )> = None;
-
-        loop {
-            let conn = match self.endpoint.accept().await? {
-                Some(c) => c,
-                None => continue,
-            };
-
-            tracing::info!("Client connected: {}", conn.remote_id());
-
-            if let Some((cancel, handle)) = current_conn.take() {
-                tracing::info!("New client connected, closing previous connection");
-                cancel.cancel();
-                match handle.await {
-                    Ok(rx) => {
-                        self.can_read_rx.lock().unwrap().replace(rx);
-                    }
-                    Err(e) => {
-                        tracing::error!("Connection task panicked: {}", e);
-                    }
-                }
-            }
-
-            let rx = self
-                .can_read_rx
-                .lock()
-                .unwrap()
-                .take()
-                .expect("CAN read receiver should be available");
-
-            let cancel = CancellationToken::new();
-            let cancel_clone = cancel.clone();
-            let write_tx = self.can_write_tx.clone();
-
-            let handle = tokio::spawn(async move {
-                let (result, rx) = handle_connection(conn, rx, write_tx, cancel_clone).await;
-                if let Err(e) = &result {
-                    tracing::error!("Connection error: {}", e);
-                }
-                tracing::info!("Client disconnected");
-                rx
-            });
-
-            current_conn = Some((cancel, handle));
-        }
+        self.bridge.run().await
     }
 
     /// Run the bridge server for a single connection, then return.
     pub async fn run_once(&self) -> Result<()> {
         tracing::info!(
             "CAN bridge server waiting for connection. ID: {}",
-            self.server_id
+            self.bridge.id()
         );
-
-        loop {
-            let conn = match self.endpoint.accept().await? {
-                Some(c) => c,
-                None => continue,
-            };
-
-            tracing::info!("Client connected: {}", conn.remote_id());
-
-            let rx = self
-                .can_read_rx
-                .lock()
-                .unwrap()
-                .take()
-                .expect("CAN read receiver should be available");
-
-            let write_tx = self.can_write_tx.clone();
-            let cancel = CancellationToken::new();
-
-            let (result, rx) = handle_connection(conn, rx, write_tx, cancel).await;
-
-            self.can_read_rx.lock().unwrap().replace(rx);
-
-            tracing::info!("Client disconnected");
-
-            if let Err(e) = result {
-                tracing::error!("Connection error: {}", e);
-            }
-
-            return Ok(());
-        }
-    }
-}
-
-/// Core bridge logic for a single connection.
-async fn handle_connection(
-    conn: IrohConnection,
-    mut can_read_rx: tokio::sync::mpsc::Receiver<AnyCanFrame>,
-    can_write_tx: tokio::sync::mpsc::Sender<AnyCanFrame>,
-    cancel: CancellationToken,
-) -> (Result<()>, tokio::sync::mpsc::Receiver<AnyCanFrame>) {
-    let stream = tokio::select! {
-        result = conn.accept_stream() => {
-            match result {
-                Ok(s) => s,
-                Err(e) => {
-                    return (
-                        Err(anyhow::anyhow!("Failed to accept stream: {}", e)),
-                        can_read_rx,
-                    );
-                }
-            }
-        }
-        _ = cancel.cancelled() => {
-            tracing::info!("Connection cancelled while waiting for stream");
-            return (Ok(()), can_read_rx);
-        }
-    };
-
-    let (mut send, mut recv) = stream.split();
-
-    // Drain stale frames
-    let mut drained = 0;
-    while can_read_rx.try_recv().is_ok() {
-        drained += 1;
-    }
-    if drained > 0 {
-        tracing::info!("Drained {} stale CAN frames from buffer", drained);
-    }
-
-    let conn_cancel = conn.cancellation_token();
-
-    // CAN → Network task (with batching)
-    let can_to_net_cancel = cancel.clone();
-    let conn_cancel_clone = conn_cancel.clone();
-    let can_to_net = tokio::spawn(async move {
-        let mut batch_buf = Vec::with_capacity(1024);
-
-        loop {
-            batch_buf.clear();
-
-            let first = tokio::select! {
-                _ = can_to_net_cancel.cancelled() => break,
-                _ = conn_cancel_clone.cancelled() => break,
-                frame = can_read_rx.recv() => match frame {
-                    Some(f) => f,
-                    None => break,
-                }
-            };
-
-            batch_buf.extend_from_slice(&wire::encode(&first));
-
-            // Greedily collect more ready frames (up to 8 total)
-            for _ in 1..8 {
-                match can_read_rx.try_recv() {
-                    Ok(frame) => {
-                        batch_buf.extend_from_slice(&wire::encode(&frame));
-                    }
-                    Err(_) => break,
-                }
-            }
-
-            if send.write_all(&batch_buf).await.is_err() {
-                break;
-            }
-            // quinn's flush() is a no-op — yield to let connection task send
-            tokio::task::yield_now().await;
-        }
-
-        can_read_rx
-    });
-
-    // Network → CAN
-    let mut buf = vec![0u8; 1024];
-    let mut pending = Vec::new();
-    let mut last_net_read = Instant::now();
-    let result = loop {
-        tokio::select! {
-            _ = cancel.cancelled() => {
-                break Ok(());
-            }
-            _ = conn_cancel.cancelled() => {
-                break Ok(());
-            }
-            read_result = recv.read(&mut buf) => {
-                match read_result {
-                    Ok(Some(n)) if n > 0 => {
-                        let net_gap = last_net_read.elapsed();
-                        if net_gap > Duration::from_millis(50) {
-                            tracing::debug!(
-                                "Net→CAN: {:.1}ms gap between QUIC reads ({} bytes)",
-                                net_gap.as_secs_f64() * 1000.0,
-                                n,
-                            );
-                        }
-                        last_net_read = Instant::now();
-                        pending.extend_from_slice(&buf[..n]);
-
-                        while pending.len() >= 6 {
-                            match wire::encoded_size(&pending) {
-                                Ok(frame_size) if pending.len() >= frame_size => {
-                                    match wire::decode(&pending) {
-                                        Ok((frame, consumed)) => {
-                                            if can_write_tx.send(frame).await.is_err() {
-                                                tracing::error!("CAN writer thread died");
-                                                break;
-                                            }
-                                            pending.drain(..consumed);
-                                        }
-                                        Err(e) => {
-                                            tracing::error!("Frame decode error: {}", e);
-                                            pending.clear();
-                                            break;
-                                        }
-                                    }
-                                }
-                                Ok(_) => break,
-                                Err(e) => {
-                                    tracing::error!("Frame size error: {}", e);
-                                    pending.clear();
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    Ok(Some(_)) => continue,
-                    Ok(None) => {
-                        tracing::info!("Client disconnected (stream closed)");
-                        break Ok(());
-                    }
-                    Err(e) => {
-                        break Err(anyhow::anyhow!("Network read error: {}", e));
-                    }
-                }
-            }
-        }
-    };
-
-    cancel.cancel();
-    let can_read_rx = match can_to_net.await {
-        Ok(rx) => rx,
-        Err(e) => {
-            tracing::error!("CAN-to-net task panicked: {}", e);
-            return (
-                Err(anyhow::anyhow!("CAN-to-net task panicked: {}", e)),
-                tokio::sync::mpsc::channel(1).1,
-            );
-        }
-    };
-
-    (result, can_read_rx)
-}
-
-/// Publish CAN frames to MoQ relay for browser monitoring.
-/// Automatically reconnects when the relay session drops.
-async fn moq_state_publisher(
-    relay: &str,
-    path: &str,
-    insecure: bool,
-    mut rx: tokio::sync::mpsc::Receiver<AnyCanFrame>,
-) -> Result<()> {
-    use crate::moq::MoqBuilder;
-
-    let mut builder = MoqBuilder::new().relay(relay);
-    if insecure {
-        builder = builder.disable_tls_verify();
-    }
-
-    loop {
-        // Connect with backoff
-        let mut delay = Duration::from_secs(1);
-        let (publisher, mut writer) = loop {
-            match builder
-                .clone()
-                .path(&format!("{}/state", path))
-                .connect_publisher_with_track("can")
-                .await
-            {
-                Ok(result) => break result,
-                Err(e) => {
-                    tracing::warn!("MoQ connect failed: {}, retrying in {:?}...", e, delay);
-                    while rx.try_recv().is_ok() {}
-                    tokio::time::sleep(delay).await;
-                    delay = (delay * 2).min(Duration::from_secs(30));
-                }
-            }
-        };
-        tracing::info!("MoQ state publisher connected on {}/state", path);
-
-        let mut batch_buf = Vec::with_capacity(1024);
-        let disconnected = loop {
-            tokio::select! {
-                result = publisher.closed() => {
-                    tracing::warn!("MoQ session closed: {:?}, reconnecting...", result.err());
-                    break false;
-                }
-                frame = rx.recv() => {
-                    let first = match frame {
-                        Some(f) => f,
-                        None => break true, // channel closed, shut down
-                    };
-
-                    batch_buf.clear();
-                    batch_buf.extend_from_slice(&wire::encode(&first));
-
-                    while let Ok(f) = rx.try_recv() {
-                        batch_buf.extend_from_slice(&wire::encode(&f));
-                    }
-
-                    writer.write(batch_buf.clone());
-                }
-            }
-        };
-
-        if disconnected {
-            break;
-        }
-
-        // Drain stale frames before reconnecting
-        while rx.try_recv().is_ok() {}
-    }
-    Ok(())
-}
-
-/// Subscribe to MoQ commands and forward them to the CAN writer thread.
-/// Uses `try_send()` so iroh commands always have priority — MoQ commands are
-/// dropped (with a log) if the channel is full (iroh command pending).
-/// Automatically reconnects on disconnect.
-async fn moq_command_subscriber(
-    relay: &str,
-    path: &str,
-    insecure: bool,
-    can_write_tx: tokio::sync::mpsc::Sender<AnyCanFrame>,
-) -> Result<()> {
-    use crate::moq::MoqBuilder;
-
-    let mut builder = MoqBuilder::new().relay(relay);
-    if insecure {
-        builder = builder.disable_tls_verify();
-    }
-
-    let cmd_path = format!("{}/commands", path);
-
-    loop {
-        tracing::debug!("MoQ command subscriber connecting on {}...", cmd_path);
-
-        let cmd_sub = match builder.clone().path(&cmd_path).connect_subscriber().await {
-            Ok(sub) => sub,
-            Err(e) => {
-                tracing::warn!("MoQ command subscriber connect error: {}, retrying...", e);
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                continue;
-            }
-        };
-
-        let (cmd_reader, cmd_sub) = match tokio::time::timeout(Duration::from_secs(5), async {
-            let mut sub = cmd_sub;
-            let result = sub.subscribe_track("can").await;
-            (result, sub)
-        })
-        .await
-        {
-            Ok((Ok(Some(reader)), sub)) => {
-                tracing::info!("MoQ command subscriber connected on {}", cmd_path);
-                (reader, sub)
-            }
-            Ok((Ok(None), sub)) => {
-                tracing::debug!("Command broadcast ended, retrying...");
-                drop(sub);
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                continue;
-            }
-            Ok((Err(e), sub)) => {
-                tracing::debug!("Command subscribe error: {}, retrying...", e);
-                drop(sub);
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                continue;
-            }
-            Err(_) => {
-                tracing::debug!("No command publisher yet, retrying...");
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                continue;
-            }
-        };
-        let mut cmd_reader = cmd_reader;
-        let _cmd_sub = cmd_sub; // keep alive while reading
-
-        let mut pending = Vec::new();
-        loop {
-            match cmd_reader.read().await {
-                Ok(Some(data)) => {
-                    pending.extend_from_slice(&data);
-
-                    while pending.len() >= 6 {
-                        match wire::encoded_size(&pending) {
-                            Ok(frame_size) if pending.len() >= frame_size => {
-                                match wire::decode(&pending) {
-                                    Ok((frame, consumed)) => {
-                                        match can_write_tx.try_send(frame) {
-                                            Ok(_) => {
-                                                tracing::debug!("MoQ command forwarded to CAN");
-                                            }
-                                            Err(tokio::sync::mpsc::error::TrySendError::Full(
-                                                _,
-                                            )) => {
-                                                tracing::debug!(
-                                                    "MoQ command dropped (iroh has priority)"
-                                                );
-                                            }
-                                            Err(
-                                                tokio::sync::mpsc::error::TrySendError::Closed(_),
-                                            ) => {
-                                                tracing::error!("CAN writer thread died");
-                                                return Ok(());
-                                            }
-                                        }
-                                        pending.drain(..consumed);
-                                    }
-                                    Err(e) => {
-                                        tracing::error!("MoQ command decode error: {}", e);
-                                        pending.clear();
-                                        break;
-                                    }
-                                }
-                            }
-                            Ok(_) => break,
-                            Err(e) => {
-                                tracing::error!("MoQ command frame size error: {}", e);
-                                pending.clear();
-                                break;
-                            }
-                        }
-                    }
-                }
-                Ok(None) => {
-                    tracing::info!("MoQ command stream ended, will reconnect...");
-                    break;
-                }
-                Err(e) => {
-                    tracing::warn!("MoQ command read error: {}, will reconnect...", e);
-                    break;
-                }
-            }
-        }
-
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        self.bridge.run_once().await
     }
 }
