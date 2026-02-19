@@ -151,7 +151,7 @@ Server (Linux with NVIDIA GPU + RealSense camera):
 
 ```bash
 cargo run --bin realsense-server --features realsense -- \
-  --relay https://your-relay:4443 --path anon/realsense
+  --relay https://cdn.1ms.ai --path anon/realsense
 ```
 
 Publishes two H.264/CMAF tracks over MoQ: `video` (color) and `depth` (grayscale, auto-calibrated depth range).
@@ -238,16 +238,20 @@ The CAN MoQ server broadcasts CAN state to all subscribers (1-to-many) and accep
 Server (Linux with SocketCAN):
 
 ```bash
-# Unified can-server with MoQ relay (recommended — supports multiple interfaces + iroh P2P)
 cargo run --release --bin can-server --features "iroh,can" -- \
   can0:fd can1:fd can2:fd can3:fd --moq-relay https://cdn.1ms.ai
-
-# Or dedicated MoQ-only server (single interface)
-cargo run --release --bin moq-can-server --features can -- \
-  can0 --relay https://cdn.1ms.ai
 ```
 
 The default broadcast path is `anon/xoq-can-<interface>/state` (e.g., `anon/xoq-can-can0/state`), and the command path is `anon/xoq-can-<interface>/cmd`.
+
+**No CAN hardware?** Use `fake-can-server` — a drop-in replacement that simulates 8 Damiao motors (0x01–0x08) over iroh P2P, with optional MoQ state publishing for browser monitoring:
+
+```bash
+cargo run --release --bin fake-can-server --features iroh
+# Or with MoQ publishing:
+cargo run --release --bin fake-can-server --features iroh -- \
+  --moq-relay https://cdn.1ms.ai --moq-path anon/xoq-can-can0
+```
 
 Browser client — open the web examples:
 
@@ -261,14 +265,11 @@ cd js && npm install && npm run examples
 
 #### 2b. Bridge a Serial Port over MoQ
 
-The serial MoQ server provides bidirectional pass-through — raw bytes flow between the browser and the serial device via the relay.
-
 Server (Linux/macOS/Windows):
 
 ```bash
-cargo run --release --bin moq-serial-server --features serial -- \
-  /dev/ttyACM0 1000000 https://172.18.133.111:4443 anon/xoq-serial
-#  ^port        ^baud   ^relay URL                   ^MoQ path
+cargo run --release --bin serial-server --features "iroh,serial" -- \
+  /dev/ttyACM0 1000000 --moq anon/xoq-serial
 ```
 
 Browser client:
@@ -356,9 +357,8 @@ Clients target macOS, Linux, and Windows. Future: C/C++ bindings via Rust ABI.
 | `serial-server`     | Bridges a local serial port for remote access               | `iroh`, `serial`                 |
 | `can-server`        | Bridges local CAN interfaces for remote access              | `iroh`, `can`                    |
 | `audio-server`      | Bridges local mic/speaker for remote access (VPIO on macOS) | `iroh`, `audio` / `audio-macos`  |
+| `fake-can-server`   | Simulates Damiao motors without CAN hardware (iroh P2P + MoQ) | `iroh`                           |
 | `realsense-server`  | Streams color + depth from RealSense over MoQ               | `realsense`                      |
-| `moq-can-server`    | CAN bridge over MoQ relay                                   | `can`                            |
-| `moq-serial-server` | Serial bridge over MoQ relay                                | `serial`                         |
 
 ### Examples
 

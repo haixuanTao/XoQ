@@ -141,20 +141,6 @@ name = "camera_client"
 path = "examples/camera_client.rs"
 required-features = ["camera-remote"]
 
-[[bin]]
-name = "moq-can-server"
-path = "src/bin/moq_can_server.rs"
-required-features = ["can"]
-
-[[bin]]
-name = "moq-serial-server"
-path = "src/bin/moq_serial_server.rs"
-required-features = ["serial"]
-
-[[example]]
-name = "moq_serial_client"
-path = "examples/moq_serial_client.rs"
-
 [[example]]
 name = "moq_test"
 path = "examples/moq_test.rs"

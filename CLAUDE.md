@@ -135,5 +135,4 @@ Publishes per-interface at `anon/xoq-can-can0/state` and `anon/xoq-can-can1/stat
 ### Files
 
 - `src/bin/can_server.rs` — CAN server binary (MoQ pub/sub + SocketCAN)
-- `src/moq_can_server.rs` — MoQ CAN bridge logic
 - `src/socketcan_impl.rs` — SocketCAN interface
