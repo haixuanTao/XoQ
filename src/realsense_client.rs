@@ -1,12 +1,12 @@
 //! Remote RealSense client via MoQ.
 //!
 //! Subscribes to "video", "depth", and "metadata" tracks published by
-//! `realsense_server`, decodes AV1 frames with dav1d, and provides
+//! `realsense_server`, decodes AV1 frames with NVDEC, and provides
 //! synced color+depth pairs with intrinsics.
 
 use anyhow::Result;
 
-use crate::dav1d_decoder::{self, Dav1dDecoder};
+use crate::nvdec_av1_decoder::{self, NvdecAv1Decoder};
 use crate::moq::{MoqBuilder, MoqSubscriber, MoqTrackReader};
 
 /// Camera intrinsics received from the metadata track.
@@ -40,8 +40,8 @@ pub struct RealSenseClient {
     video_reader: MoqTrackReader,
     depth_reader: MoqTrackReader,
     metadata_reader: Option<MoqTrackReader>,
-    video_decoder: Dav1dDecoder,
-    depth_decoder: Dav1dDecoder,
+    video_decoder: Box<NvdecAv1Decoder>,
+    depth_decoder: Box<NvdecAv1Decoder>,
     intrinsics: Option<Intrinsics>,
     _subscriber: MoqSubscriber,
 }
@@ -59,7 +59,6 @@ impl RealSenseClient {
         };
 
         let (relay_url, moq_path) = if relay.contains("://") {
-            // Parse relay URL and path
             let url = url::Url::parse(&relay)?;
             let base = format!("{}://{}:{}", url.scheme(), url.host_str().unwrap_or("localhost"), url.port().unwrap_or(443));
             let p = url.path().trim_start_matches('/').to_string();
@@ -88,8 +87,8 @@ impl RealSenseClient {
         // metadata track is optional (server may not have it yet)
         let metadata_reader = subscriber.subscribe_track("metadata").await.ok().flatten();
 
-        let video_decoder = Dav1dDecoder::new()?;
-        let depth_decoder = Dav1dDecoder::new()?;
+        let video_decoder = Box::new(NvdecAv1Decoder::new(false)?); // 8-bit NV12 for color
+        let depth_decoder = Box::new(NvdecAv1Decoder::new(true)?);  // 10-bit P016 for depth
 
         Ok(Self {
             video_reader,
@@ -107,7 +106,6 @@ impl RealSenseClient {
         // Try to read metadata if available and we don't have intrinsics yet
         if self.intrinsics.is_none() {
             if let Some(ref mut meta_reader) = self.metadata_reader {
-                // Non-blocking try: use select with a zero-duration sleep
                 tokio::select! {
                     biased;
                     result = meta_reader.read() => {
@@ -130,7 +128,6 @@ impl RealSenseClient {
 
             let (timestamp_ms, payload) = parse_stamped_data(&data);
 
-            // Extract AV1 OBUs from CMAF
             let obus = extract_av1_from_cmaf(payload);
             if obus.is_empty() {
                 continue;
@@ -165,9 +162,9 @@ impl RealSenseClient {
 
         let (color_decoded, timestamp_ms) = color_frame;
 
-        // Convert depth: 10-bit P010 Y-plane → u16 mm
+        // Convert depth: P016 Y-plane → u16 mm
         let depth_shift = self.intrinsics.map(|i| i.depth_shift).unwrap_or(0);
-        let depth_mm = dav1d_decoder::p010_y_to_depth_mm(&depth_frame.data, depth_shift);
+        let depth_mm = nvdec_av1_decoder::p016_y_to_depth_mm(&depth_frame.data, depth_shift);
 
         Ok(RealSenseFrames {
             color_rgb: color_decoded.data,
@@ -185,8 +182,6 @@ impl RealSenseClient {
 
     fn parse_metadata(&mut self, data: &[u8]) {
         if let Ok(text) = std::str::from_utf8(data) {
-            // Try to parse JSON: {"fx":..., "fy":..., ...}
-            // Simple manual parsing to avoid serde dependency
             if let Some(intr) = parse_intrinsics_json(text) {
                 self.intrinsics = Some(intr);
             }
@@ -204,9 +199,6 @@ fn parse_stamped_data(data: &[u8]) -> (u64, &[u8]) {
 }
 
 /// Extract raw AV1 OBU data from CMAF fMP4 (init + media segments).
-///
-/// Walks the MP4 boxes looking for `mdat`, then returns its payload
-/// which contains raw AV1 OBUs (not length-prefixed like H.264).
 fn extract_av1_from_cmaf(data: &[u8]) -> Vec<u8> {
     let mut pos = 0;
     let mut result = Vec::new();
@@ -221,7 +213,6 @@ fn extract_av1_from_cmaf(data: &[u8]) -> Vec<u8> {
         }
 
         if box_type == b"mdat" {
-            // For AV1 in ISOBMFF, mdat contains raw OBU data directly
             result.extend_from_slice(&data[pos + 8..pos + box_size]);
         }
 
@@ -277,7 +268,6 @@ impl SyncRealSenseClient {
     }
 
     /// Auto-detect transport and connect.
-    /// Currently only MoQ is supported (paths containing `/`).
     pub fn connect_auto(source: &str) -> Result<Self> {
         Self::connect_moq(source)
     }
@@ -296,7 +286,6 @@ impl SyncRealSenseClient {
                 Ok(frames)
             }
             Err(e) if !self.has_read => {
-                // First read failed — likely GSO killed connection on Linux
                 eprintln!("[xoq] First read failed ({e}), reconnecting...");
                 self.reconnect()?;
                 self.has_read = true;

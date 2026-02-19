@@ -119,11 +119,15 @@ pub mod nvenc_av1;
 #[cfg(feature = "realsense")]
 pub mod realsense;
 
-// AV1 decoder (dav1d)
+// AV1 decoder (dav1d — optional, cross-platform)
 #[cfg(feature = "dav1d")]
 pub mod dav1d_decoder;
 
-// Remote RealSense client (MoQ + dav1d)
+// NVDEC AV1 decoder (GPU hardware decode)
+#[cfg(feature = "nvenc")]
+pub mod nvdec_av1_decoder;
+
+// Remote RealSense client (MoQ + NVDEC)
 #[cfg(feature = "realsense-remote")]
 pub mod realsense_client;
 
