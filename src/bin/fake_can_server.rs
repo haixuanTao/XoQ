@@ -8,7 +8,7 @@
 //!   fake-can-server [options]
 //!
 //! Options:
-//!   --moq-relay <url>    MoQ relay URL (default: https://cdn.1ms.ai)
+//!   --moq-relay <url>    MoQ relay URL (enables MoQ alongside iroh)
 //!   --moq-path <path>    MoQ base path (default: anon/xoq-can-can0)
 //!   --moq-insecure       Disable TLS verification for MoQ
 //!   --key-dir <path>     Directory for identity key files (default: current dir)
@@ -124,7 +124,8 @@ fn process_command(motors: &Motors, can_id: u32, data: &[u8]) -> Option<Vec<u8>>
 
     let mut motors = motors.lock().unwrap();
 
-    let resp_id = can_id + 0x10; // real motors respond on cmd_id + 0x10
+    // Damiao response IDs are always 0x11 + motor_index, regardless of command ID range
+    let resp_id = (0x11 + idx) as u32;
 
     if data == ENABLE_MIT {
         motors[idx].enabled = true;
@@ -172,7 +173,7 @@ struct Args {
 fn parse_args() -> Args {
     let args: Vec<String> = std::env::args().collect();
     let mut result = Args {
-        moq_relay: Some("https://cdn.1ms.ai".to_string()),
+        moq_relay: None,
         moq_path: "anon/xoq-can-can0".to_string(),
         moq_insecure: false,
         key_dir: ".".to_string(),
@@ -191,10 +192,6 @@ fn parse_args() -> Args {
             }
             "--moq-insecure" => {
                 result.moq_insecure = true;
-                i += 1;
-            }
-            "--no-moq" => {
-                result.moq_relay = None;
                 i += 1;
             }
             "--key-dir" if i + 1 < args.len() => {
@@ -220,11 +217,14 @@ fn print_usage() {
     println!("Usage: fake-can-server [options]");
     println!();
     println!("Options:");
-    println!("  --moq-relay <url>    MoQ relay URL (default: https://cdn.1ms.ai)");
+    println!("  --moq-relay <url>    MoQ relay URL (enables MoQ alongside iroh)");
     println!("  --moq-path <path>    MoQ base path (default: anon/xoq-can-can0)");
     println!("  --moq-insecure       Disable TLS verification for MoQ");
-    println!("  --no-moq             Disable MoQ publishing (iroh only)");
     println!("  --key-dir <path>     Directory for identity key files (default: .)");
+    println!();
+    println!("Examples:");
+    println!("  fake-can-server                                             # iroh only");
+    println!("  fake-can-server --moq-relay https://cdn.1ms.ai              # iroh + MoQ");
 }
 
 /// Handle a single iroh connection: read commands, simulate motors, send responses.

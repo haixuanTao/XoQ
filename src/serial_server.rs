@@ -1,21 +1,28 @@
 //! Serial server - bridges local serial port to remote clients over iroh P2P.
+//! Optionally broadcasts serial data via MoQ for browser monitoring.
 
 use anyhow::Result;
-use iroh::Watcher;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 
 use crate::iroh::{IrohConnection, IrohServerBuilder};
 use crate::serial::SerialPort;
 
-/// A server that bridges a local serial port to remote clients over iroh P2P
+/// A server that bridges a local serial port to remote clients over iroh P2P.
+/// Optionally publishes serial data via MoQ for browser access.
 pub struct Server {
     server_id: String,
-    /// Sender for data to write to serial port
-    serial_write_tx: std::sync::mpsc::Sender<Vec<u8>>,
+    /// Sender for data to write to serial port (tokio mpsc for async + try_send)
+    serial_write_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
     /// Receiver for data read from serial port
     serial_read_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<Vec<u8>>>>,
     endpoint: Arc<crate::iroh::IrohServer>,
+    // MoQ fields
+    moq_read_rx: std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<Vec<u8>>>>,
+    moq_relay: Option<String>,
+    moq_path: String,
+    moq_insecure: bool,
 }
 
 impl Server {
@@ -25,7 +32,17 @@ impl Server {
     ///     port: Serial port name (e.g., "/dev/ttyUSB0" or "COM3")
     ///     baud_rate: Baud rate (e.g., 115200)
     ///     identity_path: Optional path to save/load server identity
-    pub async fn new(port: &str, baud_rate: u32, identity_path: Option<&str>) -> Result<Self> {
+    ///     moq_relay: Optional MoQ relay URL (enables MoQ alongside iroh)
+    ///     moq_path: Optional MoQ broadcast path (default: anon/xoq-serial)
+    ///     moq_insecure: Disable TLS verification for MoQ
+    pub async fn new(
+        port: &str,
+        baud_rate: u32,
+        identity_path: Option<&str>,
+        moq_relay: Option<&str>,
+        moq_path: Option<&str>,
+        moq_insecure: bool,
+    ) -> Result<Self> {
         // Open serial port and split
         let serial = SerialPort::open_simple(port, baud_rate)?;
         let (mut reader, mut writer) = serial.split();
@@ -33,8 +50,16 @@ impl Server {
         // Create channels for serial I/O
         // tokio channel for serial->network (async receiver)
         let (serial_read_tx, serial_read_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(32);
-        // std channel for network->serial (blocking writer thread)
-        let (serial_write_tx, serial_write_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        // tokio channel for network->serial (capacity 1 for backpressure)
+        let (serial_write_tx, mut serial_write_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
+
+        // Optional MoQ fan-out channel
+        let (moq_tx, moq_rx) = if moq_relay.is_some() {
+            let (tx, rx) = tokio::sync::mpsc::channel(128);
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
 
         // Spawn dedicated reader thread that continuously polls serial
         let read_tx = serial_read_tx;
@@ -53,7 +78,12 @@ impl Server {
                         }
                         Ok(n) => {
                             tracing::debug!("Serial read {} bytes", n);
-                            if read_tx.send(buf[..n].to_vec()).await.is_err() {
+                            let data = buf[..n].to_vec();
+                            // Fan out to MoQ (non-blocking)
+                            if let Some(ref moq) = moq_tx {
+                                let _ = moq.try_send(data.clone());
+                            }
+                            if read_tx.send(data).await.is_err() {
                                 break; // Channel closed
                             }
                         }
@@ -73,7 +103,7 @@ impl Server {
                 .build()
                 .unwrap();
             rt.block_on(async move {
-                while let Ok(data) = serial_write_rx.recv() {
+                while let Some(data) = serial_write_rx.recv().await {
                     if let Err(e) = writer.write_all(&data).await {
                         tracing::error!("Serial write error: {}", e);
                         break;
@@ -91,11 +121,19 @@ impl Server {
         let server = builder.bind().await?;
         let server_id = server.id().to_string();
 
+        let moq_path = moq_path
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "anon/xoq-serial".to_string());
+
         Ok(Self {
             server_id,
             serial_write_tx,
             serial_read_rx: Arc::new(Mutex::new(serial_read_rx)),
             endpoint: Arc::new(server),
+            moq_read_rx: std::sync::Mutex::new(moq_rx),
+            moq_relay: moq_relay.map(|s| s.to_string()),
+            moq_path,
+            moq_insecure,
         })
     }
 
@@ -107,6 +145,36 @@ impl Server {
     /// Run the bridge server (blocks forever, handling connections)
     pub async fn run(&self) -> Result<()> {
         tracing::info!("Serial bridge server running. ID: {}", self.server_id);
+
+        // Spawn MoQ s2c publisher if configured
+        let _moq_pub_handle = if self.moq_relay.is_some() {
+            let rx = self.moq_read_rx.lock().unwrap().take().unwrap();
+            let relay = self.moq_relay.clone().unwrap();
+            let path = self.moq_path.clone();
+            let insecure = self.moq_insecure;
+            Some(tokio::spawn(async move {
+                if let Err(e) = moq_s2c_publisher(&relay, &path, insecure, rx).await {
+                    tracing::error!("MoQ s2c publisher error: {}", e);
+                }
+            }))
+        } else {
+            None
+        };
+
+        // Spawn MoQ c2s subscriber if configured
+        let _moq_sub_handle = if self.moq_relay.is_some() {
+            let relay = self.moq_relay.clone().unwrap();
+            let path = self.moq_path.clone();
+            let insecure = self.moq_insecure;
+            let write_tx = self.serial_write_tx.clone();
+            Some(tokio::spawn(async move {
+                if let Err(e) = moq_c2s_subscriber(&relay, &path, insecure, write_tx).await {
+                    tracing::error!("MoQ c2s subscriber error: {}", e);
+                }
+            }))
+        } else {
+            None
+        };
 
         let mut active_cancel: Option<tokio_util::sync::CancellationToken> = None;
         let mut active_task: Option<tokio::task::JoinHandle<()>> = None;
@@ -136,16 +204,10 @@ impl Server {
             // Spawn connection handler so we can accept new connections immediately
             let serial_read_rx = self.serial_read_rx.clone();
             let serial_write_tx = self.serial_write_tx.clone();
-            let endpoint = self.endpoint.clone();
             active_task = Some(tokio::spawn(async move {
-                if let Err(e) = Self::handle_connection_inner(
-                    conn,
-                    serial_read_rx,
-                    serial_write_tx,
-                    &endpoint,
-                    cancel,
-                )
-                .await
+                if let Err(e) =
+                    Self::handle_connection_inner(conn, serial_read_rx, serial_write_tx, cancel)
+                        .await
                 {
                     tracing::error!("Connection error: {}", e);
                 }
@@ -174,7 +236,6 @@ impl Server {
                 conn,
                 self.serial_read_rx.clone(),
                 self.serial_write_tx.clone(),
-                &self.endpoint,
                 cancel,
             )
             .await
@@ -190,18 +251,9 @@ impl Server {
     async fn handle_connection_inner(
         conn: IrohConnection,
         serial_read_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<Vec<u8>>>>,
-        serial_write_tx: std::sync::mpsc::Sender<Vec<u8>>,
-        endpoint: &crate::iroh::IrohServer,
+        serial_write_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
         external_cancel: tokio_util::sync::CancellationToken,
     ) -> Result<()> {
-        // Log connection type (direct vs relay)
-        if let Some(mut watcher) = endpoint.endpoint().conn_type(conn.remote_id()) {
-            let conn_type = watcher.get();
-            tracing::info!("Connection type: {:?}", conn_type);
-        } else {
-            tracing::info!("Connection type: UNKNOWN (no watcher)");
-        }
-
         tracing::info!(
             "max_datagram_size={:?} (None means datagrams unsupported)",
             conn.max_datagram_size()
@@ -221,7 +273,6 @@ impl Server {
         let (mut send, mut recv) = stream.split();
 
         // Drain any stale data from the channel before starting
-        // This prevents old data from confusing a reconnecting client
         {
             let mut rx = serial_read_rx.lock().await;
             let mut drained = 0;
@@ -270,12 +321,9 @@ impl Server {
                 }
             }
             tracing::debug!("Serial->Network bridge task ended");
-            // Lock is automatically released here when rx guard is dropped
         });
 
         // Main task: network -> serial
-        // Listen on BOTH the stream (reliable, backward-compatible) and datagrams
-        // (low-latency, each datagram = separate message, no stream coalescing).
         tracing::debug!("Entering network->serial bridge loop (stream + datagram)");
         let mut buf = vec![0u8; 1024];
         loop {
@@ -292,7 +340,8 @@ impl Server {
                                 "Network(stream) -> Serial: {} bytes",
                                 n,
                             );
-                            if serial_write_tx.send(buf[..n].to_vec()).is_err() {
+                            // Async send — backpressures naturally, gives iroh priority over MoQ's try_send
+                            if serial_write_tx.send(buf[..n].to_vec()).await.is_err() {
                                 tracing::error!("Serial writer thread died");
                                 break;
                             }
@@ -319,7 +368,7 @@ impl Server {
                                 "Network(datagram) -> Serial: {} bytes",
                                 data.len(),
                             );
-                            if serial_write_tx.send(data.to_vec()).is_err() {
+                            if serial_write_tx.send(data.to_vec()).await.is_err() {
                                 tracing::error!("Serial writer thread died");
                                 break;
                             }
@@ -338,5 +387,160 @@ impl Server {
         // Wait for task to finish and release the lock
         let _ = serial_to_net.await;
         Ok(())
+    }
+}
+
+/// Publish serial s2c (server-to-client) data to MoQ relay.
+/// Automatically reconnects when the relay session drops.
+async fn moq_s2c_publisher(
+    relay: &str,
+    path: &str,
+    insecure: bool,
+    mut rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+) -> Result<()> {
+    use crate::moq::MoqBuilder;
+
+    let mut builder = MoqBuilder::new().relay(relay);
+    if insecure {
+        builder = builder.disable_tls_verify();
+    }
+
+    loop {
+        // Connect with backoff
+        let mut delay = Duration::from_secs(1);
+        let (publisher, mut writer) = loop {
+            match builder
+                .clone()
+                .path(&format!("{}/s2c", path))
+                .connect_publisher_with_track("data")
+                .await
+            {
+                Ok(result) => break result,
+                Err(e) => {
+                    tracing::warn!("MoQ s2c connect failed: {}, retrying in {:?}...", e, delay);
+                    while rx.try_recv().is_ok() {}
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(Duration::from_secs(30));
+                }
+            }
+        };
+        tracing::info!("MoQ s2c publisher connected on {}/s2c", path);
+
+        let disconnected = loop {
+            tokio::select! {
+                result = publisher.closed() => {
+                    tracing::warn!("MoQ s2c session closed: {:?}, reconnecting...", result.err());
+                    break false;
+                }
+                data = rx.recv() => {
+                    match data {
+                        Some(bytes) => {
+                            writer.write(bytes);
+                        }
+                        None => break true,
+                    }
+                }
+            }
+        };
+
+        if disconnected {
+            break;
+        }
+
+        // Drain stale data before reconnecting
+        while rx.try_recv().is_ok() {}
+    }
+    Ok(())
+}
+
+/// Subscribe to MoQ c2s (client-to-server) data and forward to serial writer.
+/// Uses `try_send()` so iroh commands always have priority — MoQ commands are
+/// dropped if the channel is full (iroh command pending).
+/// Automatically reconnects on disconnect.
+async fn moq_c2s_subscriber(
+    relay: &str,
+    path: &str,
+    insecure: bool,
+    serial_write_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+) -> Result<()> {
+    use crate::moq::MoqBuilder;
+
+    let mut builder = MoqBuilder::new().relay(relay);
+    if insecure {
+        builder = builder.disable_tls_verify();
+    }
+
+    let c2s_path = format!("{}/c2s", path);
+
+    loop {
+        tracing::info!("MoQ c2s subscriber connecting on {}...", c2s_path);
+
+        let c2s_sub = match builder.clone().path(&c2s_path).connect_subscriber().await {
+            Ok(sub) => sub,
+            Err(e) => {
+                tracing::warn!("MoQ c2s subscriber connect error: {}, retrying...", e);
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+        };
+
+        let (c2s_reader, c2s_sub) = match tokio::time::timeout(Duration::from_secs(5), async {
+            let mut sub = c2s_sub;
+            let result = sub.subscribe_track("data").await;
+            (result, sub)
+        })
+        .await
+        {
+            Ok((Ok(Some(reader)), sub)) => {
+                tracing::info!("MoQ c2s subscriber connected on {}", c2s_path);
+                (reader, sub)
+            }
+            Ok((Ok(None), sub)) => {
+                tracing::debug!("c2s broadcast ended, retrying...");
+                drop(sub);
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+            Ok((Err(e), sub)) => {
+                tracing::debug!("c2s subscribe error: {}, retrying...", e);
+                drop(sub);
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+            Err(_) => {
+                tracing::debug!("No c2s publisher yet, retrying...");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+        };
+        let mut c2s_reader = c2s_reader;
+        let _c2s_sub = c2s_sub; // keep alive while reading
+
+        loop {
+            match c2s_reader.read().await {
+                Ok(Some(data)) => match serial_write_tx.try_send(data.to_vec()) {
+                    Ok(_) => {
+                        tracing::debug!("MoQ c2s data forwarded to serial");
+                    }
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                        tracing::debug!("MoQ c2s data dropped (iroh has priority)");
+                    }
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                        tracing::error!("Serial writer thread died");
+                        return Ok(());
+                    }
+                },
+                Ok(None) => {
+                    tracing::info!("MoQ c2s stream ended, will reconnect...");
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!("MoQ c2s read error: {}, will reconnect...", e);
+                    break;
+                }
+            }
+        }
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }

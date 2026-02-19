@@ -1,14 +1,155 @@
-//! Serial port bridge server - all forwarding handled internally
+//! Serial port bridge server - iroh P2P with optional MoQ
 //!
-//! Usage: serial_server <port> [baud_rate] [--moq [moq_path]]
-//! Example: serial_server /dev/ttyUSB0 115200
-//! Example: serial_server /dev/ttyUSB0 1000000 --moq anon/xoq-test
+//! Usage: serial-server <port> [baud_rate] [OPTIONS]
+//!
+//! Options:
+//!   --moq-relay <url>    MoQ relay URL (enables MoQ alongside iroh)
+//!   --moq-path <path>    MoQ broadcast path (default: anon/xoq-serial)
+//!   --moq-insecure       Disable TLS verification for MoQ
+//!   --key-dir <path>     Directory for identity key files (default: current dir)
+//!
+//! Examples:
+//!   serial-server /dev/ttyUSB0 115200                                           # iroh only
+//!   serial-server /dev/ttyUSB0 1000000 --moq-relay https://cdn.1ms.ai           # iroh + MoQ
+//!   serial-server /dev/ttyUSB0 1000000 --moq-relay https://cdn.1ms.ai --moq-path anon/my-serial
 
 use anyhow::Result;
 use std::env;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
+use std::path::PathBuf;
+
+struct Args {
+    port: String,
+    baud_rate: u32,
+    moq_relay: Option<String>,
+    moq_path: Option<String>,
+    moq_insecure: bool,
+    key_dir: PathBuf,
+}
+
+fn parse_args() -> Option<Args> {
+    let args: Vec<String> = env::args().collect();
+
+    if args.len() < 2 {
+        return None;
+    }
+
+    let mut port = None;
+    let mut baud_rate = 115200u32;
+    let mut moq_relay = None;
+    let mut moq_path = None;
+    let mut moq_insecure = false;
+    let mut key_dir = PathBuf::from(".");
+    let mut i = 1;
+
+    while i < args.len() {
+        let arg = &args[i];
+
+        if arg == "--moq-relay" {
+            if i + 1 < args.len() {
+                moq_relay = Some(args[i + 1].clone());
+                i += 2;
+                continue;
+            } else {
+                eprintln!("Error: --moq-relay requires a URL argument");
+                return None;
+            }
+        }
+
+        if arg == "--moq-path" {
+            if i + 1 < args.len() {
+                moq_path = Some(args[i + 1].clone());
+                i += 2;
+                continue;
+            } else {
+                eprintln!("Error: --moq-path requires a path argument");
+                return None;
+            }
+        }
+
+        if arg == "--moq-insecure" {
+            moq_insecure = true;
+            i += 1;
+            continue;
+        }
+
+        if arg == "--key-dir" {
+            if i + 1 < args.len() {
+                key_dir = PathBuf::from(&args[i + 1]);
+                i += 2;
+                continue;
+            } else {
+                eprintln!("Error: --key-dir requires a path argument");
+                return None;
+            }
+        }
+
+        if arg == "--help" || arg == "-h" {
+            return None;
+        }
+
+        // Skip legacy --moq flag
+        if arg == "--moq" {
+            i += 1;
+            // Skip optional moq_path argument after --moq
+            if i < args.len() && !args[i].starts_with('-') {
+                i += 1;
+            }
+            continue;
+        }
+
+        // First positional arg is port, second is baud_rate
+        if port.is_none() {
+            port = Some(arg.clone());
+        } else if let Ok(br) = arg.parse::<u32>() {
+            baud_rate = br;
+        }
+        i += 1;
+    }
+
+    let port = port?;
+
+    Some(Args {
+        port,
+        baud_rate,
+        moq_relay,
+        moq_path,
+        moq_insecure,
+        key_dir,
+    })
+}
+
+fn print_usage() {
+    println!("Usage: serial-server <port> [baud_rate] [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --moq-relay <url>    MoQ relay URL (enables MoQ alongside iroh)");
+    println!("  --moq-path <path>    MoQ broadcast path (default: anon/xoq-serial)");
+    println!("  --moq-insecure       Disable TLS verification for MoQ");
+    println!("  --key-dir <path>     Directory for identity key files (default: current dir)");
+    println!();
+    println!("Examples:");
+    println!(
+        "  serial-server /dev/ttyUSB0 115200                                         # iroh only"
+    );
+    println!(
+        "  serial-server /dev/ttyUSB0 1000000 --moq-relay https://cdn.1ms.ai         # iroh + MoQ"
+    );
+    println!("  serial-server /dev/ttyUSB0 1000000 --moq-relay https://cdn.1ms.ai --moq-path anon/my-serial");
+    println!();
+    println!("Available ports:");
+    match xoq::list_ports() {
+        Ok(ports) => {
+            if ports.is_empty() {
+                println!("  (none found)");
+            } else {
+                for port in ports {
+                    println!("  {} - {:?}", port.name, port.port_type);
+                }
+            }
+        }
+        Err(e) => println!("  Error listing ports: {}", e),
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -20,121 +161,47 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let args: Vec<String> = env::args().collect();
-    if args.len() < 2 {
-        println!("Usage: serial_server <port> [baud_rate] [--moq [moq_path]]");
-        println!("Example (iroh): serial_server /dev/ttyUSB0 115200");
-        println!("Example (moq):  serial_server /dev/ttyUSB0 1000000 --moq anon/xoq-test");
-        println!("\nAvailable ports:");
-        for port in xoq::list_ports()? {
-            println!("  {} - {:?}", port.name, port.port_type);
+    let args = match parse_args() {
+        Some(a) => a,
+        None => {
+            print_usage();
+            return Ok(());
         }
-        return Ok(());
-    }
+    };
 
-    let port_name = &args[1];
-    let baud_rate: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(115200);
+    let identity_path = args
+        .key_dir
+        .join(".xoq_serial_server_key")
+        .to_string_lossy()
+        .to_string();
 
-    // Check for --moq flag and optional moq_path
-    let moq_idx = args.iter().position(|a| a == "--moq");
-    if let Some(idx) = moq_idx {
-        let moq_path = args
-            .get(idx + 1)
-            .cloned()
-            .unwrap_or_else(|| "anon/xoq-serial".to_string());
-        run_moq_server(port_name, baud_rate, &moq_path).await
-    } else {
-        run_iroh_server(port_name, baud_rate).await
-    }
-}
+    let bridge = xoq::Server::new(
+        &args.port,
+        args.baud_rate,
+        Some(&identity_path),
+        args.moq_relay.as_deref(),
+        args.moq_path.as_deref(),
+        args.moq_insecure,
+    )
+    .await?;
 
-async fn run_iroh_server(port_name: &str, baud_rate: u32) -> Result<()> {
-    let bridge = xoq::Server::new(port_name, baud_rate, Some(".xoq_server_key")).await?;
-
-    tracing::info!("Serial bridge server started (iroh P2P)");
-    tracing::info!("Port: {} @ {} baud", port_name, baud_rate);
+    tracing::info!("Serial bridge server started");
+    tracing::info!("Port: {} @ {} baud", args.port, args.baud_rate);
     tracing::info!("Server ID: {}", bridge.id());
+    tracing::info!("Identity: {}", identity_path);
+    if let Some(ref relay) = args.moq_relay {
+        tracing::info!(
+            "MoQ relay: {}{}",
+            relay,
+            if args.moq_insecure { " (insecure)" } else { "" }
+        );
+        tracing::info!(
+            "MoQ path: {}",
+            args.moq_path.as_deref().unwrap_or("anon/xoq-serial")
+        );
+    }
     tracing::info!("Waiting for connections...");
 
     bridge.run().await?;
-    Ok(())
-}
-
-async fn run_moq_server(port_name: &str, baud_rate: u32, moq_path: &str) -> Result<()> {
-    // Open serial port
-    let serial = xoq::serial::SerialPort::open_simple(port_name, baud_rate)?;
-    let (mut reader, mut writer) = serial.split();
-
-    tracing::info!("Serial port opened: {} @ {} baud", port_name, baud_rate);
-
-    // Connect via MoqStream (waits for client, no timeout)
-    let relay = "https://cdn.1ms.ai";
-    tracing::info!(
-        "Connecting to MoQ relay at '{}' path '{}'...",
-        relay,
-        moq_path
-    );
-    let stream = xoq::MoqStream::accept_at(relay, moq_path).await?;
-    let stream = Arc::new(Mutex::new(stream));
-    tracing::info!("Client connected!");
-
-    // Spawn task: network -> serial
-    let stream_read = stream.clone();
-    let net_to_serial = tokio::spawn(async move {
-        let mut last_recv = Instant::now();
-        loop {
-            let read_result = {
-                let mut stream = stream_read.lock().await;
-                stream.read().await
-            };
-            match read_result {
-                Ok(Some(data)) => {
-                    let gap = last_recv.elapsed();
-                    if gap > Duration::from_millis(50) {
-                        tracing::warn!(
-                            "MoQ Net→Serial: {:.1}ms gap ({} bytes)",
-                            gap.as_secs_f64() * 1000.0,
-                            data.len(),
-                        );
-                    }
-                    last_recv = Instant::now();
-                    tracing::debug!("MoQ Net→Serial: {} bytes", data.len());
-                    if let Err(e) = writer.write_all(&data).await {
-                        tracing::error!("Serial write error: {}", e);
-                        break;
-                    }
-                }
-                Ok(None) => {
-                    tracing::info!("MoQ stream ended");
-                    break;
-                }
-                Err(e) => {
-                    tracing::error!("MoQ read error: {}", e);
-                    break;
-                }
-            }
-        }
-    });
-
-    // Main task: serial -> network
-    let mut buf = [0u8; 1024];
-    loop {
-        match reader.read(&mut buf).await {
-            Ok(0) => {
-                tokio::task::yield_now().await;
-            }
-            Ok(n) => {
-                tracing::debug!("Serial→MoQ: {} bytes", n);
-                let mut stream = stream.lock().await;
-                stream.write(buf[..n].to_vec());
-            }
-            Err(e) => {
-                tracing::error!("Serial read error: {}", e);
-                break;
-            }
-        }
-    }
-
-    net_to_serial.abort();
     Ok(())
 }

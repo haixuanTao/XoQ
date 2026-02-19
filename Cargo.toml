@@ -166,6 +166,11 @@ path = "src/bin/fake_can_server.rs"
 required-features = ["iroh"]
 
 [[bin]]
+name = "fake-serial-server"
+path = "src/bin/fake_serial_server.rs"
+required-features = ["iroh"]
+
+[[bin]]
 name = "realsense-server"
 path = "src/bin/realsense_server.rs"
 required-features = ["realsense"]
