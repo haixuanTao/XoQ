@@ -127,10 +127,14 @@ cap.release()
 
 ### Bridge a serial port
 
-Server:
+Server (iroh P2P + optional MoQ relay):
 
 ```bash
+# P2P only
 cargo run --bin serial-server --features "iroh,serial" -- /dev/ttyUSB0 1000000
+
+# P2P + MoQ relay (accessible from browsers)
+cargo run --bin serial-server --features "iroh,serial" -- /dev/ttyUSB0 1000000 --moq anon/xoq-serial
 ```
 
 Python client:
@@ -188,10 +192,14 @@ stream.close()
 
 ### Bridge a CAN bus
 
-Server:
+Server (iroh P2P + optional MoQ relay):
 
 ```bash
+# P2P only
 cargo run --bin can-server --features "iroh,can" -- can0:fd
+
+# P2P + MoQ relay (accessible from browsers)
+cargo run --bin can-server --features "iroh,can" -- can0:fd --moq-relay https://cdn.1ms.ai
 ```
 
 Python client:
@@ -233,7 +241,7 @@ moq-relay --server-bind 0.0.0.0:4443 \
 
 #### 2a. Bridge a CAN Bus over MoQ
 
-The CAN MoQ server broadcasts CAN state to all subscribers (1-to-many) and accepts commands from any publisher (many-to-1).
+The same `can-server` handles both iroh P2P and MoQ simultaneously — add `--moq-relay` to enable browser access. CAN state is broadcast to all MoQ subscribers (1-to-many) and commands are accepted from any publisher (many-to-1).
 
 Server (Linux with SocketCAN):
 
@@ -264,6 +272,8 @@ cd js && npm install && npm run examples
 `openarm.html` subscribes to the CAN state broadcast, parses Damiao motor frames, and renders a 3D robot arm in real-time. It also publishes motor query commands back through the relay.
 
 #### 2b. Bridge a Serial Port over MoQ
+
+The same `serial-server` handles both iroh P2P and MoQ simultaneously — add `--moq` to enable browser access.
 
 Server (Linux/macOS/Windows):
 
@@ -354,8 +364,8 @@ Clients target macOS, Linux, and Windows. Future: C/C++ bindings via Rust ABI.
 | Binary              | Description                                                 | Required Features                |
 | ------------------- | ----------------------------------------------------------- | -------------------------------- |
 | `camera-server`     | Streams local cameras to remote clients (JPEG or H.264)     | `iroh` + `camera`/`camera-macos` |
-| `serial-server`     | Bridges a local serial port for remote access               | `iroh`, `serial`                 |
-| `can-server`        | Bridges local CAN interfaces for remote access              | `iroh`, `can`                    |
+| `serial-server`     | Bridges a local serial port (iroh P2P + optional MoQ relay) | `iroh`, `serial`                 |
+| `can-server`        | Bridges local CAN interfaces (iroh P2P + optional MoQ relay)| `iroh`, `can`                    |
 | `audio-server`      | Bridges local mic/speaker for remote access (VPIO on macOS) | `iroh`, `audio` / `audio-macos`  |
 | `fake-can-server`   | Simulates Damiao motors without CAN hardware (iroh P2P + MoQ) | `iroh`                           |
 | `realsense-server`  | Streams color + depth from RealSense over MoQ               | `realsense`                      |
