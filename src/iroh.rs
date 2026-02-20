@@ -95,6 +95,9 @@ fn low_latency_transport_config() -> QuicTransportConfig {
         .build()
 }
 
+/// Default iroh relay URL (self-hosted on cdn.1ms.ai).
+pub const DEFAULT_RELAY_URL: &str = "https://cdn.1ms.ai:3341";
+
 /// Default ALPN protocol for generic P2P communication.
 pub const DEFAULT_ALPN: &[u8] = b"xoq/p2p/0";
 
@@ -164,21 +167,16 @@ impl IrohServerBuilder {
             (None, None) => SecretKey::generate(&mut rand::rng()),
         };
 
-        let relay_mode = match &self.relay_url {
-            Some(url) => {
-                let relay_url: iroh::RelayUrl = url
-                    .parse()
-                    .map_err(|e| anyhow::anyhow!("Invalid relay URL '{}': {}", url, e))?;
-                tracing::info!("Using custom iroh relay: {}", url);
-                RelayMode::custom([relay_url])
-            }
-            None => RelayMode::Default,
-        };
+        let relay_url_str = self.relay_url.as_deref().unwrap_or(DEFAULT_RELAY_URL);
+        let relay_url: iroh::RelayUrl = relay_url_str
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid relay URL '{}': {}", relay_url_str, e))?;
+        tracing::info!("Iroh relay: {}", relay_url_str);
 
         let endpoint = Endpoint::builder()
             .alpns(vec![self.alpn])
             .secret_key(secret_key)
-            .relay_mode(relay_mode)
+            .relay_mode(RelayMode::custom([relay_url]))
             .transport_config(low_latency_transport_config())
             .bind()
             .await?;
@@ -230,24 +228,17 @@ impl IrohClientBuilder {
 
     /// Connect to a server by endpoint ID
     pub async fn connect(self, server_id: PublicKey) -> Result<IrohConnection> {
-        let relay_mode = match &self.relay_url {
-            Some(url) => {
-                let relay_url: iroh::RelayUrl = url
-                    .parse()
-                    .map_err(|e| anyhow::anyhow!("Invalid relay URL '{}': {}", url, e))?;
-                tracing::info!("Using custom iroh relay: {}", url);
-                RelayMode::custom([relay_url])
-            }
-            None => RelayMode::Default,
-        };
+        let relay_url_str = self.relay_url.as_deref().unwrap_or(DEFAULT_RELAY_URL);
+        let relay_url: iroh::RelayUrl = relay_url_str
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid relay URL '{}': {}", relay_url_str, e))?;
+        tracing::info!("Iroh relay: {}", relay_url_str);
 
         let endpoint = Endpoint::builder()
-            .relay_mode(relay_mode)
+            .relay_mode(RelayMode::custom([relay_url]))
             .transport_config(low_latency_transport_config())
             .bind()
             .await?;
-
-        tracing::info!("Iroh client: relay enabled, low-latency transport config active");
 
         let addr = EndpointAddr::from(server_id);
         let conn = endpoint.connect(addr, &self.alpn).await?;
