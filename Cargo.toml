@@ -127,6 +127,11 @@ path = "examples/can_client.rs"
 required-features = ["iroh", "can"]
 
 [[example]]
+name = "openarm_query"
+path = "examples/openarm_query.rs"
+required-features = ["can-remote"]
+
+[[example]]
 name = "can_benchmark"
 path = "examples/can_benchmark.rs"
 required-features = ["can-remote"]
