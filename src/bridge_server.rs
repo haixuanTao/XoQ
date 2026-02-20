@@ -507,8 +507,9 @@ async fn moq_command_subscriber(
             }
         };
 
+        let mut current_broadcast = broadcast;
         let mut reader =
-            MoqTrackReader::from_track(broadcast.subscribe_track(&Track::new(track_name)));
+            MoqTrackReader::from_track(current_broadcast.subscribe_track(&Track::new(track_name)));
         let mut reader_alive = true;
         tracing::info!(
             "MoQ command subscriber active on track '{}' at {}",
@@ -520,9 +521,11 @@ async fn moq_command_subscriber(
         //
         // On Ok(None): track ended (publisher disconnected) — disable reader and
         //   wait for reannounce so we seamlessly switch when the browser reconnects.
-        // On Err: something broke — reconnect immediately.
-        // Idle timeout (10s): no data or reannounce — reconnect to clear stale state.
-        let timeout = tokio::time::sleep(Duration::from_secs(10));
+        // On Err: re-subscribe to same broadcast (handles burst recovery). If the
+        //   broadcast is dead, the new reader returns Ok(None) next iteration,
+        //   which falls into the reannounce-wait path above.
+        // Idle timeout (30s): no data or reannounce — reconnect to clear stale state.
+        let timeout = tokio::time::sleep(Duration::from_secs(30));
         tokio::pin!(timeout);
 
         let mut backend_died = false;
@@ -532,7 +535,7 @@ async fn moq_command_subscriber(
                 read_result = reader.read(), if reader_alive => {
                     match read_result {
                         Ok(Some(data)) => {
-                            timeout.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(10));
+                            timeout.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(30));
                             match write_tx.try_send(data.to_vec()) {
                                 Ok(_) => {
                                     tracing::debug!("MoQ command forwarded ({} bytes)", data.len());
@@ -553,12 +556,19 @@ async fn moq_command_subscriber(
                             // will reconnect and the relay will send a new announcement.
                             tracing::info!("MoQ command reader ended, waiting for reannounce...");
                             reader_alive = false;
-                            timeout.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(10));
                         }
                         Err(e) => {
-                            // Read error (e.g. burst-induced group pruning) — reconnect now.
-                            tracing::info!("MoQ command read error: {}, reconnecting...", e);
-                            break;
+                            // Read error (e.g. burst-induced group pruning).
+                            // Re-subscribe to the same broadcast — if it's still alive
+                            // (burst case), the new reader picks up from the latest group.
+                            // If the broadcast is dead (publisher disconnected), the new
+                            // reader returns Ok(None) on the next iteration, falling into
+                            // the reannounce-wait path above.
+                            tracing::info!("MoQ command read error: {}, re-subscribing...", e);
+                            reader = MoqTrackReader::from_track(
+                                current_broadcast.subscribe_track(&Track::new(track_name)),
+                            );
+                            timeout.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(30));
                         }
                     }
                 }
@@ -567,9 +577,12 @@ async fn moq_command_subscriber(
                     match announce {
                         Some((_path, Some(bc))) => {
                             tracing::info!("MoQ command reannounce — switching to new broadcast");
-                            reader = MoqTrackReader::from_track(bc.subscribe_track(&Track::new(track_name)));
+                            current_broadcast = bc;
+                            reader = MoqTrackReader::from_track(
+                                current_broadcast.subscribe_track(&Track::new(track_name)),
+                            );
                             reader_alive = true;
-                            timeout.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(10));
+                            timeout.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(30));
                         }
                         Some((_path, None)) => {
                             // Unannounce — publisher went away
@@ -581,9 +594,9 @@ async fn moq_command_subscriber(
                         }
                     }
                 }
-                // Idle timeout: no data or reannounce — reconnect to clear stale state
+                // Idle timeout: no data or reannounce for 30s — reconnect
                 _ = &mut timeout => {
-                    tracing::info!("MoQ command subscriber idle 10s, reconnecting...");
+                    tracing::info!("MoQ command subscriber idle 30s, reconnecting...");
                     break;
                 }
             }
