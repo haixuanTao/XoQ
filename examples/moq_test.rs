@@ -501,156 +501,10 @@ async fn run_cmd_test(relay: &str, base_path: &str) -> Result<()> {
 
     let relay_state = relay.to_string();
     let relay_cmd = relay.to_string();
-
-    // 1. Start state subscriber in background
-    let state_handle = tokio::spawn(async move {
-        eprintln!("[state] Subscribing to {}...", state_path);
-        let mut sub = match xoq::MoqBuilder::new()
-            .relay(&relay_state)
-            .path(&state_path)
-            .connect_subscriber()
-            .await
-        {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("[state] FAIL: Connect error: {}", e);
-                return;
-            }
-        };
-        eprintln!("[state] Connected, waiting for track 'can'...");
-
-        match tokio::time::timeout(Duration::from_secs(10), sub.subscribe_track("can")).await {
-            Ok(Ok(Some(mut reader))) => {
-                eprintln!("[state] Subscribed to 'can' track, reading...");
-                let mut count = 0u64;
-                loop {
-                    match tokio::time::timeout(Duration::from_secs(30), reader.read()).await {
-                        Ok(Ok(Some(data))) => {
-                            count += 1;
-                            // Decode all wire frames in this chunk
-                            let mut offset = 0;
-                            while offset < data.len() {
-                                if let Some((can_id, frame_data, consumed)) =
-                                    decode_can_wire_frame(&data[offset..])
-                                {
-                                    if let Some(state) = parse_damiao_response(&frame_data) {
-                                        eprintln!(
-                                            "[state] #{} CAN 0x{:03X}: {} | raw: {:02X?}",
-                                            count, can_id, state, &frame_data
-                                        );
-                                    } else {
-                                        eprintln!(
-                                            "[state] #{} CAN 0x{:03X}: {} bytes: {:02X?}",
-                                            count,
-                                            can_id,
-                                            frame_data.len(),
-                                            &frame_data
-                                        );
-                                    }
-                                    offset += consumed;
-                                } else {
-                                    eprintln!(
-                                        "[state] #{} raw: {} bytes (partial frame?)",
-                                        count,
-                                        data.len() - offset
-                                    );
-                                    break;
-                                }
-                            }
-                            // Print a few then switch to summary
-                            if count > 20 {
-                                eprintln!("[state] (suppressing further output, still reading...)");
-                                // Just drain
-                                while reader.read().await.ok().flatten().is_some() {}
-                                break;
-                            }
-                        }
-                        Ok(Ok(None)) => {
-                            eprintln!("[state] Track ended after {} reads", count);
-                            break;
-                        }
-                        Ok(Err(e)) => {
-                            eprintln!("[state] Read error after {} reads: {}", count, e);
-                            break;
-                        }
-                        Err(_) => {
-                            eprintln!(
-                                "[state] No data for 30s (after {} reads). Motors may not be responding.",
-                                count
-                            );
-                            break;
-                        }
-                    }
-                }
-            }
-            Ok(Ok(None)) => eprintln!("[state] Subscribe returned None"),
-            Ok(Err(e)) => eprintln!("[state] Subscribe error: {}", e),
-            Err(_) => eprintln!(
-                "[state] No broadcast on state path (timeout 10s). Is CAN server publishing?"
-            ),
-        }
-    });
-
-    // 2. Small delay, then connect command publisher + a verification subscriber
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
     let relay_verify = relay.to_string();
     let cmd_path_verify = cmd_path.clone();
 
-    // Verification subscriber: independent subscriber on the same commands path
-    // to check if data from our publisher actually reaches the relay
-    let verify_handle = tokio::spawn(async move {
-        eprintln!(
-            "[verify] Subscribing to {} (independent check)...",
-            cmd_path_verify
-        );
-        let mut sub = match xoq::MoqBuilder::new()
-            .relay(&relay_verify)
-            .path(&cmd_path_verify)
-            .connect_subscriber()
-            .await
-        {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("[verify] Connect error: {}", e);
-                return;
-            }
-        };
-        match tokio::time::timeout(Duration::from_secs(15), sub.subscribe_track("can")).await {
-            Ok(Ok(Some(mut reader))) => {
-                eprintln!("[verify] Subscribed! Waiting for data...");
-                let mut count = 0;
-                loop {
-                    match tokio::time::timeout(Duration::from_secs(10), reader.read()).await {
-                        Ok(Ok(Some(data))) => {
-                            count += 1;
-                            eprintln!("[verify] GOT DATA #{}: {} bytes", count, data.len());
-                            if count >= 3 {
-                                eprintln!("[verify] Data flowing OK!");
-                                break;
-                            }
-                        }
-                        Ok(Ok(None)) => {
-                            eprintln!("[verify] Track ended after {} reads", count);
-                            break;
-                        }
-                        Ok(Err(e)) => {
-                            eprintln!("[verify] Read error: {} (after {} reads)", e, count);
-                            break;
-                        }
-                        Err(_) => {
-                            eprintln!("[verify] NO DATA for 10s (after {} reads)", count);
-                            break;
-                        }
-                    }
-                }
-            }
-            Ok(Ok(None)) => eprintln!("[verify] Subscribe returned None"),
-            Ok(Err(e)) => eprintln!("[verify] Subscribe error: {}", e),
-            Err(_) => eprintln!("[verify] No broadcast on commands path (15s timeout)"),
-        }
-    });
-
+    // 1. Start command publisher FIRST — sends data immediately (no delay!)
     let cmd_handle = tokio::spawn(async move {
         eprintln!("[cmd] Publishing on {}...", cmd_path);
         let (_publisher, mut track) = match xoq::MoqBuilder::new()
@@ -665,39 +519,249 @@ async fn run_cmd_test(relay: &str, base_path: &str) -> Result<()> {
                 return;
             }
         };
-        eprintln!("[cmd] Connected! Publisher is live on {}", cmd_path);
-        eprintln!("[cmd] Waiting 3s for CAN server to detect new broadcast...");
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        eprintln!("[cmd] Connected! Sending zero-torque queries immediately...");
 
-        // Send zero-torque queries for motors 1-8
         let mit_cmd = mit_zero_torque_cmd();
-        eprintln!(
-            "[cmd] Sending zero-torque queries for motors 1-8 (MIT cmd: {:02X?})",
-            mit_cmd
-        );
+        eprintln!("[cmd] MIT cmd: {:02X?}", mit_cmd);
 
-        // Send 20 rounds over 20s to ensure CAN server has time to reconnect
-        for round in 0..20 {
+        // Send continuously at 500ms intervals — CAN IDs 0x01-0x08
+        // No delay! Start sending immediately so subscribers detect live data.
+        for round in 0..40 {
             for motor_id in 1u32..=8 {
                 let frame = encode_can_wire_frame(motor_id, &mit_cmd);
                 track.write(bytes::Bytes::from(frame));
             }
-            if round < 5 || round % 5 == 0 {
-                eprintln!("[cmd] Round {} sent (8 motors)", round + 1);
+            if round < 5 || round % 10 == 0 {
+                eprintln!("[cmd] Round {} sent (CAN IDs 0x01-0x08)", round + 1);
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+
+        eprintln!("[cmd] All rounds sent. Keeping publisher alive for 10s...");
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        eprintln!("[cmd] Done.");
+    });
+
+    // 2. Start state subscriber using low-level API with reannounce handling
+    //    (handles stale broadcasts by switching to newer ones)
+    let state_handle = tokio::spawn(async move {
+        use moq_native::moq_lite::{Origin, Track};
+
+        eprintln!("[state] Subscribing to {}...", state_path);
+
+        let builder = xoq::MoqBuilder::new().relay(&relay_state);
+        let url = match builder.build_url_for_path(&state_path) {
+            Ok(u) => u,
+            Err(e) => {
+                eprintln!("[state] FAIL: URL error: {}", e);
+                return;
+            }
+        };
+        let client = match builder.create_client_public() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[state] FAIL: Client error: {}", e);
+                return;
+            }
+        };
+
+        let origin = Origin::produce();
+        let session = match client.with_consume(origin.producer).connect(url).await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[state] FAIL: Connect error: {}", e);
+                return;
+            }
+        };
+        let mut origin_consumer = origin.consumer;
+
+        // Wait for first broadcast
+        let broadcast = match tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match origin_consumer.announced().await {
+                    Some((_path, Some(bc))) => return Some(bc),
+                    Some((_path, None)) => continue,
+                    None => return None,
+                }
+            }
+        })
+        .await
+        {
+            Ok(Some(bc)) => bc,
+            Ok(None) => {
+                eprintln!("[state] FAIL: Origin closed");
+                return;
+            }
+            Err(_) => {
+                eprintln!("[state] FAIL: No broadcast (10s timeout). Is CAN server publishing?");
+                return;
+            }
+        };
+
+        let track_consumer = broadcast.subscribe_track(&Track::new("can"));
+        let mut reader = xoq::MoqTrackReader::from_track(track_consumer);
+        eprintln!("[state] Subscribed, reading (with reannounce support)...");
+
+        let mut total_count = 0u64;
+        let _session = session; // keep alive
+
+        // select! loop: read data, watch for new announcements, timeout
+        loop {
+            tokio::select! {
+                read_result = reader.read() => {
+                    match read_result {
+                        Ok(Some(data)) => {
+                            total_count += 1;
+                            let mut offset = 0;
+                            while offset < data.len() {
+                                if let Some((can_id, frame_data, consumed)) =
+                                    decode_can_wire_frame(&data[offset..])
+                                {
+                                    if let Some(state) = parse_damiao_response(&frame_data) {
+                                        eprintln!(
+                                            "[state] #{} CAN 0x{:03X}: {}",
+                                            total_count, can_id, state
+                                        );
+                                    } else {
+                                        eprintln!(
+                                            "[state] #{} CAN 0x{:03X}: {} bytes: {:02X?}",
+                                            total_count, can_id, frame_data.len(), &frame_data
+                                        );
+                                    }
+                                    offset += consumed;
+                                } else {
+                                    break;
+                                }
+                            }
+                            if total_count > 20 {
+                                eprintln!(
+                                    "[state] (suppressing further output, still reading...)"
+                                );
+                                while reader.read().await.ok().flatten().is_some() {}
+                                break;
+                            }
+                        }
+                        Ok(None) => {
+                            eprintln!("[state] Track ended after {} reads", total_count);
+                            break;
+                        }
+                        Err(e) => {
+                            eprintln!("[state] Read error after {} reads: {}", total_count, e);
+                            break;
+                        }
+                    }
+                }
+                announce = origin_consumer.announced() => {
+                    match announce {
+                        Some((_path, Some(new_bc))) => {
+                            eprintln!("[state] New broadcast announced, switching...");
+                            let new_track = new_bc.subscribe_track(&Track::new("can"));
+                            reader = xoq::MoqTrackReader::from_track(new_track);
+                        }
+                        Some((_path, None)) => {
+                            eprintln!("[state] Broadcast unannounced");
+                        }
+                        None => {
+                            eprintln!("[state] Origin closed after {} reads", total_count);
+                            break;
+                        }
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_secs(30)) => {
+                    eprintln!("[state] Timeout (30s) after {} reads", total_count);
+                    break;
+                }
+            }
+        }
+
+        if total_count == 0 {
+            eprintln!("[state] FAIL: No state data received");
+        }
+    });
+
+    // 3. Verify subscriber — delayed 2s so publisher is already sending,
+    // with reconnect loop for stale broadcast handling
+    let verify_handle = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        eprintln!(
+            "[verify] Subscribing to {} (independent check)...",
+            cmd_path_verify
+        );
+
+        for attempt in 1..=3 {
+            let mut sub = match xoq::MoqBuilder::new()
+                .relay(&relay_verify)
+                .path(&cmd_path_verify)
+                .connect_subscriber()
+                .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("[verify] Connect error (attempt {}): {}", attempt, e);
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    continue;
+                }
+            };
+
+            match tokio::time::timeout(Duration::from_secs(10), sub.subscribe_track("can")).await {
+                Ok(Ok(Some(mut reader))) => {
+                    eprintln!(
+                        "[verify] Subscribed (attempt {}), waiting for data...",
+                        attempt
+                    );
+                    let mut count = 0;
+                    loop {
+                        match tokio::time::timeout(Duration::from_secs(5), reader.read()).await {
+                            Ok(Ok(Some(data))) => {
+                                count += 1;
+                                eprintln!("[verify] GOT DATA #{}: {} bytes", count, data.len());
+                                if count >= 3 {
+                                    eprintln!("[verify] Data flowing OK!");
+                                    return;
+                                }
+                            }
+                            Ok(Ok(None)) | Ok(Err(_)) => {
+                                eprintln!(
+                                    "[verify] Track ended (attempt {}, {} reads), retrying...",
+                                    attempt, count
+                                );
+                                break;
+                            }
+                            Err(_) => {
+                                if count == 0 {
+                                    eprintln!(
+                                        "[verify] No data for 5s (attempt {}, stale broadcast?), retrying...",
+                                        attempt
+                                    );
+                                    break;
+                                } else {
+                                    eprintln!("[verify] Timeout after {} reads", count);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(Ok(None)) => {
+                    eprintln!("[verify] Subscribe returned None (attempt {})", attempt);
+                }
+                Ok(Err(e)) => {
+                    eprintln!("[verify] Subscribe error (attempt {}): {}", attempt, e);
+                }
+                Err(_) => {
+                    eprintln!("[verify] No broadcast (10s timeout, attempt {})", attempt);
+                }
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
-
-        eprintln!("[cmd] All 20 rounds sent. Keeping publisher alive for 15s...");
-        tokio::time::sleep(Duration::from_secs(15)).await;
-        eprintln!("[cmd] Done.");
+        eprintln!("[verify] FAIL: Could not verify data flow after all attempts");
     });
 
     // Wait for all with overall timeout
     tokio::select! {
-        _ = tokio::time::sleep(Duration::from_secs(60)) => {
+        _ = tokio::time::sleep(Duration::from_secs(90)) => {
             eprintln!();
-            eprintln!("=== Test timeout after 60s ===");
+            eprintln!("=== Test timeout after 90s ===");
         }
         _ = async {
             let _ = tokio::join!(state_handle, cmd_handle, verify_handle);

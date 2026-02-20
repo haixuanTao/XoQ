@@ -512,6 +512,7 @@ async fn moq_command_subscriber(
             // Phase 1: Drain cached/stale data (arrives within 50ms per frame).
             // Cached frames from dead publishers arrive instantly in a burst.
             let mut drained = 0u32;
+            let mut broadcast_dead = false;
             loop {
                 match tokio::time::timeout(Duration::from_millis(50), reader.read()).await {
                     Ok(Ok(Some(_))) => drained += 1,
@@ -520,18 +521,22 @@ async fn moq_command_subscriber(
                         if drained > 0 {
                             tracing::info!("Drained {} stale frames, broadcast dead", drained);
                         }
-                        continue; // try next broadcast
+                        broadcast_dead = true;
+                        break;
                     }
                     Err(_) => break, // 50ms timeout — cache drained
                 }
+            }
+            if broadcast_dead {
+                continue; // try next broadcast
             }
             if drained > 0 {
                 tracing::info!("Drained {} stale cached command frames", drained);
             }
 
-            // Phase 2: Wait for live data (2s). If a live publisher is sending,
+            // Phase 2: Wait for live data (3s). If a live publisher is sending,
             // data will arrive within this window.
-            match tokio::time::timeout(Duration::from_secs(2), reader.read()).await {
+            match tokio::time::timeout(Duration::from_secs(3), reader.read()).await {
                 Ok(Ok(Some(data))) => {
                     // Live publisher detected — forward and continue
                     tracing::info!(
@@ -556,8 +561,8 @@ async fn moq_command_subscriber(
                     continue; // try next broadcast
                 }
                 Err(_) => {
-                    // No live data after 2s — no active publisher on this broadcast
-                    tracing::debug!("No live data after drain (2s), trying next broadcast...");
+                    // No live data after 3s — no active publisher on this broadcast
+                    tracing::debug!("No live data after drain (3s), trying next broadcast...");
                     continue;
                 }
             }
