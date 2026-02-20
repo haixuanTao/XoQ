@@ -3,7 +3,9 @@
 import * as Moq from "@moq/lite";
 import { JOINTS, parseAllCanFrames, parseDamiaoState, canIdToJointIdx } from "./openarm-can.js";
 import { log } from "./openarm-log.js";
-import { MsePlayer, DepthDecoder, HAS_WEBCODECS, stripTimestamp } from "./openarm-depth.js";
+import { MsePlayer, DepthDecoder, HAS_WEBCODECS, stripTimestamp,
+  rsConcat, rsEncodeVarInt, rsEncodeClientSetup, rsEncodeSubscribe,
+  RsBufReader, RsStreamReader } from "./openarm-depth.js";
 
 // ─── Helpers ─────────────────────────────────────────
 export function buildConnectOpts(config) {
@@ -36,48 +38,80 @@ function basePath(path) {
   return path.replace(/\/(state|commands)$/, "");
 }
 
-// ─── Arm subscription ────────────────────────────────
+// ─── Arm subscription (raw WebTransport) ─────────────
 async function subscribeArmOnce(config, appState, label, path, jointState) {
   const relay = config.general.relay;
   const fullUrl = `${relay}/${basePath(path)}/state`;
   log(`[${label}] Connecting to ${fullUrl}...`, 'info', { toast: false });
 
-  const connectOpts = buildConnectOpts(config);
-  const conn = await Promise.race([
-    Moq.Connection.connect(new URL(fullUrl), connectOpts),
-    new Promise((_, rej) => setTimeout(() => rej(new Error(`[${label}] Connection timeout`)), 8000)),
+  // 1. Connect raw WebTransport
+  const wt = new WebTransport(fullUrl);
+  await Promise.race([
+    wt.ready,
+    new Promise((_, rej) => setTimeout(() => rej(new Error(`[${label}] WT timeout`)), 8000)),
   ]);
-  appState.connections.push(conn);
   log(`[${label}] Connected`, "success");
 
-  const broadcast = conn.consume(Moq.Path.from(""));
-  const track = broadcast.subscribe("can", 0);
+  // 2. Setup handshake (bidi stream type 0)
+  const setup = await wt.createBidirectionalStream();
+  const sw = setup.writable.getWriter();
+  const sr = new RsStreamReader(setup.readable.getReader());
+  await sw.write(rsConcat(rsEncodeVarInt(0), rsEncodeClientSetup()));
+  await sr.readMessage(); // ServerSetup (ignore contents)
+
+  // 3. Subscribe to "can" track (bidi stream type 2)
+  const sub = await wt.createBidirectionalStream();
+  const subW = sub.writable.getWriter();
+  const subR = new RsStreamReader(sub.readable.getReader());
+  await subW.write(rsConcat(rsEncodeVarInt(2), rsEncodeSubscribe(0, "", "can", 0)));
+  await subR.readMessage(); // SubscribeOk
+
   log(`[${label}] Subscribed to 'can' track`, "success", { toast: false });
 
-  while (appState.running) {
-    const group = await withTimeout(track.nextGroup(), STALE_MS);
-    if (!group) { log(`[${label}] Track ended`); break; }
+  // 4. Read incoming uni streams (groups with frames)
+  const uniReader = wt.incomingUnidirectionalStreams.getReader();
+  try {
     while (appState.running) {
-      const frame = await withTimeout(group.readFrame(), STALE_MS);
-      if (!frame) break;
-      const bytes = new Uint8Array(frame);
-      appState.bytesTotal += bytes.length;
-      const canFrames = parseAllCanFrames(bytes);
-      appState.frameCount += canFrames.length;
-      appState.fpsCounter += canFrames.length;
-      for (const parsed of canFrames) {
-        const jointIdx = canIdToJointIdx(parsed.canId);
-        if (jointIdx < 0) continue;
-        const state = parseDamiaoState(parsed.data);
-        if (!state) continue;
-        jointState[jointIdx].targetAngle = state.qRad;
-        jointState[jointIdx].velocity = state.vel;
-        jointState[jointIdx].torque = state.tau;
-        jointState[jointIdx].tempMos = state.tempMos;
-        jointState[jointIdx].tempRotor = state.tempRotor;
-        jointState[jointIdx].updated = true;
-      }
+      const { value: stream, done } = await Promise.race([
+        uniReader.read(),
+        new Promise((_, rej) => setTimeout(() => rej(new Error(`stale (no data for ${STALE_MS/1000}s)`)), STALE_MS)),
+      ]);
+      if (done) break;
+
+      // Parse group: DataType(0) + header(subId, seq) + frame(size-prefixed data)
+      const r = new RsStreamReader(stream.getReader());
+      if (await r.readVarInt() !== 0) continue; // skip non-object types
+      const hdr = await r.readMessage();
+      const br = new RsBufReader(hdr);
+      br.readVarInt(); // subscribe_id
+      br.readVarInt(); // sequence
+
+      // Read all frames in this group
+      try {
+        while (true) {
+          const frame = await r.readMessage();
+          const bytes = new Uint8Array(frame);
+          appState.bytesTotal += bytes.length;
+          const canFrames = parseAllCanFrames(bytes);
+          appState.frameCount += canFrames.length;
+          appState.fpsCounter += canFrames.length;
+          for (const parsed of canFrames) {
+            const jointIdx = canIdToJointIdx(parsed.canId);
+            if (jointIdx < 0) continue;
+            const state = parseDamiaoState(parsed.data);
+            if (!state) continue;
+            jointState[jointIdx].targetAngle = state.qRad;
+            jointState[jointIdx].velocity = state.vel;
+            jointState[jointIdx].torque = state.tau;
+            jointState[jointIdx].tempMos = state.tempMos;
+            jointState[jointIdx].tempRotor = state.tempRotor;
+            jointState[jointIdx].updated = true;
+          }
+        }
+      } catch { /* stream ended (FIN) — next group */ }
     }
+  } finally {
+    try { wt.close(); } catch {}
   }
 }
 
@@ -205,6 +239,23 @@ async function connectRealSenseOnce(config, appState, cam, path, videoEl, label)
     const depthTrack = broadcast.subscribe("depth", 0);
     promises.push(readTrack(depthTrack, d => cam.depthDecoder.onData(d), 'depth'));
     trackNames.push('depth');
+
+    // Subscribe to metadata track (intrinsics JSON, sent on keyframes)
+    const metadataTrack = broadcast.subscribe("metadata", 0);
+    promises.push(readTrack(metadataTrack, d => {
+      try {
+        const json = new TextDecoder().decode(d);
+        const meta = JSON.parse(json);
+        if (meta.fx && meta.fy) {
+          cam.intrinsics = meta;
+          if (!cam._intrinsicsLogged) {
+            log(`[${label}] Intrinsics: ${meta.width}x${meta.height} fx=${meta.fx} fy=${meta.fy}`, 'data', { toast: false });
+            cam._intrinsicsLogged = true;
+          }
+        }
+      } catch {}
+    }, 'metadata'));
+    trackNames.push('metadata');
   }
 
   log(`[${label}] Subscribed to ${trackNames.join(' + ')} tracks`, 'success', { toast: false });
@@ -215,6 +266,9 @@ function cleanupRealSense(cam) {
   if (cam.conn) { try { cam.conn.close(); } catch {} cam.conn = null; }
   if (cam.colorPlayer) { cam.colorPlayer.destroy(); cam.colorPlayer = null; }
   if (cam.depthDecoder) { cam.depthDecoder.destroy(); cam.depthDecoder = null; }
+  cam.intrinsics = null;
+  cam._intrinsicsLogged = false;
+  cam._frustumUpdated = false;
 }
 
 async function connectSingleRealSense(config, appState, cam, path, videoEl, label) {
@@ -287,16 +341,16 @@ export function encodeCanFrame(canId, data) {
   return buf;
 }
 
-// Connect command channel for a single arm (reuses existing if already connected)
+// Connect command channel for a single arm (@moq/lite publisher)
 export async function ensureCmdConnection(config, armId, armPath, cmdState) {
   const cs = cmdState[armId];
   if (cs.conn && cs.track) return; // already connected
 
   const relay = config.general.relay;
   const cmdUrl = `${relay}/${basePath(armPath)}/commands`;
+  const connectOpts = buildConnectOpts(config);
 
   log(`[${armId}] Connecting commands to ${cmdUrl}...`, 'info', { toast: false });
-  const connectOpts = buildConnectOpts(config);
   cs.conn = await Promise.race([
     Moq.Connection.connect(new URL(cmdUrl), connectOpts),
     new Promise((_, rej) => setTimeout(() => rej(new Error(`[${armId}] Command connection timeout`)), 8000)),
@@ -311,6 +365,22 @@ export async function ensureCmdConnection(config, armId, armPath, cmdState) {
   ]);
   if (!request) { log(`[${armId}] Command broadcast closed`, "error"); return; }
   cs.track = request.track;
+  cs.group = null;
+
+  // Monitor for connection close and clear state
+  cs.conn.closed.then(() => {
+    log(`[${armId}] Command connection closed`, "info", { toast: false });
+    cs.conn = null;
+    cs.track = null;
+    cs.broadcast = null;
+    cs.group = null;
+  }).catch(() => {
+    cs.conn = null;
+    cs.track = null;
+    cs.broadcast = null;
+    cs.group = null;
+  });
+
   log(`[${armId}] Command track active`, "success");
 }
 
@@ -324,11 +394,12 @@ function disconnectCmdArm(armId, cmdState) {
 }
 
 function sendCanFrameToAll(cs, data) {
+  if (!cs.track) return;
   for (let motorId = 1; motorId <= 8; motorId++) {
     const frame = encodeCanFrame(motorId, data);
-    cs.group = cs.track.appendGroup();
-    cs.group.writeFrame(frame);
-    cs.group.close();
+    const group = cs.track.appendGroup();
+    group.writeFrame(frame);
+    group.close();
   }
 }
 
@@ -370,7 +441,7 @@ export async function startQueryLoopForPair(config, pairIdx, armConfigs, cmdStat
 
   const activeTracks = [];
   pairArms.forEach(arm => {
-    if (cmdState[arm.id] && cmdState[arm.id].track) activeTracks.push(cmdState[arm.id]);
+    if (cmdState[arm.id] && cmdState[arm.id].conn && cmdState[arm.id].track) activeTracks.push(cmdState[arm.id]);
   });
   if (activeTracks.length === 0) {
     log(`No command tracks connected for ${pair.label}`, "error");
@@ -385,9 +456,11 @@ export async function startQueryLoopForPair(config, pairIdx, armConfigs, cmdStat
     if (!cs.track) return;
     const canId = motorIdx + 1;
     const frame = encodeCanFrame(canId, mitCmd);
-    cs.group = cs.track.appendGroup();
-    cs.group.writeFrame(frame);
-    cs.group.close();
+    try {
+      const group = cs.track.appendGroup();
+      group.writeFrame(frame);
+      group.close();
+    } catch { /* connection closed, skip */ }
     motorIdx = (motorIdx + 1) % 8;
     if (motorIdx === 0) armIdx++;
   }, intervalMs);

@@ -49,20 +49,34 @@ export function applyCamPoseFromConfig(group, camCfg) {
 }
 
 // ─── Frustum wireframe ──────────────────────────────
-function buildFrustumGeometry(color) {
-  const fx = 604.2, fy = 603.5;
-  const nearM = 0.3, farM = 1.023;
-  const nw = nearM * 320 / fx, nh = nearM * 240 / fy;
-  const fw = farM  * 320 / fx, fh = farM  * 240 / fy;
-  const verts = new Float32Array([
-    -nw,  nh, nearM,   nw,  nh, nearM,   nw, -nh, nearM,  -nw, -nh, nearM,
-    -fw,  fh, farM,    fw,  fh, farM,    fw, -fh, farM,   -fw, -fh, farM,
+const DEFAULT_INTRINSICS = { fx: 604.2, fy: 603.5, ppx: 322.7, ppy: 252.7, width: 640, height: 480 };
+const NEAR_M = 0.3, FAR_M = 1.023;
+
+function computeFrustumVerts(intr) {
+  const halfW = intr.width / 2, halfH = intr.height / 2;
+  const nw = NEAR_M * halfW / intr.fx, nh = NEAR_M * halfH / intr.fy;
+  const fw = FAR_M  * halfW / intr.fx, fh = FAR_M  * halfH / intr.fy;
+  return new Float32Array([
+    -nw,  nh, NEAR_M,   nw,  nh, NEAR_M,   nw, -nh, NEAR_M,  -nw, -nh, NEAR_M,
+    -fw,  fh, FAR_M,    fw,  fh, FAR_M,    fw, -fh, FAR_M,   -fw, -fh, FAR_M,
   ]);
+}
+
+function buildFrustumGeometry(color) {
+  const verts = computeFrustumVerts(DEFAULT_INTRINSICS);
   const idx = [0,1, 1,2, 2,3, 3,0, 4,5, 5,6, 6,7, 7,4, 0,4, 1,5, 2,6, 3,7];
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(verts, 3));
   geo.setIndex(idx);
   return new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color, opacity: 0.5, transparent: true }));
+}
+
+function updateFrustumFromIntrinsics(group, intrinsics, camIdx) {
+  const frustum = group.children.find(c => c.isLineSegments);
+  if (!frustum) return;
+  const verts = computeFrustumVerts(intrinsics);
+  frustum.geometry.attributes.position.array.set(verts);
+  frustum.geometry.attributes.position.needsUpdate = true;
 }
 
 // ─── Gripper conversion ─────────────────────────────
@@ -389,7 +403,12 @@ export function startRenderLoop(sceneHandle, armStates) {
     controls.update();
     pointClouds.forEach((pc, i) => {
       if (rsCams[i] && rsVideoEls[i]) {
-        updatePointCloudGeneric(rsVideoEls[i], rsCams[i].depthDecoder, pc.colorCtx, pc.posArr, pc.colArr, pc.geometry);
+        updatePointCloudGeneric(rsVideoEls[i], rsCams[i].depthDecoder, pc.colorCtx, pc.posArr, pc.colArr, pc.geometry, rsCams[i].intrinsics);
+        // Update frustum wireframe when intrinsics arrive
+        if (rsCams[i].intrinsics && !rsCams[i]._frustumUpdated) {
+          updateFrustumFromIntrinsics(pc.group, rsCams[i].intrinsics, i);
+          rsCams[i]._frustumUpdated = true;
+        }
       }
     });
     renderer.render(scene, camera);

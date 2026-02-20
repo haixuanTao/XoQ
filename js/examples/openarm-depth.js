@@ -3,13 +3,13 @@
 import { log } from "./openarm-log.js";
 
 // ─── Helpers ─────────────────────────────────────────
-function rsConcat(...arrs) {
+export function rsConcat(...arrs) {
   const len = arrs.reduce((s, a) => s + a.length, 0);
   const r = new Uint8Array(len); let o = 0;
   for (const a of arrs) { r.set(a, o); o += a.length; }
   return r;
 }
-function rsEncodeVarInt(v) {
+export function rsEncodeVarInt(v) {
   if (v < 0x40) return new Uint8Array([v]);
   if (v < 0x4000) return new Uint8Array([0x40 | (v >> 8), v & 0xff]);
   if (v < 0x40000000) return new Uint8Array([
@@ -21,10 +21,10 @@ function rsEncodeVarInt(v) {
     (lo >>> 24) & 0xff, (lo >>> 16) & 0xff, (lo >>> 8) & 0xff, lo & 0xff
   ]);
 }
-function rsEncodeString(s) { const b = new TextEncoder().encode(s); return rsConcat(rsEncodeVarInt(b.length), b); }
-function rsSizePrefix(p) { return rsConcat(rsEncodeVarInt(p.length), p); }
+export function rsEncodeString(s) { const b = new TextEncoder().encode(s); return rsConcat(rsEncodeVarInt(b.length), b); }
+export function rsSizePrefix(p) { return rsConcat(rsEncodeVarInt(p.length), p); }
 
-class RsBufReader {
+export class RsBufReader {
   constructor(d) { this.d = d; this.p = 0; }
   readVarInt() {
     const f = this.d[this.p], tag = (f & 0xc0) >> 6, len = 1 << tag;
@@ -36,7 +36,7 @@ class RsBufReader {
   readString() { const n = this.readVarInt(); return new TextDecoder().decode(this.readBytes(n)); }
 }
 
-class RsStreamReader {
+export class RsStreamReader {
   constructor(r) { this.reader = r; this.buf = new Uint8Array(0); this.pos = 0; }
   avail() { return this.buf.length - this.pos; }
   async ensure(n) {
@@ -61,14 +61,14 @@ class RsStreamReader {
   async readMessage() { const s = await this.readVarInt(); return await this.readBytes(s); }
 }
 
-function rsEncodeClientSetup() {
+export function rsEncodeClientSetup() {
   return rsSizePrefix(rsConcat(
     rsEncodeVarInt(2), rsEncodeVarInt(0xff0dad02), rsEncodeVarInt(0xff0dad01),
     rsEncodeVarInt(0)
   ));
 }
-function rsEncodeAnnouncePlease(pfx) { return rsSizePrefix(rsEncodeString(pfx)); }
-function rsEncodeSubscribe(id, bc, tk, pri) {
+export function rsEncodeAnnouncePlease(pfx) { return rsSizePrefix(rsEncodeString(pfx)); }
+export function rsEncodeSubscribe(id, bc, tk, pri) {
   return rsSizePrefix(rsConcat(rsEncodeVarInt(id), rsEncodeString(bc), rsEncodeString(tk), new Uint8Array([(pri+128)&0xff])));
 }
 
@@ -433,15 +433,19 @@ export class MsePlayer {
   }
 }
 
+// ─── Default intrinsics (fallback when metadata not yet received) ──
+const DEFAULT_INTRINSICS = { fx: 604.2, fy: 603.5, ppx: 322.7, ppy: 252.7, width: 640, height: 480 };
+
 // ─── Point cloud update ─────────────────────────────
-export function updatePointCloudGeneric(videoEl, decoder, cCtx, pArr, cArr, geom) {
+export function updatePointCloudGeneric(videoEl, decoder, cCtx, pArr, cArr, geom, intrinsics) {
   if (!videoEl.videoWidth) return;
   if (!decoder || !decoder.latestY) return;
 
   const dW = decoder.width, dH = decoder.height;
   const step = 1;
-  const fx = 604.2 * dW / 640, fy = 603.5 * dH / 480;
-  const cx = 322.7 * dW / 640, cy = 252.7 * dH / 480;
+  const intr = intrinsics || DEFAULT_INTRINSICS;
+  const fx = intr.fx * dW / intr.width, fy = intr.fy * dH / intr.height;
+  const cx = intr.ppx * dW / intr.width, cy = intr.ppy * dH / intr.height;
 
   if (cCtx.canvas.width !== dW || cCtx.canvas.height !== dH) {
     cCtx.canvas.width = dW; cCtx.canvas.height = dH;

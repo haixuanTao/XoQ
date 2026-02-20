@@ -99,7 +99,12 @@ Self-hosted iroh-relay runs on `cdn.1ms.ai:3341` (HTTPS with Let's Encrypt TLS).
 
 ### Hardware
 
-PCAN USB Pro FD adapters (4 channels: can0–can3). Connected via USB to the robot PC (172.18.133.111).
+PCAN USB Pro FD adapters (4 channels: can0–can3). Connected via USB to the robot PCs.
+
+### Server Access
+
+- **baguette:** `ssh baguette@172.18.128.205`
+- **champagne:** `ssh champagne@172.18.128.207`
 
 ### Interface Setup (all 4 channels)
 
