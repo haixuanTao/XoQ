@@ -65,12 +65,26 @@ impl MoqBuilder {
         Ok(Url::parse(&url_str)?)
     }
 
+    /// Build a URL for a specific path (ignoring the builder's path field).
+    pub fn build_url_for_path(&self, path: &str) -> Result<Url> {
+        let url_str = match &self.token {
+            Some(token) => format!("{}/{}?token={}", self.relay_url, path, token),
+            None => format!("{}/{}", self.relay_url, path),
+        };
+        Ok(Url::parse(&url_str)?)
+    }
+
     fn create_client(&self) -> Result<moq_native::Client> {
         let mut config = moq_native::ClientConfig::default();
         if self.disable_tls_verify {
             config.tls.disable_verify = Some(true);
         }
         config.init()
+    }
+
+    /// Create client (public access for bridge_server low-level usage).
+    pub fn create_client_public(&self) -> Result<moq_native::Client> {
+        self.create_client()
     }
 
     /// Connect as a duplex endpoint (can publish and subscribe on the same session).
@@ -339,6 +353,11 @@ pub struct MoqTrackReader {
 }
 
 impl MoqTrackReader {
+    /// Create a reader from a raw TrackConsumer (for low-level usage).
+    pub fn from_track(track: moq_lite::TrackConsumer) -> Self {
+        Self { track, group: None }
+    }
+
     /// Read the next frame.
     ///
     /// Reads all frames from the current group before moving to the next.
