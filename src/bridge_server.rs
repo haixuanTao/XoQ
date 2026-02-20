@@ -505,7 +505,6 @@ async fn moq_command_subscriber(
 
         let mut reader =
             MoqTrackReader::from_track(broadcast.subscribe_track(&Track::new(track_name)));
-        let mut reader_alive = true;
         tracing::info!(
             "MoQ command subscriber active on track '{}' at {}",
             track_name,
@@ -519,8 +518,8 @@ async fn moq_command_subscriber(
         let mut backend_died = false;
         loop {
             tokio::select! {
-                // Read data from current broadcast (disabled when reader is dead)
-                read_result = reader.read(), if reader_alive => {
+                // Read data from current broadcast
+                read_result = reader.read() => {
                     match read_result {
                         Ok(Some(data)) => {
                             timeout.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(30));
@@ -539,12 +538,12 @@ async fn moq_command_subscriber(
                             }
                         }
                         Ok(None) => {
-                            tracing::debug!("MoQ command reader ended, waiting for reannounce...");
-                            reader_alive = false;
+                            tracing::info!("MoQ command reader ended, reconnecting immediately...");
+                            break;
                         }
                         Err(e) => {
-                            tracing::debug!("MoQ command read error: {}, waiting for reannounce...", e);
-                            reader_alive = false;
+                            tracing::info!("MoQ command read error: {}, reconnecting immediately...", e);
+                            break;
                         }
                     }
                 }
@@ -554,7 +553,6 @@ async fn moq_command_subscriber(
                         Some((_path, Some(bc))) => {
                             tracing::info!("MoQ command reannounce — switching to new broadcast");
                             reader = MoqTrackReader::from_track(bc.subscribe_track(&Track::new(track_name)));
-                            reader_alive = true;
                             timeout.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(30));
                         }
                         Some((_path, None)) => {

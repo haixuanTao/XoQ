@@ -50,6 +50,11 @@ async fn main() -> Result<()> {
             let relay = args.get(2).map(|s| s.as_str()).unwrap_or(DEFAULT_CMD_RELAY);
             run_reannounce_test(relay).await
         }
+        "burst" => {
+            let relay = args.get(2).map(|s| s.as_str()).unwrap_or(DEFAULT_CMD_RELAY);
+            let count: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1000);
+            run_burst_test(relay, count).await
+        }
         "cmd" => {
             let base_path = match args.get(2) {
                 Some(p) => p.as_str(),
@@ -69,12 +74,17 @@ async fn main() -> Result<()> {
             run_cmd_test(relay, base_path).await
         }
         _ => {
-            eprintln!("Usage: moq_test <pub|sub|stream|cmd> [args...]");
+            eprintln!("Usage: moq_test <pub|sub|stream|cmd|burst> [args...]");
             eprintln!();
-            eprintln!("  pub              - Run publisher (one-way test)");
-            eprintln!("  sub              - Run subscriber (one-way test)");
-            eprintln!("  stream           - Bidirectional MoqStream test (server + client)");
-            eprintln!("  cmd <path> [url] - CAN command test (simulates browser motor query)");
+            eprintln!("  pub                    - Run publisher (one-way test)");
+            eprintln!("  sub                    - Run subscriber (one-way test)");
+            eprintln!("  stream                 - Bidirectional MoqStream test (server + client)");
+            eprintln!(
+                "  cmd <path> [url]       - CAN command test (simulates browser motor query)"
+            );
+            eprintln!(
+                "  burst [relay] [count]  - Burst test: send N msgs fast, then verify still alive"
+            );
             eprintln!();
             eprintln!("Default relay: {}", DEFAULT_RELAY);
             eprintln!("Default cmd relay: {}", DEFAULT_CMD_RELAY);
@@ -769,6 +779,176 @@ async fn run_cmd_test(relay: &str, base_path: &str) -> Result<()> {
             eprintln!();
             eprintln!("=== Test complete ===");
         }
+    }
+
+    Ok(())
+}
+
+/// Burst test: publisher sends N messages as fast as possible, subscriber counts them,
+/// then publisher sends slow follow-up messages to verify connection is still alive.
+async fn run_burst_test(relay: &str, count: usize) -> Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    let test_path = "anon/xoq-burst-test";
+    eprintln!("=== Burst Test ===");
+    eprintln!("Relay: {}", relay);
+    eprintln!("Path:  {}", test_path);
+    eprintln!("Burst: {} messages", count);
+    eprintln!();
+
+    let burst_received = Arc::new(AtomicU64::new(0));
+    let post_burst_received = Arc::new(AtomicU64::new(0));
+    let burst_received_sub = burst_received.clone();
+    let post_burst_received_sub = post_burst_received.clone();
+
+    // Signal from pub → sub that publisher is connected
+    let (pub_ready_tx, pub_ready_rx) = tokio::sync::oneshot::channel::<()>();
+    // Signal from sub → pub that subscriber is subscribed
+    let (sub_ready_tx, sub_ready_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let relay_pub = relay.to_string();
+    let relay_sub = relay.to_string();
+
+    // 1. Start publisher FIRST so relay has a broadcast to announce
+    let burst_count = count;
+    let pub_handle = tokio::spawn(async move {
+        eprintln!("[pub] Connecting to {}...", relay_pub);
+        let (_publisher, mut track) = xoq::MoqBuilder::new()
+            .relay(&relay_pub)
+            .path(test_path)
+            .disable_tls_verify()
+            .connect_publisher_with_track("data")
+            .await
+            .unwrap();
+        eprintln!("[pub] Connected! Signaling ready for subscriber...");
+        let _ = pub_ready_tx.send(());
+
+        // Wait for subscriber to be ready
+        let _ = sub_ready_rx.await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // --- BURST PHASE ---
+        eprintln!("[pub] Starting burst of {} messages...", burst_count);
+        let burst_start = std::time::Instant::now();
+        for i in 0..burst_count {
+            let msg = format!("burst-{}", i);
+            track.write(bytes::Bytes::from(msg));
+        }
+        let burst_elapsed = burst_start.elapsed();
+        eprintln!(
+            "[pub] Burst complete: {} msgs in {:.1}ms ({:.0} msg/s)",
+            burst_count,
+            burst_elapsed.as_secs_f64() * 1000.0,
+            burst_count as f64 / burst_elapsed.as_secs_f64()
+        );
+
+        // Give subscriber time to drain
+        tokio::time::sleep(Duration::from_secs(3)).await;
+
+        // --- POST-BURST PHASE: verify connection still alive ---
+        eprintln!("[pub] Post-burst: sending 10 slow messages at 1/s...");
+        for i in 0..10 {
+            let msg = format!("post-burst-{}", i);
+            eprintln!("[pub] Sending: {}", msg);
+            track.write(bytes::Bytes::from(msg));
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+
+        eprintln!("[pub] All done, keeping alive 3s...");
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    });
+
+    // 2. Start subscriber after publisher is ready
+    let sub_handle = tokio::spawn(async move {
+        // Wait for publisher to connect first
+        let _ = pub_ready_rx.await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        eprintln!("[sub] Connecting to {}...", relay_sub);
+        let mut subscriber = match xoq::MoqBuilder::new()
+            .relay(&relay_sub)
+            .path(test_path)
+            .disable_tls_verify()
+            .connect_subscriber()
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[sub] FAIL: Connect error: {}", e);
+                return 0u64;
+            }
+        };
+
+        let mut reader = match subscriber.subscribe_track("data").await {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                eprintln!("[sub] FAIL: Subscribe returned None");
+                return 0;
+            }
+            Err(e) => {
+                eprintln!("[sub] FAIL: Subscribe error: {}", e);
+                return 0;
+            }
+        };
+        eprintln!("[sub] Subscribed! Signaling ready for burst...");
+        let _ = sub_ready_tx.send(());
+
+        let mut total = 0u64;
+
+        loop {
+            match tokio::time::timeout(Duration::from_secs(15), reader.read()).await {
+                Ok(Ok(Some(data))) => {
+                    total += 1;
+                    let msg = String::from_utf8_lossy(&data);
+                    if msg.starts_with("post-burst") {
+                        post_burst_received_sub.fetch_add(1, Ordering::Relaxed);
+                        eprintln!("[sub] #{} POST-BURST: {}", total, msg);
+                    } else {
+                        burst_received_sub.fetch_add(1, Ordering::Relaxed);
+                        if total <= 5 || total % 200 == 0 {
+                            eprintln!("[sub] #{} BURST: {}", total, msg);
+                        }
+                    }
+                }
+                Ok(Ok(None)) => {
+                    eprintln!("[sub] Track ended after {} reads", total);
+                    break;
+                }
+                Ok(Err(e)) => {
+                    eprintln!("[sub] Read error after {} reads: {}", total, e);
+                    break;
+                }
+                Err(_) => {
+                    eprintln!("[sub] Timeout (15s idle). total={}", total);
+                    break;
+                }
+            }
+        }
+        total
+    });
+
+    let (sub_result, _pub_result) = tokio::join!(sub_handle, pub_handle);
+    let total_received = sub_result.unwrap_or(0);
+
+    eprintln!();
+    eprintln!("=== Burst Test Results ===");
+    eprintln!(
+        "Burst received:      {} / {} ({:.1}%)",
+        burst_received.load(Ordering::Relaxed),
+        count,
+        burst_received.load(Ordering::Relaxed) as f64 / count as f64 * 100.0
+    );
+    eprintln!(
+        "Post-burst received: {} / 10",
+        post_burst_received.load(Ordering::Relaxed)
+    );
+    eprintln!("Total received:      {}", total_received);
+
+    if post_burst_received.load(Ordering::Relaxed) > 0 {
+        eprintln!("RESULT: Connection survived the burst!");
+    } else {
+        eprintln!("RESULT: CONNECTION DEAD after burst — no post-burst messages received!");
     }
 
     Ok(())
