@@ -1,0 +1,141 @@
+/* ─── Settings Page (standalone) ─────────────────── */
+body.settings-page {
+  min-height: 100vh;
+  padding: 1rem;
+}
+h1 { color: #00d4ff; font-size: 1.3rem; margin-bottom: 1rem; }
+h2 {
+  font-size: 0.9rem;
+  color: #888;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 0.5rem;
+  padding-bottom: 0.3rem;
+  border-bottom: 1px solid #333;
+}
+.container {
+  max-width: 720px;
+  margin: 0 auto;
+}
+.section {
+  background: #16162a;
+  border: 1px solid #2a2a4a;
+  border-radius: 8px;
+  padding: 1rem;
+  margin-bottom: 1rem;
+}
+.field {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+.field label {
+  min-width: 90px;
+  font-size: 0.8rem;
+  color: #aaa;
+  text-align: right;
+  flex-shrink: 0;
+}
+.field input[type="text"],
+.field input[type="number"] {
+  flex: 1;
+}
+.field input[type="number"] { max-width: 80px; }
+.field-group {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.field-group label {
+  min-width: auto;
+  font-size: 0.75rem;
+}
+.field-group input[type="number"] {
+  width: 64px;
+  padding: 0.25rem 0.3rem;
+  font-size: 0.8rem;
+}
+
+/* Dynamic item cards */
+.item-card {
+  background: #1e1e3a;
+  border: 1px solid #333;
+  border-radius: 6px;
+  padding: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+.item-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+}
+.item-header span {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #00d4ff;
+}
+.btn-remove {
+  background: #ff4757;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  padding: 0.2rem 0.5rem;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+.btn-remove:hover { background: #ff3344; }
+.btn-add {
+  background: #2a2a4a;
+  color: #00d4ff;
+  border: 1px dashed #00d4ff;
+  border-radius: 6px;
+  padding: 0.5rem;
+  width: 100%;
+  font-size: 0.8rem;
+  cursor: pointer;
+  margin-top: 0.25rem;
+}
+.btn-add:hover { background: #333; }
+
+/* Arm pair left/right row */
+.pair-row {
+  display: grid;
+  grid-template-columns: 90px 1fr;
+  gap: 0.5rem;
+  align-items: center;
+  margin-bottom: 0.4rem;
+}
+.pair-row label {
+  font-size: 0.8rem;
+  color: #aaa;
+  text-align: right;
+}
+.pair-row input[type="text"] {
+  width: 100%;
+}
+
+/* Footer */
+.footer {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  justify-content: center;
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid #333;
+}
+.back-link {
+  color: #888;
+  text-decoration: none;
+  font-size: 0.8rem;
+}
+.back-link:hover { color: #00d4ff; }
+.title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+}

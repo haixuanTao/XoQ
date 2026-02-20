@@ -11,6 +11,7 @@ export default defineConfig({
       input: {
         index: resolve(__dirname, "examples/index.html"),
         openarm: resolve(__dirname, "examples/openarm.html"),
+        settings: resolve(__dirname, "examples/settings.html"),
         camera: resolve(__dirname, "examples/camera.html"),
         publish: resolve(__dirname, "examples/publish.html"),
         subscribe: resolve(__dirname, "examples/subscribe.html"),

@@ -1,0 +1,57 @@
+/* ─── Shared dark theme base ─────────────────────── */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: system-ui, -apple-system, sans-serif;
+  background: #1a1a2e;
+  color: #eee;
+}
+
+/* Buttons */
+button {
+  padding: 0.35rem 0.75rem;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: background 0.2s;
+}
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Text inputs */
+input[type="text"],
+input[type="number"] {
+  padding: 0.35rem 0.5rem;
+  border: 1px solid #444;
+  border-radius: 4px;
+  background: #2a2a4a;
+  color: #fff;
+  font-size: 0.85rem;
+}
+input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: #00d4ff;
+}
+
+/* Accent buttons */
+.btn-primary {
+  background: #00d4ff;
+  color: #000;
+  border: none;
+  border-radius: 6px;
+  padding: 0.6rem 1.5rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.btn-primary:hover { background: #00b8e6; }
+.btn-secondary {
+  background: #2a2a4a;
+  color: #aaa;
+  border: 1px solid #444;
+  border-radius: 6px;
+  padding: 0.5rem 1rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.btn-secondary:hover { background: #333; color: #fff; }

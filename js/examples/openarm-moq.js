@@ -1,7 +1,7 @@
 // openarm-moq.js — MoQ connection logic for arms, cameras, and RealSense
 
 import * as Moq from "@moq/lite";
-import { JOINTS, parseAllCanFrames, parseDamiaoState } from "./openarm-can.js";
+import { JOINTS, parseAllCanFrames, parseDamiaoState, canIdToJointIdx } from "./openarm-can.js";
 import { log } from "./openarm-log.js";
 import { MsePlayer, DepthDecoder, HAS_WEBCODECS, stripTimestamp } from "./openarm-depth.js";
 
@@ -66,7 +66,7 @@ async function subscribeArmOnce(config, appState, label, path, jointState) {
       appState.frameCount += canFrames.length;
       appState.fpsCounter += canFrames.length;
       for (const parsed of canFrames) {
-        const jointIdx = JOINTS.findIndex(j => j.canId === parsed.canId);
+        const jointIdx = canIdToJointIdx(parsed.canId);
         if (jointIdx < 0) continue;
         const state = parseDamiaoState(parsed.data);
         if (!state) continue;
@@ -156,7 +156,7 @@ export async function connectCameras(config, camState, camVideoEls) {
   const promises = [];
   config.cameras.forEach((camCfg, i) => {
     const path = (camCfg.path || "").trim();
-    if (path && camState[i]) {
+    if (camCfg.enabled !== false && path && camState[i]) {
       promises.push(connectSingleCamera(config, camState[i], path, camVideoEls[i], camCfg.label || ("Cam " + (i+1))));
     }
   });
@@ -242,7 +242,7 @@ export async function connectRealSense(config, appState, rsCams, rsVideoEls) {
   const promises = [];
   config.realsense.forEach((rsCfg, i) => {
     const path = (rsCfg.path || "").trim();
-    if (path && rsCams[i]) {
+    if (rsCfg.enabled !== false && path && rsCams[i]) {
       promises.push(connectSingleRealSense(config, appState, rsCams[i], path, rsVideoEls[i], rsCfg.label || ("RS " + (i+1))));
     }
   });

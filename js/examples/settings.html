@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenArm Settings - xoq</title>
+  <link rel="stylesheet" href="common.css" />
+  <link rel="stylesheet" href="settings.css" />
+</head>
+<body class="settings-page">
+  <div class="container">
+    <div class="title-row">
+      <h1>OpenArm Settings</h1>
+      <a href="openarm.html" class="back-link">Back to Visualizer</a>
+    </div>
+    <div id="settingsContainer"></div>
+  </div>
+
+  <script type="module">
+    import { loadConfig } from "./openarm-config.js";
+    import { initSettings } from "./openarm-settings.js";
+
+    const config = loadConfig();
+    initSettings(document.getElementById("settingsContainer"), config, {
+      primaryButtonLabel: "Save & Open Visualizer",
+      onPrimaryAction() { window.location.href = "openarm.html"; },
+    });
+  </script>
+</body>
+</html>

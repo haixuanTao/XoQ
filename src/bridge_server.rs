@@ -427,9 +427,9 @@ async fn moq_state_publisher(
 /// Uses `try_send()` so iroh commands always have priority.
 /// Automatically reconnects on disconnect.
 ///
-/// Uses a simple connect-subscribe-read loop. Each iteration creates a fresh
-/// connection to the relay, avoiding issues with reannounce-based track switching
-/// where data doesn't flow from reannounced broadcasts (confirmed by testing).
+/// Iterates through announced broadcasts per connection, skipping stale ones
+/// (which immediately error with "cancelled"). Only does a full reconnect when
+/// all broadcasts are exhausted or a read timeout occurs.
 async fn moq_command_subscriber(
     relay: &str,
     path: &str,
@@ -438,99 +438,150 @@ async fn moq_command_subscriber(
     insecure: bool,
     write_tx: mpsc::Sender<Vec<u8>>,
 ) -> Result<()> {
-    use crate::moq::MoqBuilder;
+    use crate::moq::{MoqBuilder, MoqTrackReader};
+    use moq_native::moq_lite::{Origin, Track};
 
-    let mut builder = MoqBuilder::new().relay(relay);
-    if insecure {
-        builder = builder.disable_tls_verify();
-    }
+    let builder = MoqBuilder::new().relay(relay);
+    let builder = if insecure {
+        builder.disable_tls_verify()
+    } else {
+        builder
+    };
 
     let cmd_path = format!("{}/{}", path, command_subpath);
 
     loop {
         tracing::info!("MoQ command subscriber connecting on {}...", cmd_path);
 
-        // Fresh connection each iteration — this ensures we get the latest broadcast
-        let mut subscriber = match tokio::time::timeout(
-            Duration::from_secs(5),
-            builder.clone().path(&cmd_path).connect_subscriber(),
-        )
-        .await
-        {
-            Ok(Ok(sub)) => sub,
-            Ok(Err(e)) => {
-                tracing::warn!("MoQ command subscriber connect error: {}, retrying...", e);
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                continue;
-            }
-            Err(_) => {
-                tracing::info!("MoQ command subscriber connect timeout, retrying...");
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                continue;
-            }
-        };
-
-        // Subscribe to the command track (waits for broadcast announcement)
-        let mut reader = match tokio::time::timeout(
-            Duration::from_secs(5),
-            subscriber.subscribe_track(track_name),
-        )
-        .await
-        {
-            Ok(Ok(Some(r))) => {
-                tracing::info!(
-                    "MoQ command subscriber subscribed to track '{}' on {}",
-                    track_name,
-                    cmd_path
-                );
-                r
-            }
-            Ok(Ok(None)) => {
-                tracing::info!("Command track subscribe returned None, retrying...");
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                continue;
-            }
-            Ok(Err(e)) => {
-                tracing::warn!("Command track subscribe error: {}, retrying...", e);
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                continue;
-            }
-            Err(_) => {
-                tracing::info!("No command publisher yet (announce timeout), retrying...");
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                continue;
-            }
-        };
-
-        // Read commands and forward to backend
-        let backend_died = loop {
-            match tokio::time::timeout(Duration::from_secs(10), reader.read()).await {
-                Ok(Ok(Some(data))) => match write_tx.try_send(data.to_vec()) {
-                    Ok(_) => {
-                        tracing::debug!("MoQ command forwarded ({} bytes)", data.len());
-                    }
-                    Err(mpsc::error::TrySendError::Full(_)) => {
-                        tracing::debug!("MoQ command dropped (iroh has priority)");
-                    }
-                    Err(mpsc::error::TrySendError::Closed(_)) => {
-                        tracing::error!("Backend writer died");
-                        break true;
-                    }
-                },
-                Ok(Ok(None)) => {
-                    tracing::info!("MoQ command stream ended, will reconnect...");
-                    break false;
-                }
+        // Fresh connection
+        let (mut origin_consumer, _session) =
+            match tokio::time::timeout(Duration::from_secs(5), async {
+                let url = builder.build_url_for_path(&cmd_path)?;
+                let client = builder.create_client_public()?;
+                let origin = Origin::produce();
+                let session = client.with_consume(origin.producer).connect(url).await?;
+                Ok::<_, anyhow::Error>((origin.consumer, session))
+            })
+            .await
+            {
+                Ok(Ok(r)) => r,
                 Ok(Err(e)) => {
-                    tracing::info!("MoQ command read error: {}, will reconnect...", e);
-                    break false;
+                    tracing::warn!("MoQ command subscriber connect error: {}, retrying...", e);
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    continue;
                 }
                 Err(_) => {
-                    tracing::debug!("MoQ command read timeout (10s), will reconnect...");
-                    break false;
+                    tracing::info!("MoQ command subscriber connect timeout, retrying...");
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    continue;
+                }
+            };
+
+        // Try each announced broadcast (skipping stale ones)
+        let mut backend_died = false;
+        let mut got_data = false;
+        loop {
+            // Wait for next broadcast announcement
+            let broadcast = match tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    match origin_consumer.announced().await {
+                        Some((_path, Some(bc))) => return Some(bc),
+                        Some((_path, None)) => continue, // unannounce, skip
+                        None => return None,
+                    }
+                }
+            })
+            .await
+            {
+                Ok(Some(bc)) => bc,
+                Ok(None) => {
+                    tracing::info!("MoQ command origin closed, will reconnect...");
+                    break;
+                }
+                Err(_) => {
+                    if !got_data {
+                        tracing::debug!("No command publisher yet (10s), will reconnect...");
+                    }
+                    break;
+                }
+            };
+
+            let track_consumer = broadcast.subscribe_track(&Track::new(track_name));
+            let mut reader = MoqTrackReader::from_track(track_consumer);
+
+            // Drain cached/stale data: read with very short timeout (50ms).
+            // Cached frames arrive instantly; live data takes time between frames.
+            // Discard everything that arrives within 50ms to avoid forwarding stale commands.
+            let mut drained = 0u32;
+            loop {
+                match tokio::time::timeout(Duration::from_millis(50), reader.read()).await {
+                    Ok(Ok(Some(_))) => {
+                        drained += 1;
+                    }
+                    Ok(Ok(None)) | Ok(Err(_)) => {
+                        // Broadcast ended or errored during drain — it's fully stale
+                        if drained > 0 {
+                            tracing::info!(
+                                "Drained {} stale command frames, broadcast ended",
+                                drained
+                            );
+                        }
+                        continue; // try next broadcast
+                    }
+                    Err(_) => {
+                        // 50ms timeout — cache is drained, ready for live data
+                        break;
+                    }
                 }
             }
-        };
+            if drained > 0 {
+                tracing::info!("Drained {} stale cached command frames", drained);
+            }
+
+            tracing::info!(
+                "MoQ command subscriber listening on track '{}' at {}",
+                track_name,
+                cmd_path
+            );
+
+            // Read live commands and forward to backend
+            loop {
+                match tokio::time::timeout(Duration::from_secs(10), reader.read()).await {
+                    Ok(Ok(Some(data))) => {
+                        got_data = true;
+                        match write_tx.try_send(data.to_vec()) {
+                            Ok(_) => {
+                                tracing::debug!("MoQ command forwarded ({} bytes)", data.len());
+                            }
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                tracing::debug!("MoQ command dropped (iroh has priority)");
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => {
+                                tracing::error!("Backend writer died");
+                                backend_died = true;
+                                break;
+                            }
+                        }
+                    }
+                    Ok(Ok(None)) => {
+                        tracing::info!("MoQ command stream ended, trying next broadcast...");
+                        break; // try next broadcast on same connection
+                    }
+                    Ok(Err(e)) => {
+                        tracing::info!("MoQ command read error: {}, trying next broadcast...", e);
+                        break; // try next broadcast on same connection
+                    }
+                    Err(_) => {
+                        tracing::debug!("MoQ command read timeout (10s), trying next broadcast...");
+                        break; // try next broadcast on same connection
+                    }
+                }
+            }
+
+            if backend_died {
+                break;
+            }
+        }
 
         if backend_died {
             return Ok(());

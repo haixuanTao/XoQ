@@ -4,370 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>OpenArm 3D Visualizer - xoq</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: system-ui, -apple-system, sans-serif;
-      background: #1a1a2e;
-      color: #eee;
-      height: 100vh;
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-      padding-bottom: 84px;
-    }
-
-    /* Top bar */
-    .top-bar {
-      padding: 0.5rem 1rem;
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      flex-wrap: wrap;
-      border-bottom: 1px solid #333;
-      background: #16162a;
-    }
-    .top-bar-main {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      flex-wrap: wrap;
-    }
-    .top-bar-config {
-      display: none;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 0.75rem;
-      padding-top: 0.4rem;
-      border-top: 1px solid #333;
-      width: 100%;
-    }
-    .top-bar-config.open { display: flex; }
-    .settings-toggle {
-      margin-left: auto;
-      background: #2a2a4a;
-      color: #aaa;
-      border: 1px solid #444;
-      font-size: 1.1rem;
-      line-height: 1;
-      padding: 0.25rem 0.5rem;
-      margin-left: auto;
-    }
-    .top-bar h1 { color: #00d4ff; font-size: 1.1rem; white-space: nowrap; }
-    .top-bar label {
-      display: flex;
-      align-items: center;
-      gap: 0.3rem;
-      font-size: 0.85rem;
-      color: #aaa;
-    }
-    .top-bar input[type="text"] {
-      padding: 0.35rem 0.5rem;
-      border: 1px solid #444;
-      border-radius: 4px;
-      background: #2a2a4a;
-      color: #fff;
-      font-size: 0.85rem;
-      width: 240px;
-    }
-    button {
-      padding: 0.35rem 0.75rem;
-      border: none;
-      border-radius: 4px;
-      cursor: pointer;
-      font-size: 0.85rem;
-      transition: background 0.2s;
-    }
-    button:disabled { opacity: 0.5; cursor: not-allowed; }
-    #startBtn { background: #00d4ff; color: #000; }
-    #startBtn:hover:not(:disabled) { background: #00b8e6; }
-    #stopBtn { background: #ff4757; color: #fff; }
-    #stopBtn:hover:not(:disabled) { background: #ff3344; }
-    #queryBtn { background: #2a2a4a; color: #888; border: 1px solid #444; }
-    #queryBtn.active { background: #2ed573; color: #000; border-color: #2ed573; }
-    #queryBtn:hover:not(:disabled) { background: #444; }
-    #queryBtn.active:hover:not(:disabled) { background: #26b860; }
-    #audioBtn { background: #2a2a4a; color: #888; border: 1px solid #444; }
-    #audioBtn.active { background: #a855f7; color: #fff; border-color: #a855f7; }
-    #audioBtn:hover:not(:disabled) { background: #444; }
-    #audioBtn.active:hover:not(:disabled) { background: #9333ea; }
-    .ping-good { color: #2ed573; }
-    .ping-warn { color: #ffa502; }
-    .ping-bad  { color: #ff4757; }
-
-    /* Main layout */
-    .main {
-      flex: 1;
-      display: flex;
-      min-height: 0;
-    }
-
-    /* 3D canvas */
-    .canvas-container {
-      flex: 1;
-      position: relative;
-      min-width: 0;
-    }
-    #threeCanvas {
-      width: 100%;
-      height: 100%;
-      display: block;
-    }
-    .canvas-overlay {
-      position: absolute;
-      top: 0.5rem;
-      left: 0.5rem;
-      font-size: 0.7rem;
-      color: #888;
-      pointer-events: none;
-    }
-
-    /* Side panel (overlay, shown via tabs) */
-    .side-panel {
-      display: none;
-      position: fixed;
-      top: 0; left: 0; right: 0;
-      bottom: 84px;
-      width: 100%;
-      background: #16162a;
-      flex-direction: column;
-      overflow-y: auto;
-      z-index: 100;
-    }
-    .side-panel.tab-visible { display: flex; }
-    .side-panel .panel-section { display: none; }
-    .side-panel .panel-section.tab-visible { display: block; }
-    .panel-section {
-      padding: 0.75rem;
-      border-bottom: 1px solid #2a2a4a;
-    }
-    .panel-section h3 {
-      font-size: 0.8rem;
-      color: #888;
-      text-transform: uppercase;
-      margin-bottom: 0.5rem;
-    }
-
-    /* Joint rows */
-    .joint-row {
-      display: grid;
-      grid-template-columns: 50px 1fr 50px 50px;
-      gap: 0.25rem;
-      align-items: center;
-      padding: 0.3rem 0;
-      font-size: 0.8rem;
-      border-bottom: 1px solid #1e1e3a;
-    }
-    .joint-row:last-child { border-bottom: none; }
-    .joint-label {
-      font-weight: bold;
-      white-space: nowrap;
-    }
-    .joint-angle {
-      font-family: 'Monaco', 'Menlo', monospace;
-      text-align: right;
-      font-size: 0.85rem;
-    }
-    .joint-vel, .joint-tau {
-      font-family: 'Monaco', 'Menlo', monospace;
-      text-align: right;
-      font-size: 0.7rem;
-      color: #888;
-    }
-
-    /* Camera split view (desktop: side-by-side with 3D, mobile: overlay) */
-    .camera-split {
-      display: none;
-      flex-direction: column;
-      background: #000;
-    }
-    .camera-split .camera-feed {
-      flex: 1;
-      position: relative;
-      min-height: 0;
-    }
-    .camera-split .camera-feed video {
-      width: 100%;
-      height: 100%;
-      object-fit: contain;
-      display: block;
-    }
-    .camera-split .cam-label {
-      position: absolute;
-      top: 4px;
-      left: 6px;
-      font-size: 0.65rem;
-      color: rgba(255,255,255,0.5);
-      z-index: 1;
-    }
-    .camera-split.tab-visible {
-      display: flex;
-      position: fixed;
-      top: 0; left: 0; right: 0;
-      bottom: 84px;
-      z-index: 100;
-    }
-
-    /* Stats */
-    .stats-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 0.4rem;
-    }
-    .stat {
-      background: #2a2a4a;
-      padding: 0.4rem;
-      border-radius: 4px;
-      text-align: center;
-    }
-    .stat-label { color: #888; font-size: 0.65rem; text-transform: uppercase; }
-    .stat-value { font-size: 0.9rem; font-weight: bold; color: #00d4ff; }
-
-    /* Log (overlay, shown via tab) */
-    .log-panel {
-      display: none;
-      position: fixed;
-      top: 0; left: 0; right: 0;
-      bottom: 84px;
-      height: auto;
-      background: #0a0a1a;
-      overflow-y: auto;
-      padding: 0.5rem;
-      font-family: 'Monaco', 'Menlo', monospace;
-      font-size: 0.7rem;
-      z-index: 100;
-    }
-    .log-panel.tab-visible { display: block; }
-    .log-entry { margin: 0.15rem 0; }
-    .log-info { color: #888; }
-    .log-success { color: #2ed573; }
-    .log-error { color: #ff4757; }
-    .log-data { color: #00d4ff; }
-
-    /* Tab bar (always visible at bottom) */
-    .tab-bar {
-      display: flex;
-      position: fixed;
-      bottom: 0; left: 0; right: 0;
-      height: 48px;
-      background: #16162a;
-      border-top: 1px solid #333;
-      z-index: 200;
-    }
-    .tab-btn {
-      flex: 1;
-      background: transparent;
-      color: #888;
-      border: none;
-      border-radius: 0;
-      font-size: 0.8rem;
-      padding: 0;
-      cursor: pointer;
-      transition: color 0.2s, border-color 0.2s;
-      border-top: 2px solid transparent;
-    }
-    .tab-btn:hover { color: #ccc; }
-    .tab-btn.active {
-      color: #00d4ff;
-      border-top-color: #00d4ff;
-    }
-
-    /* Toast notifications */
-    .toast-container {
-      position: fixed;
-      bottom: 92px;
-      left: 0.5rem;
-      z-index: 150;
-      display: flex;
-      flex-direction: column-reverse;
-      gap: 4px;
-      pointer-events: none;
-      max-height: 40vh;
-      overflow: hidden;
-    }
-    .toast {
-      background: rgba(10, 10, 26, 0.85);
-      backdrop-filter: blur(6px);
-      -webkit-backdrop-filter: blur(6px);
-      border-left: 3px solid #888;
-      padding: 0.3rem 0.6rem;
-      font-family: 'Monaco', 'Menlo', monospace;
-      font-size: 0.7rem;
-      color: #ccc;
-      border-radius: 4px;
-      max-width: min(420px, 80vw);
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      animation: toastIn 0.25s ease-out, toastOut 0.4s ease-in forwards;
-      animation-delay: 0s, var(--toast-duration, 4s);
-    }
-    .toast-success { border-left-color: #2ed573; color: #2ed573; }
-    .toast-error   { border-left-color: #ff4757; color: #ff4757; }
-    .toast-data    { border-left-color: #00d4ff; color: #00d4ff; }
-    .toast-info    { border-left-color: #888; }
-    .toast-chat    { border-left-color: #a855f7; color: #a855f7; }
-    .toast-sticky  { animation: toastIn 0.25s ease-out; }
-
-    /* Chat bar (always visible above tab bar) */
-    .chat-bar {
-      position: fixed;
-      bottom: 48px; left: 0; right: 0;
-      height: 36px;
-      display: flex;
-      align-items: center;
-      gap: 0.4rem;
-      padding: 0 0.5rem;
-      background: #16162a;
-      border-top: 1px solid #333;
-      z-index: 200;
-    }
-    .chat-bar input[type="text"] {
-      padding: 0.25rem 0.5rem;
-      border: 1px solid #444;
-      border-radius: 4px;
-      background: #2a2a4a;
-      color: #fff;
-      font-size: 0.8rem;
-    }
-    .chat-bar #chatUsername { width: 80px; }
-    .chat-bar #chatInput { flex: 1; }
-    .chat-bar #chatInput::placeholder { color: #555; }
-
-    @keyframes toastIn {
-      from { opacity: 0; transform: translateY(8px); }
-      to   { opacity: 1; transform: translateY(0); }
-    }
-    @keyframes toastOut {
-      from { opacity: 1; }
-      to   { opacity: 0; }
-    }
-
-    /* ─── Narrow screens ──────────────────────────────── */
-    @media (max-width: 768px) {
-      .top-bar { padding: 0.4rem 0.6rem; gap: 0.4rem; }
-      .top-bar-config { flex-direction: column; }
-      .top-bar-config label { width: 100%; }
-      .top-bar-config input[type="text"] { width: 100% !important; }
-    }
-
-    /* ─── Desktop: 3D + camera split view ─────────────── */
-    @media (min-width: 1024px) {
-      .camera-split {
-        display: flex;
-        flex: none;
-        height: 100%;
-        aspect-ratio: 2/3;
-        max-width: 50%;
-      }
-      .camera-split.tab-visible {
-        position: static;
-        bottom: auto;
-        z-index: auto;
-      }
-      .tab-btn[data-tab="camera"] { display: none; }
-    }
-  </style>
+  <link rel="stylesheet" href="common.css" />
+  <link rel="stylesheet" href="openarm.css" />
+  <link rel="stylesheet" href="settings.css" />
 </head>
 <body>
   <script>
@@ -396,68 +35,12 @@
       <h1>OpenArm 3D</h1>
       <button id="startBtn">Connect</button>
       <button id="stopBtn" disabled>Disconnect</button>
-      <button id="queryBtn" disabled>Query Motors</button>
       <button id="audioBtn" disabled title="Toggle audio playback">&#128263; Audio</button>
       <span id="audioLevel" style="color:#555; font-size:0.65rem; font-family:monospace; letter-spacing:-1px; white-space:nowrap;" title="Audio level (RMS)">--</span>
       <span id="statusText" style="color:#888; font-size:0.8rem;">Idle</span>
       <span id="viewerCount" style="color:#888; font-size:0.8rem; margin-left:0.25rem;">0 viewers</span>
       <span style="font-size:0.8rem; margin-left:0.25rem;" title="Video stream latency and FPS"><span id="streamPing" style="color:#555; display:inline-block; width:5.5em; text-align:right;">--</span> <span id="streamFps" style="color:#555; display:inline-block; width:3.5em; text-align:right;">--</span></span>
       <button id="settingsToggle" class="settings-toggle" aria-label="Settings">&#9881;</button>
-    </div>
-    <div class="top-bar-config" id="topBarConfig">
-      <label>
-        Relay:
-        <input type="text" id="relayUrl" />
-      </label>
-      <label>
-        Left:
-        <input type="text" id="leftPath" style="width:200px;" />
-      </label>
-      <label>
-        Right:
-        <input type="text" id="rightPath" style="width:200px;" />
-      </label>
-      <label>
-        Depth:
-        <input type="text" id="depthPath" style="width:180px;" />
-      </label>
-      <label>
-        Depth2:
-        <input type="text" id="depth2Path" style="width:180px;" />
-      </label>
-      <label>
-        Cert hash:
-        <input type="text" id="certHash" placeholder="sha256 hex (optional)" style="width:140px;" />
-      </label>
-      <label>
-        Hz:
-        <input type="number" id="queryRate" value="10" min="10" max="1000" step="10" style="width:60px; padding:0.35rem 0.3rem; border:1px solid #444; border-radius:4px; background:#2a2a4a; color:#fff; font-size:0.85rem;" />
-      </label>
-      <label style="font-size:0.75rem;">Pt size: <input type="range" id="ptSize" min="0.5" max="8" step="0.5" value="2" style="width:60px; vertical-align:middle;" /></label>
-      <span style="font-size:0.7rem; color:#666;">depth: 1mm</span>
-      <span style="border-left:1px solid #444; height:1.2rem;"></span>
-      <label style="font-size:0.75rem;">Cam X:<input type="number" id="camX" value="-0.33" step="0.01" style="width:48px; padding:0.2rem; border:1px solid #444; border-radius:3px; background:#2a2a4a; color:#fff; font-size:0.75rem;" /></label>
-      <label style="font-size:0.75rem;">Y:<input type="number" id="camY" value="0.84" step="0.01" style="width:48px; padding:0.2rem; border:1px solid #444; border-radius:3px; background:#2a2a4a; color:#fff; font-size:0.75rem;" /></label>
-      <label style="font-size:0.75rem;">Z:<input type="number" id="camZ" value="0.29" step="0.01" style="width:48px; padding:0.2rem; border:1px solid #444; border-radius:3px; background:#2a2a4a; color:#fff; font-size:0.75rem;" /></label>
-      <label style="font-size:0.75rem;">R:<input type="number" id="camRoll" value="90" step="1" style="width:40px; padding:0.2rem; border:1px solid #444; border-radius:3px; background:#2a2a4a; color:#fff; font-size:0.75rem;" /></label>
-      <label style="font-size:0.75rem;">P:<input type="number" id="camPitch" value="-222" step="1" style="width:40px; padding:0.2rem; border:1px solid #444; border-radius:3px; background:#2a2a4a; color:#fff; font-size:0.75rem;" /></label>
-      <label style="font-size:0.75rem;">Yw:<input type="number" id="camYaw" value="0" step="1" style="width:40px; padding:0.2rem; border:1px solid #444; border-radius:3px; background:#2a2a4a; color:#fff; font-size:0.75rem;" /></label>
-      <span style="border-left:1px solid #444; height:1.2rem;"></span>
-      <label style="font-size:0.75rem;">Cam2 X:<input type="number" id="cam2X" value="-0.33" step="0.01" style="width:48px; padding:0.2rem; border:1px solid #444; border-radius:3px; background:#2a2a4a; color:#fff; font-size:0.75rem;" /></label>
-      <label style="font-size:0.75rem;">Y:<input type="number" id="cam2Y" value="0.84" step="0.01" style="width:48px; padding:0.2rem; border:1px solid #444; border-radius:3px; background:#2a2a4a; color:#fff; font-size:0.75rem;" /></label>
-      <label style="font-size:0.75rem;">Z:<input type="number" id="cam2Z" value="0.29" step="0.01" style="width:48px; padding:0.2rem; border:1px solid #444; border-radius:3px; background:#2a2a4a; color:#fff; font-size:0.75rem;" /></label>
-      <label style="font-size:0.75rem;">R:<input type="number" id="cam2Roll" value="90" step="1" style="width:40px; padding:0.2rem; border:1px solid #444; border-radius:3px; background:#2a2a4a; color:#fff; font-size:0.75rem;" /></label>
-      <label style="font-size:0.75rem;">P:<input type="number" id="cam2Pitch" value="-225" step="1" style="width:40px; padding:0.2rem; border:1px solid #444; border-radius:3px; background:#2a2a4a; color:#fff; font-size:0.75rem;" /></label>
-      <label style="font-size:0.75rem;">Yw:<input type="number" id="cam2Yaw" value="0" step="1" style="width:40px; padding:0.2rem; border:1px solid #444; border-radius:3px; background:#2a2a4a; color:#fff; font-size:0.75rem;" /></label>
-      <span style="border-left:1px solid #444; height:1.2rem;"></span>
-      <label>
-        Chat:
-        <input type="text" id="chatPath" style="width:160px;" />
-      </label>
-      <label>
-        Audio:
-        <input type="text" id="audioPath" style="width:160px;" />
-      </label>
     </div>
   </div>
 
@@ -468,33 +51,10 @@
         <span>Drag to orbit / Scroll to zoom / Right-drag to pan</span>
       </div>
     </div>
-    <div class="camera-split" id="cameraSplit">
-      <div class="camera-feed">
-        <span class="cam-label">Cam 1</span>
-        <video id="colorVideo" autoplay muted playsinline></video>
-      </div>
-      <div class="camera-feed">
-        <span class="cam-label">Cam 2</span>
-        <video id="colorVideo2" autoplay muted playsinline></video>
-      </div>
-    </div>
+    <div class="camera-split" id="cameraSplit"></div>
+    <div class="settings-panel" id="settingsPanel"></div>
     <div class="side-panel">
-      <div class="panel-section" id="panelLeft">
-        <h3>Left Arm</h3>
-        <div class="joint-row" style="font-size:0.65rem; color:#666;">
-          <span>Joint</span><span style="text-align:right;">Angle</span><span style="text-align:right;">Vel</span><span style="text-align:right;">Tau</span>
-        </div>
-        <div id="leftJointRows"></div>
-      </div>
-
-      <div class="panel-section" id="panelRight">
-        <h3>Right Arm</h3>
-        <div class="joint-row" style="font-size:0.65rem; color:#666;">
-          <span>Joint</span><span style="text-align:right;">Angle</span><span style="text-align:right;">Vel</span><span style="text-align:right;">Tau</span>
-        </div>
-        <div id="rightJointRows"></div>
-      </div>
-
+      <div id="armPanelsContainer"></div>
       <div class="panel-section" id="panelStats">
         <h3>Stats</h3>
         <div class="stats-grid">
@@ -525,1244 +85,262 @@
     <button class="tab-btn" data-tab="camera">Cam</button>
     <button class="tab-btn" data-tab="stats">Stats</button>
     <button class="tab-btn" data-tab="log">Log</button>
+    <button class="tab-btn" data-tab="settings">&#9881;</button>
   </div>
 
   <div class="log-panel" id="log"></div>
   <div class="chat-bar">
-    <input type="text" id="chatUsername" placeholder="Name" />
+    <input type="text" id="chatUsername" placeholder="Name" readonly />
     <input type="text" id="chatInput" placeholder="Press Enter to send" value="hello world" />
   </div>
   <div class="toast-container" id="toasts"></div>
 
   <script type="module">
-    import * as THREE from "three";
-    import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-    import { ColladaLoader } from "three/examples/jsm/loaders/ColladaLoader.js";
-    import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
-    import URDFLoader from "urdf-loader";
-    import * as Moq from "@moq/lite";
+    import { loadConfig, saveConfig, flattenArmPairs } from "./openarm-config.js";
+    import { initLog, log, setStatus } from "./openarm-log.js";
+    import { makeJointState } from "./openarm-can.js";
+    import { subscribeArm, connectRealSense, disconnectRealSense, connectCameras, disconnectCameras, startQueryLoopForPair, stopQueryLoopForPair, stopAllQueryLoops, enableArmTorque, disableArmTorque, disconnectAllCmdArms } from "./openarm-moq.js";
+    import { createAudioState, connectAudio, disconnectAudio } from "./openarm-audio.js";
+    import { createChatState, connectChat, disconnectChat, sendChatMessage } from "./openarm-chat.js";
+    import { initScene, buildJointRows, updatePanel, startRenderLoop, setupDumpDepth, applyCamPoseFromConfig, makeTextSprite } from "./openarm-scene.js";
+    import { initSettings } from "./openarm-settings.js";
 
-    // ─── Config (query params > localStorage > defaults) ──
-    const params = new URLSearchParams(location.search);
-    const LS_PREFIX = "openarm.";
-    // If a query param is explicitly present (even if empty), use it; otherwise fall back to localStorage / default
-    const ls = (k, fallback) => params.has(k) ? (params.get(k) || "") : (localStorage.getItem(LS_PREFIX + k) || fallback);
+    // ─── Config ──────────────────────────────────────
+    const config = loadConfig({ urlOverrides: true });
+    const armConfigs = flattenArmPairs(config);
 
-    const relayInput    = document.getElementById("relayUrl");
-    const leftPathInput = document.getElementById("leftPath");
-    const rightPathInput= document.getElementById("rightPath");
-    const depthPathInput= document.getElementById("depthPath");
-    const depth2PathInput= document.getElementById("depth2Path");
-    const certHashInput = document.getElementById("certHash");
-
-    relayInput.value     = ls("relay", "https://cdn.1ms.ai");
-    leftPathInput.value  = params.has("left") ? (params.get("left") || "") : (params.get("path") || localStorage.getItem(LS_PREFIX + "left") || "");
-    rightPathInput.value = ls("right", "");
-    depthPathInput.value = ls("depth", "anon/realsense");
-    depth2PathInput.value = ls("depth2", "");
-    certHashInput.value  = ls("certHash", "");
-
-    const chatPathInput = document.getElementById("chatPath");
-    const audioPathInput = document.getElementById("audioPath");
-    const chatUsernameInput = document.getElementById("chatUsername");
-    chatPathInput.value = ls("chatPath", "anon/openarm-chat");
-    audioPathInput.value = ls("audioPath", "anon/openarm-audio");
-    if (!localStorage.getItem(LS_PREFIX + "chatUsername")) {
-      localStorage.setItem(LS_PREFIX + "chatUsername", "anon");
-    }
-    chatUsernameInput.value = localStorage.getItem(LS_PREFIX + "chatUsername") || "";
-    chatUsernameInput.addEventListener("input", () => localStorage.setItem(LS_PREFIX + "chatUsername", chatUsernameInput.value));
-
-    // Persist all config inputs on change
-    const configInputs = {
-      relay: relayInput, left: leftPathInput, right: rightPathInput,
-      depth: depthPathInput, depth2: depth2PathInput, certHash: certHashInput,
-      camX: document.getElementById("camX"), camY: document.getElementById("camY"),
-      camZ: document.getElementById("camZ"), camRoll: document.getElementById("camRoll"),
-      camPitch: document.getElementById("camPitch"), camYaw: document.getElementById("camYaw"),
-      cam2X: document.getElementById("cam2X"), cam2Y: document.getElementById("cam2Y"),
-      cam2Z: document.getElementById("cam2Z"), cam2Roll: document.getElementById("cam2Roll"),
-      cam2Pitch: document.getElementById("cam2Pitch"), cam2Yaw: document.getElementById("cam2Yaw"),
-      queryRate: document.getElementById("queryRate"),
-      ptSize: document.getElementById("ptSize"),
-      chatPath: chatPathInput,
-      audioPath: audioPathInput,
-    };
-    for (const [key, el] of Object.entries(configInputs)) {
-      const saved = localStorage.getItem(LS_PREFIX + key);
-      if (saved && !params.has(key)) el.value = saved;
-      el.addEventListener("input", () => localStorage.setItem(LS_PREFIX + key, el.value));
-    }
-
+    // ─── Init logging ────────────────────────────────
     const logEl = document.getElementById("log");
-    const startBtn = document.getElementById("startBtn");
-    const stopBtn = document.getElementById("stopBtn");
-    const queryBtn = document.getElementById("queryBtn");
-    const audioBtn = document.getElementById("audioBtn");
+    const toastsEl = document.getElementById("toasts");
     const statusText = document.getElementById("statusText");
+    initLog(logEl, toastsEl, statusText);
 
-    // ─── Joint definitions ────────────────────────────────
-    const JOINTS = [
-      { name: "J1", desc: "Shoulder pan",  canId: 0x11, color: 0xff6b35 },
-      { name: "J2", desc: "Shoulder lift", canId: 0x12, color: 0xff8c42 },
-      { name: "J3", desc: "Shoulder rot",  canId: 0x13, color: 0xffa94d },
-      { name: "J4", desc: "Elbow flex",    canId: 0x14, color: 0xffd166 },
-      { name: "J5", desc: "Wrist roll",    canId: 0x15, color: 0x06d6a0 },
-      { name: "J6", desc: "Wrist pitch",   canId: 0x16, color: 0x118ab2 },
-      { name: "J7", desc: "Wrist rot",     canId: 0x17, color: 0x073b4c },
-      { name: "Grip", desc: "Gripper",     canId: 0x18, color: 0x8338ec },
-    ];
+    // ─── Chat username (read-only, set from config) ──
+    const chatUsernameInput = document.getElementById("chatUsername");
+    chatUsernameInput.value = config.chat.username;
 
-    // URDF joint names per arm
-    const L_JOINT_NAMES = ["L_J1", "L_J2", "L_J3", "L_J4", "L_J5", "L_J6", "L_J7"];
-    const R_JOINT_NAMES = ["R_J1", "R_J2", "R_J3", "R_J4", "R_J5", "R_J6", "R_J7"];
+    // ─── Shared mutable state ────────────────────────
+    const appState = {
+      running: false,
+      connections: [],
+      frameCount: 0,
+      bytesTotal: 0,
+      fpsCounter: 0,
+      lastFpsTime: performance.now(),
+      latency: { ms: null, lastUpdate: 0, sum: 0, samples: 0, display: null },
+      videoFps: { count: 0, value: null, lastTime: performance.now() },
+    };
 
-    // Side panel shows left arm by default
-
-    // ─── State (per arm) ─────────────────────────────────
-    function makeJointState() {
-      return new Array(8).fill(null).map(() => ({
-        angle: 0, targetAngle: 0, velocity: 0, torque: 0, tempMos: 0, tempRotor: 0, updated: false,
-      }));
-    }
-    const leftJointState = makeJointState();
-    const rightJointState = makeJointState();
-
-    let connections = [];  // active MoQ connections
-    let running = false;
-    let frameCount = 0;
-    let bytesTotal = 0;
-    let fpsCounter = 0;
-    let lastFpsTime = performance.now();
+    const armStates = armConfigs.map(() => makeJointState());
 
     // Command publishing state (per arm)
-    const cmdState = { left: { conn: null, broadcast: null, track: null, group: null }, right: { conn: null, broadcast: null, track: null, group: null } };
-    let queryInterval = null;
-    let queryActive = false;
-    let motorIdx = 0;
-    let queryArm = 0; // alternates between arms
+    const cmdState = {};
+    armConfigs.forEach(arm => { cmdState[arm.id] = { conn: null, broadcast: null, track: null, group: null }; });
+    const queryIntervals = {}; // pairIdx → intervalId
 
-    // ─── Audio state ──────────────────────────────────────
-    const audioState = {
-      conn: null,
-      audioCtx: null,
-      nextPlayTime: 0,
-      running: false,
-      enabled: localStorage.getItem(LS_PREFIX + "audioEnabled") === "true",
-      framesReceived: 0,
-    };
+    // Audio + chat state
+    const audioState = createAudioState();
+    const chatState = createChatState();
+    function getUsername() { return chatUsernameInput.value.trim() || "Anon"; }
 
-    // ─── Logging ──────────────────────────────────────────
-    const toastsEl = document.getElementById("toasts");
-    const TOAST_DURATION = 4000; // ms before fade-out starts
-    const TOAST_MAX = 5;
+    // ─── Init scene ──────────────────────────────────
+    const cameraSplitEl = document.getElementById("cameraSplit");
+    const sceneHandle = initScene(config, armConfigs, cameraSplitEl);
+    const { robots, robotGroups, grids, pointClouds, rsVideoEls, rsCams, rsCamGroups, camVideoEls, camState, onResize } = sceneHandle;
 
-    function log(msg, type = "info", { toast: showToast = true } = {}) {
-      const entry = document.createElement("div");
-      entry.className = `log-entry log-${type}`;
-      entry.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
-      logEl.appendChild(entry);
-      if (logEl.children.length > 200) logEl.removeChild(logEl.firstChild);
-      logEl.scrollTop = logEl.scrollHeight;
+    // ─── Settings panel ─────────────────────────────
+    const settingsPanel = document.getElementById("settingsPanel");
+    const settingsToggle = document.getElementById("settingsToggle");
+    let settingsOpen = false;
 
-      if (!showToast) return;
-      // Toast notification
-      const toast = document.createElement("div");
-      toast.className = `toast toast-${type}`;
-      toast.style.setProperty('--toast-duration', `${TOAST_DURATION}ms`);
-      toast.textContent = msg;
-      toastsEl.prepend(toast);
-      // Remove old toasts beyond max
-      while (toastsEl.children.length > TOAST_MAX) toastsEl.lastChild.remove();
-      // Remove after animation completes
-      setTimeout(() => toast.remove(), TOAST_DURATION + 400);
-    }
-
-    function formatBytes(b) {
-      if (b < 1024) return `${b} B`;
-      if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} K`;
-      return `${(b / (1024 * 1024)).toFixed(1)} M`;
-    }
-
-    function setStatus(s) { statusText.textContent = s; }
-
-    // ─── Build joint info panel (both arms) ────────────────
-    function buildJointRows(containerId, prefix) {
-      const container = document.getElementById(containerId);
-      const els = [];
-      for (let i = 0; i < JOINTS.length; i++) {
-        const j = JOINTS[i];
-        const row = document.createElement("div");
-        row.className = "joint-row";
-        row.innerHTML = `
-          <span class="joint-label" style="color:#${j.color.toString(16).padStart(6,'0')}">${j.name}</span>
-          <span class="joint-angle" id="${prefix}-angle-${i}">0.0&deg;</span>
-          <span class="joint-vel" id="${prefix}-vel-${i}">0.0</span>
-          <span class="joint-tau" id="${prefix}-tau-${i}">0.0</span>
-        `;
-        container.appendChild(row);
-        els.push({
-          angle: row.querySelector(`#${prefix}-angle-${i}`),
-          vel: row.querySelector(`#${prefix}-vel-${i}`),
-          tau: row.querySelector(`#${prefix}-tau-${i}`),
-        });
-      }
-      return els;
-    }
-    const leftJointEls = buildJointRows("leftJointRows", "l");
-    const rightJointEls = buildJointRows("rightJointRows", "r");
-
-    // ─── CAN Wire Format Parsing ──────────────────────────
-    // Format: [1B flags][4B can_id LE][1B data_len][0-64B data]
-    function parseCanFrame(buf) {
-      const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
-      if (buf.length < 6) return null;
-
-      const flags = buf[0];
-      const canId = view.getUint32(1, true); // little-endian
-      const dataLen = buf[5];
-
-      if (buf.length < 6 + dataLen) return null;
-
-      const data = buf.slice(6, 6 + dataLen);
-      return { flags, canId, dataLen, data };
-    }
-
-    // Parse ALL CAN frames from a buffer (handles batched MoQ groups)
-    function parseAllCanFrames(buf) {
-      const frames = [];
-      let offset = 0;
-      while (offset + 6 <= buf.length) {
-        const slice = buf.subarray(offset);
-        const dataLen = slice[5];
-        if (offset + 6 + dataLen > buf.length) break;
-        const view = new DataView(buf.buffer, buf.byteOffset + offset, 6 + dataLen);
-        frames.push({
-          flags: slice[0],
-          canId: view.getUint32(1, true),
-          dataLen,
-          data: buf.slice(offset + 6, offset + 6 + dataLen),
-        });
-        offset += 6 + dataLen;
-      }
-      return frames;
-    }
-
-    // Damiao motor state response parsing
-    // 8 bytes: [id][pos_h][pos_l][vel_h][vel_l|tau_h][tau_l][t_mos][t_rotor]
-    function parseDamiaoState(data) {
-      if (data.length < 8) return null;
-
-      const qRaw = (data[1] << 8) | data[2];
-      const velRaw = (data[3] << 4) | (data[4] >> 4);
-      const tauRaw = ((data[4] & 0x0F) << 8) | data[5];
-
-      // Position: linear map [0, 65535] -> [-12.5, 12.5] radians
-      const Q_MAX = 12.5;
-      const qRad = (qRaw / 65535.0) * (2 * Q_MAX) - Q_MAX;
-
-      // Velocity: linear map [0, 4095] -> [-45, 45] rad/s
-      const V_MAX = 45.0;
-      const vel = (velRaw / 4095.0) * (2 * V_MAX) - V_MAX;
-
-      // Torque: linear map [0, 4095] -> [-18, 18] Nm
-      const T_MAX = 18.0;
-      const tau = (tauRaw / 4095.0) * (2 * T_MAX) - T_MAX;
-
-      const tempMos = data[6];
-      const tempRotor = data[7];
-
-      return { qRad, vel, tau, tempMos, tempRotor };
-    }
-
-    // ─── Connect options helper ─────────────────────────
-    function buildConnectOpts() {
-      const certHash = certHashInput.value.trim();
-      // Firefox WebTransport is unstable — use WebSocket fallback immediately
-      const wsDelay = /firefox/i.test(navigator.userAgent) ? 0 : 2000;
-      const opts = { websocket: { delay: wsDelay } };
-      if (certHash) {
-        const hex = certHash.replace(/[^0-9a-fA-F]/g, '');
-        const hashBytes = new Uint8Array(hex.length / 2);
-        for (let i = 0; i < hashBytes.length; i++) hashBytes[i] = parseInt(hex.substr(i * 2, 2), 16);
-        opts.webtransport = {
-          serverCertificateHashes: [{ algorithm: "sha-256", value: hashBytes.buffer }],
-        };
-        log(`Using cert hash: ${hex.slice(0, 16)}...`, "data", { toast: false });
-      }
-      return opts;
-    }
-
-    // ─── RealSense: raw WebTransport MoQ subscriber ──────
-    // Ported directly from examples/realsense_pointcloud.html
-    function rsConcat(...arrs) {
-      const len = arrs.reduce((s, a) => s + a.length, 0);
-      const r = new Uint8Array(len); let o = 0;
-      for (const a of arrs) { r.set(a, o); o += a.length; }
-      return r;
-    }
-    function rsEncodeVarInt(v) {
-      if (v < 0x40) return new Uint8Array([v]);
-      if (v < 0x4000) return new Uint8Array([0x40 | (v >> 8), v & 0xff]);
-      if (v < 0x40000000) return new Uint8Array([
-        0x80 | ((v >>> 24) & 0x3f), (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff
-      ]);
-      const hi = Math.floor(v / 0x100000000), lo = v >>> 0;
-      return new Uint8Array([
-        0xc0 | ((hi >>> 24) & 0x3f), (hi >>> 16) & 0xff, (hi >>> 8) & 0xff, hi & 0xff,
-        (lo >>> 24) & 0xff, (lo >>> 16) & 0xff, (lo >>> 8) & 0xff, lo & 0xff
-      ]);
-    }
-    function rsEncodeString(s) { const b = new TextEncoder().encode(s); return rsConcat(rsEncodeVarInt(b.length), b); }
-    function rsSizePrefix(p) { return rsConcat(rsEncodeVarInt(p.length), p); }
-
-    class RsBufReader {
-      constructor(d) { this.d = d; this.p = 0; }
-      readVarInt() {
-        const f = this.d[this.p], tag = (f & 0xc0) >> 6, len = 1 << tag;
-        let v = f & 0x3f;
-        for (let i = 1; i < len; i++) v = v * 256 + this.d[this.p + i];
-        this.p += len; return v;
-      }
-      readBytes(n) { const r = this.d.slice(this.p, this.p + n); this.p += n; return r; }
-      readString() { const n = this.readVarInt(); return new TextDecoder().decode(this.readBytes(n)); }
-    }
-
-    class RsStreamReader {
-      constructor(r) { this.reader = r; this.buf = new Uint8Array(0); this.pos = 0; }
-      avail() { return this.buf.length - this.pos; }
-      async ensure(n) {
-        while (this.avail() < n) {
-          const { value, done } = await this.reader.read();
-          if (done) throw new Error('Stream ended');
-          const v = new Uint8Array(value);
-          const nb = new Uint8Array(this.avail() + v.length);
-          nb.set(this.buf.subarray(this.pos)); nb.set(v, this.avail());
-          this.buf = nb; this.pos = 0;
+    const settingsHandle = initSettings(settingsPanel, config, {
+      primaryButtonLabel: "Close Settings",
+      onPrimaryAction() { toggleSettings(); },
+      onLiveUpdate(type, index) {
+        if (type === 'armPair' && robotGroups[index]) {
+          const pair = config.armPairs[index];
+          applyCamPoseFromConfig(robotGroups[index], pair);
+          if (grids[index]) {
+            const p = pair.position || {};
+            grids[index].position.set(p.x || 0, p.y || 0, p.z || 0);
+          }
+          // Update label sprite (first child sprite)
+          const oldLabel = robotGroups[index].children.find(c => c.isSprite);
+          if (oldLabel) {
+            robotGroups[index].remove(oldLabel);
+            oldLabel.material.map.dispose();
+            oldLabel.material.dispose();
+          }
+          const newLabel = makeTextSprite(pair.label || ("Arm Pair " + (index + 1)), "#00d4ff");
+          newLabel.position.set(0, 0.85, 0);
+          robotGroups[index].add(newLabel);
         }
-      }
-      async readVarInt() {
-        await this.ensure(1);
-        const f = this.buf[this.pos], tag = (f & 0xc0) >> 6, len = 1 << tag;
-        await this.ensure(len);
-        let v = f & 0x3f;
-        for (let i = 1; i < len; i++) v = v * 256 + this.buf[this.pos + i];
-        this.pos += len; return v;
-      }
-      async readBytes(n) { await this.ensure(n); const r = this.buf.slice(this.pos, this.pos + n); this.pos += n; return r; }
-      async readMessage() { const s = await this.readVarInt(); return await this.readBytes(s); }
-    }
-
-    function rsEncodeClientSetup() {
-      return rsSizePrefix(rsConcat(
-        rsEncodeVarInt(2), rsEncodeVarInt(0xff0dad02), rsEncodeVarInt(0xff0dad01),
-        rsEncodeVarInt(0)
-      ));
-    }
-    function rsEncodeAnnouncePlease(pfx) { return rsSizePrefix(rsEncodeString(pfx)); }
-    function rsEncodeSubscribe(id, bc, tk, pri) {
-      return rsSizePrefix(rsConcat(rsEncodeVarInt(id), rsEncodeString(bc), rsEncodeString(tk), new Uint8Array([(pri+128)&0xff])));
-    }
-
-    class RsMoqSubscriber {
-      constructor() { this.transport = null; this.nextId = 0; this.handlers = new Map(); this.running = false; }
-      async connect(url, certHash) {
-        const opts = {};
-        if (certHash) opts.serverCertificateHashes = [{ algorithm: 'sha-256', value: (() => {
-          const hex = certHash.replace(/[^0-9a-fA-F]/g, '');
-          const b = new Uint8Array(hex.length / 2);
-          for (let i = 0; i < b.length; i++) b[i] = parseInt(hex.substr(i * 2, 2), 16);
-          return b.buffer;
-        })() }];
-        this.transport = new WebTransport(url, opts);
-        await this.transport.ready; this.running = true;
-        log('[depth] WebTransport connected', 'success');
-        this.transport.closed.then(() => { this.running = false; log('[depth] Transport closed'); })
-          .catch(e => { this.running = false; log(`[depth] Transport: ${e.message}`, 'error'); });
-        await this.setup();
-        this.receiveStreams();
-      }
-      async setup() {
-        const b = await this.transport.createBidirectionalStream();
-        const w = b.writable.getWriter(), r = new RsStreamReader(b.readable.getReader());
-        await w.write(rsConcat(rsEncodeVarInt(0), rsEncodeClientSetup()));
-        const msg = await r.readMessage(); const br = new RsBufReader(msg);
-        log(`[depth] Server version: 0x${br.readVarInt().toString(16)}`, 'data', { toast: false });
-      }
-      async waitBroadcast() {
-        const b = await this.transport.createBidirectionalStream();
-        const w = b.writable.getWriter(), r = new RsStreamReader(b.readable.getReader());
-        await w.write(rsConcat(rsEncodeVarInt(1), rsEncodeAnnouncePlease("")));
-        const msg = await r.readMessage(); const br = new RsBufReader(msg);
-        const cnt = br.readVarInt(), paths = [];
-        for (let i = 0; i < cnt; i++) paths.push(br.readString());
-        log(`[depth] Broadcasts: [${paths.map(p => `"${p}"`).join(', ')}]`, 'data', { toast: false });
-        if (cnt > 0) return paths[0];
-        log('[depth] Waiting for publisher...', 'info');
-        while (true) {
-          const m = await r.readMessage();
-          if (m[0] === 1) { const pbr = new RsBufReader(m.subarray(1)); return pbr.readString(); }
-        }
-      }
-      async subscribe(bc, tk, onData) {
-        const id = this.nextId++; this.handlers.set(id, onData);
-        const b = await this.transport.createBidirectionalStream();
-        const w = b.writable.getWriter(), r = new RsStreamReader(b.readable.getReader());
-        await w.write(rsConcat(rsEncodeVarInt(2), rsEncodeSubscribe(id, bc, tk, 0)));
-        await r.readMessage();
-        log(`[depth] Subscribed "${tk}" (id=${id})`, 'success', { toast: false }); return id;
-      }
-      async receiveStreams() {
-        const sr = this.transport.incomingUnidirectionalStreams.getReader();
-        while (this.running) {
-          try {
-            const { value, done } = await sr.read(); if (done) break;
-            this.handleData(value);
-          } catch (e) { if (this.running) log(`[depth] Recv: ${e.message}`, 'error'); break; }
-        }
-      }
-      async handleData(stream) {
-        try {
-          const r = new RsStreamReader(stream.getReader());
-          if (await r.readVarInt() !== 0) return;
-          const hdr = await r.readMessage(); const br = new RsBufReader(hdr);
-          const subId = br.readVarInt(); br.readVarInt();
-          const frame = await r.readMessage();
-          const h = this.handlers.get(subId); if (h) h(frame);
-        } catch {}
-      }
-      disconnect() { this.running = false; if (this.transport) { this.transport.close(); this.transport = null; } }
-    }
-
-    // ─── MSE Player (for RealSense video decoding) ───────
-    function detectCodec(data) {
-      const d = new Uint8Array(data), h = n => n.toString(16).padStart(2, '0').toUpperCase();
-      for (let i = 0; i < d.length - 11; i++) {
-        // H.264: avcC box (0x61766343)
-        if (d[i+4]===0x61 && d[i+5]===0x76 && d[i+6]===0x63 && d[i+7]===0x43) {
-          const o = i + 8; if (o + 4 <= d.length) return `avc1.${h(d[o+1])}${h(d[o+2])}${h(d[o+3])}`;
-        }
-        // AV1: av1C box (0x61763143)
-        if (d[i+4]===0x61 && d[i+5]===0x76 && d[i+6]===0x31 && d[i+7]===0x43) {
-          const o = i + 8; if (o + 4 <= d.length) {
-            const profile = (d[o+1] >> 5) & 0x7;
-            const level = d[o+1] & 0x1F;
-            const tier = (d[o+2] >> 7) & 1;
-            const highBitDepth = (d[o+2] >> 6) & 1;
-            const twelveBit = (d[o+2] >> 5) & 1;
-            const bitDepth = highBitDepth ? (twelveBit ? 12 : 10) : 8;
-            const levelStr = String(level).padStart(2, '0');
-            const tierChar = tier ? 'H' : 'M';
-            return `av01.${profile}.${levelStr}${tierChar}.${String(bitDepth).padStart(2, '0')}`;
+        if (type === 'realsense' && rsCamGroups[index]) {
+          const rs = config.realsense[index];
+          applyCamPoseFromConfig(rsCamGroups[index], rs);
+          // Update label
+          const oldLabel = rsCamGroups[index].children.find(c => c.isSprite);
+          if (oldLabel) {
+            rsCamGroups[index].remove(oldLabel);
+            oldLabel.material.map.dispose();
+            oldLabel.material.dispose();
+          }
+          const newLabel = makeTextSprite(rs.label || ("RS " + (index + 1)), "#ff8c42");
+          newLabel.position.set(0, 0.06, 0);
+          rsCamGroups[index].add(newLabel);
+          // Update point size
+          if (pointClouds[index]) {
+            pointClouds[index].material.size = (rs.pointSize || 2) * 0.001;
           }
         }
-      }
-      return null;
-    }
-    function hasFtyp(d) { return d.length >= 8 && d[4]===0x66 && d[5]===0x74 && d[6]===0x79 && d[7]===0x70; }
-
-    // Find top-level MP4 box by type, return offset or -1
-    function findBoxOffset(data, type) {
-      const t = [type.charCodeAt(0), type.charCodeAt(1), type.charCodeAt(2), type.charCodeAt(3)];
-      let i = 0;
-      while (i < data.length - 8) {
-        const sz = (data[i]<<24)|(data[i+1]<<16)|(data[i+2]<<8)|data[i+3];
-        if (data[i+4]===t[0] && data[i+5]===t[1] && data[i+6]===t[2] && data[i+7]===t[3]) return i;
-        if (sz < 8) break;
-        i += sz;
-      }
-      return -1;
-    }
-
-    // Extract mdat box content from segment data
-    function findMdatContent(data) {
-      const i = findBoxOffset(data, 'mdat');
-      if (i < 0) return null;
-      const sz = (data[i]<<24)|(data[i+1]<<16)|(data[i+2]<<8)|data[i+3];
-      return data.subarray(i + 8, i + sz);
-    }
-
-    function stripTimestamp(bytes) {
-      if (bytes.length < 8) return bytes;
-      const lo = bytes[0]|(bytes[1]<<8)|(bytes[2]<<16)|(bytes[3]<<24);
-      const hi = bytes[4]|(bytes[5]<<8)|(bytes[6]<<16)|(bytes[7]<<24);
-      const ms = (hi >>> 0) * 4294967296 + (lo >>> 0);
-      if (ms > 1700000000000 && ms < Date.now() + 60000) {
-        latencyMs = Date.now() - ms;
-        latencyLastUpdate = Date.now();
-        latencySum += latencyMs;
-        latencySamples++;
-      }
-      return bytes.subarray(8);
-    }
-
-    // Extract av1C box content (raw AV1CodecConfigurationRecord, without box header)
-    function extractAv1C(data) {
-      for (let i = 0; i < data.length - 11; i++) {
-        if (data[i+4]===0x61 && data[i+5]===0x76 && data[i+6]===0x31 && data[i+7]===0x43) {
-          const sz = (data[i]<<24)|(data[i+1]<<16)|(data[i+2]<<8)|data[i+3];
-          return data.slice(i + 8, i + sz);
-        }
-      }
-      return null;
-    }
-
-    // ─── WebCodecs depth decoder (10-bit precision) ──────
-    const HAS_WEBCODECS = typeof VideoDecoder !== 'undefined';
-    class DepthDecoder {
-      constructor() {
-        this.decoder = null; this.configured = false; this.configuredCodec = null;
-        this.latestY = null; // Uint16Array (10-bit) or Uint8Array (8-bit)
-        this.is10bit = false; this.width = 0; this.height = 0;
-        this.frameCount = 0; this.copyBuf = null;
-        this.disabled = !HAS_WEBCODECS;
-        if (this.disabled && !DepthDecoder._warned) {
-          DepthDecoder._warned = true;
-          log('Depth not available (WebCodecs not supported in this browser)', 'info');
-        }
-      }
-      onData(data) {
-        if (this.disabled) return;
-        const d = new Uint8Array(data);
-        const isInit = hasFtyp(d);
-        if (isInit) {
-          // Only configure once (or reconfigure if codec changes)
-          if (!this.configured) {
-            const av1c = extractAv1C(d);
-            const codec = detectCodec(d);
-            if (av1c && codec) this.configure(codec, av1c);
-          }
-          const moofOff = findBoxOffset(d, 'moof');
-          if (moofOff >= 0) this.decodeSample(d.subarray(moofOff), true);
-        } else if (this.configured) {
-          this.decodeSample(d, false);
-        }
-      }
-      configure(codec, av1c) {
-        if (this.configuredCodec === codec) return; // already configured with same codec
-        if (this.decoder) try { this.decoder.close(); } catch {}
-        this.decoder = new VideoDecoder({
-          output: (frame) => this.processFrame(frame).catch(e => console.error('Depth frame error:', e)),
-          error: (e) => console.error('Depth decoder error:', e),
-        });
-        const desc = av1c.buffer.slice(av1c.byteOffset, av1c.byteOffset + av1c.byteLength);
-        // prefer-software gives us accessible pixel data (GPU frames are opaque with null format)
-        this.decoder.configure({ codec, description: desc, hardwareAcceleration: 'prefer-software' });
-        this.configured = true;
-        this.configuredCodec = codec;
-        log(`Depth WebCodecs: ${codec}`, "data", { toast: false });
-      }
-      decodeSample(segData, isKey) {
-        const mdat = findMdatContent(segData);
-        if (!mdat) return;
-        const ts = this.frameCount * (1000000 / 30);
-        this.decoder.decode(new EncodedVideoChunk({ type: isKey ? 'key' : 'delta', timestamp: ts, data: mdat }));
-        this.frameCount++;
-      }
-      async processFrame(frame) {
-        try {
-          const w = frame.displayWidth, h = frame.displayHeight;
-          const ySize = w * h;
-          const fmt = frame.format; // Chrome: "I420"/"I010", Firefox: "BGRX", or null
-
-          let is10bit = false;
-
-          if (fmt) {
-            const totalSize = frame.allocationSize();
-            if (!this.copyBuf || this.copyBuf.byteLength < totalSize) this.copyBuf = new ArrayBuffer(totalSize);
-            const layouts = await frame.copyTo(this.copyBuf);
-            const yOff = layouts[0].offset, yStride = layouts[0].stride;
-            // Store raw diagnostics for dumpDepth
-            this._rawDiag = { fmt, w, h, totalSize, numLayouts: layouts.length,
-              layouts: layouts.map(l => ({offset: l.offset, stride: l.stride})),
-              codedWidth: frame.codedWidth, codedHeight: frame.codedHeight,
-              displayWidth: frame.displayWidth, displayHeight: frame.displayHeight };
-
-            // Firefox returns packed BGRX/BGRA; Safari may return RGBA/RGBX
-            const isPackedRGB = fmt.includes('BGR') || fmt.includes('RGB');
-
-            if (!this.fmtLogged) {
-              const pxPerRow = isPackedRGB ? Math.floor(yStride / 4) : yStride;
-              log(`Depth frame: fmt=${fmt}, ${w}x${h}, stride=${yStride}, pxPerRow=${pxPerRow}, packed=${isPackedRGB}`, "data");
-              this.fmtLogged = true;
-            }
-
-            if (isPackedRGB) {
-              // Firefox/Safari: packed BGRX with BT.709 color-space converted values.
-              // Known limitations vs Chrome's raw planar Y:
-              //  - Precision: 8-bit G → ~255 distinct depth values (vs ~960 from 10-bit Y)
-              //  - Range: BT.709 limited range clips Y>940 to G=255, so max recoverable = 940
-              //  - Half-width bug: Firefox AV1 monochrome copyTo has only the first
-              // w/2 cols per row contain real data; the rest leaks from adjacent rows.
-              // Detect by checking if the last row's second half is all-zero.
-              const src = new Uint8Array(this.copyBuf);
-              const bpp = 4;
-              if (!this._halfWidthDetected) {
-                const lastRowOff = yOff + (h - 1) * yStride;
-                let zeroCount = 0, checkCount = 0;
-                for (let c = Math.floor(w / 2); c < w; c += 10) {
-                  if (src[lastRowOff + c * bpp + 1] === 0) zeroCount++;
-                  checkCount++;
-                }
-                this._isHalfWidth = (checkCount > 0 && zeroCount / checkCount > 0.8);
-                this._halfWidthDetected = true;
-                if (this._isHalfWidth) log(`Depth BGRX: half-width bug detected, scaling ${w/2} → ${w}`, "info");
-              }
-              const srcW = this._isHalfWidth ? Math.floor(w / 2) : w;
-              const source10bit = this.configuredCodec && this.configuredCodec.endsWith('.10');
-              if (source10bit) {
-                // Reverse BT.709: G = (Y10 - 64) * 255 / 876 → Y10 = G * 3.435 + 64
-                if (!this.latestY || this.latestY.length !== ySize) this.latestY = new Uint16Array(ySize);
-                for (let row = 0; row < h; row++) {
-                  const rowOff = yOff + row * yStride;
-                  for (let col = 0; col < w; col++) {
-                    const srcCol = srcW < w ? Math.floor(col * srcW / w) : col;
-                    const g = src[rowOff + srcCol * bpp + 1];
-                    this.latestY[row * w + col] = g < 2 ? 0 : Math.min(1023, Math.round(g * 3.435 + 64));
-                  }
-                }
-                is10bit = true;
-              } else {
-                // Reverse BT.709: G = 1.164 * (Y - 16) → Y = G / 1.164 + 16
-                if (!this.latestY || this.latestY.length !== ySize) this.latestY = new Uint8Array(ySize);
-                for (let row = 0; row < h; row++) {
-                  const rowOff = yOff + row * yStride;
-                  for (let col = 0; col < w; col++) {
-                    const srcCol = srcW < w ? Math.floor(col * srcW / w) : col;
-                    const g = src[rowOff + srcCol * bpp + 1];
-                    this.latestY[row * w + col] = g < 2 ? 0 : Math.min(255, Math.round(g / 1.164 + 16));
-                  }
-                }
-                is10bit = false;
-              }
-            } else {
-              // Planar YUV — I420 (8-bit), I010/I420P10 (10-bit), NV12, etc.
-              is10bit = fmt.includes('10') || fmt.includes('12');
-              if (is10bit) {
-                if (!this.latestY || this.latestY.length !== ySize) this.latestY = new Uint16Array(ySize);
-                const stride16 = yStride / 2;
-                const src = new Uint16Array(this.copyBuf);
-                if (stride16 === w) {
-                  this.latestY.set(new Uint16Array(this.copyBuf, yOff, ySize));
-                } else {
-                  for (let r = 0; r < h; r++) this.latestY.set(src.subarray(yOff/2 + r*stride16, yOff/2 + r*stride16 + w), r*w);
-                }
-              } else {
-                if (!this.latestY || this.latestY.length !== ySize) this.latestY = new Uint8Array(ySize);
-                const src = new Uint8Array(this.copyBuf);
-                if (yStride === w) {
-                  this.latestY.set(new Uint8Array(this.copyBuf, yOff, ySize));
-                } else {
-                  for (let r = 0; r < h; r++) this.latestY.set(src.subarray(yOff + r*yStride, yOff + r*yStride + w), r*w);
-                }
-              }
-            }
-          } else {
-            // Canvas fallback — GPU-opaque frame (format=null)
-            if (!this.fmtLogged) {
-              log(`Depth frame: fmt=null, ${w}x${h}, canvas fallback`, "info");
-              this.fmtLogged = true;
-            }
-            if (!this.offCanvas || this.offCanvas.width !== w || this.offCanvas.height !== h) {
-              this.offCanvas = new OffscreenCanvas(w, h);
-              this.offCtx = this.offCanvas.getContext('2d', { willReadFrequently: true });
-            }
-            this.offCtx.drawImage(frame, 0, 0);
-            const rgba = this.offCtx.getImageData(0, 0, w, h).data;
-            if (!this.latestY || this.latestY.length !== ySize) this.latestY = new Uint8Array(ySize);
-            for (let i = 0; i < ySize; i++) this.latestY[i] = rgba[i * 4]; // R channel
-            is10bit = false;
-          }
-
-          this.is10bit = is10bit; this.width = w; this.height = h;
-        } finally { frame.close(); }
-      }
-      destroy() {
-        if (this.decoder) try { this.decoder.close(); } catch {}
-        this.decoder = null; this.configured = false; this.latestY = null;
-      }
-    }
-
-
-    class MsePlayer {
-      constructor(videoEl, label) {
-        this.video = videoEl; this.label = label;
-        this.ms = null; this.sb = null; this.queue = []; this.ready = false;
-        this.frames = 0; this.seekIv = null;
-      }
-      onData(data) {
-        this.frames++;
-        if (!this.ready) {
-          if (!hasFtyp(data)) return;
-          const codec = detectCodec(data);
-          if (!codec) { log(`${this.label}: cannot detect codec`, "error"); return; }
-          this.initMse(codec, data); return;
-        }
-        this.enqueue(data);
-      }
-      initMse(codec, initData) {
-        const mime = `video/mp4; codecs="${codec}"`;
-        log(`${this.label}: ${mime}`, "data");
-        if (!MediaSource.isTypeSupported(mime)) { log(`${this.label}: unsupported`, "error"); return; }
-        this.ms = new MediaSource();
-        this.video.src = URL.createObjectURL(this.ms);
-        this.ms.addEventListener('sourceopen', () => {
-          try {
-            this.sb = this.ms.addSourceBuffer(mime);
-            this.sb.mode = 'segments';
-            this.sb.addEventListener('updateend', () => this.flush());
-            this.ready = true;
-            this.enqueue(initData);
-            this.video.play().catch(() => {});
-            this.seekIv = setInterval(() => {
-              if (this.video.buffered.length > 0) {
-                const start = this.video.buffered.start(0);
-                const end = this.video.buffered.end(this.video.buffered.length - 1);
-                if (this.video.currentTime < start || end - this.video.currentTime > 0.5) {
-                  this.video.currentTime = Math.max(start, end - 0.05);
-                }
-                if (end - start > 10 && !this.sb.updating) try { this.sb.remove(start, end - 5); } catch {}
-              }
-            }, 500);
-          } catch (e) { log(`${this.label}: init failed: ${e.message}`, "error"); }
-        });
-      }
-      enqueue(d) { this.queue.push(d); this.flush(); }
-      flush() {
-        if (!this.sb || this.sb.updating || !this.queue.length) return;
-        try { this.sb.appendBuffer(this.queue.shift()); } catch (e) { log(`${this.label}: ${e.message}`, "error"); }
-      }
-      destroy() {
-        if (this.seekIv) clearInterval(this.seekIv);
-        this.queue = []; this.ready = false;
-        if (this.ms && this.ms.readyState === 'open') try { this.ms.endOfStream(); } catch {}
-        this.video.src = '';
-      }
-    }
-
-    // Per-camera state
-    const cam1 = { conn: null, colorPlayer: null, depthDecoder: null, running: false };
-    const cam2 = { conn: null, colorPlayer: null, depthDecoder: null, running: false };
-
-    let latencyMs = null;
-    let latencyLastUpdate = 0;
-    let latencySum = 0;
-    let latencySamples = 0;
-    let latencyDisplay = null;
-    let videoFpsCount = 0;
-    let videoFpsValue = null;
-    let videoFpsLastTime = performance.now();
-
-    // ─── RealSense connection (via @moq/lite — supports WebSocket fallback) ─────────
-    function withTimeout(promise, ms) {
-      return Promise.race([
-        promise,
-        new Promise((_, rej) => setTimeout(() => rej(new Error('stale (no data for ' + (ms/1000) + 's)')), ms)),
-      ]);
-    }
-    const STALE_MS = 10000;
-    const RECONNECT_DELAY = 300;
-
-    async function connectOneCameraOnce(cam, path, videoElId, label) {
-      const relay = relayInput.value.trim();
-      const fullUrl = `${relay}/${path}`;
-
-      cam.colorPlayer = new MsePlayer(document.getElementById(videoElId), label + " Color");
-      cam.depthDecoder = new DepthDecoder();
-
-      const connectOpts = buildConnectOpts();
-      log(`[${label}] Connecting to ${fullUrl}...`, 'info', { toast: false });
-      cam.conn = await Moq.Connection.connect(new URL(fullUrl), connectOpts);
-      log(`[${label}] Connected`, 'success');
-
-      const broadcast = cam.conn.consume(Moq.Path.from(""));
-      const videoTrack = broadcast.subscribe("video", 0);
-      const trackNames = ['video'];
-
-      async function readTrack(track, handler, name) {
-        while (cam.running) {
-          const group = await withTimeout(track.nextGroup(), STALE_MS);
-          if (!group) { log(`[${label}] ${name} track ended`); break; }
-          while (cam.running) {
-            const frame = await withTimeout(group.readFrame(), STALE_MS);
-            if (!frame) break;
-            handler(stripTimestamp(new Uint8Array(frame)));
-          }
-        }
-      }
-
-      const promises = [readTrack(videoTrack, d => { videoFpsCount++; cam.colorPlayer.onData(d); }, 'video')];
-
-      if (HAS_WEBCODECS) {
-        const depthTrack = broadcast.subscribe("depth", 0);
-        promises.push(readTrack(depthTrack, d => cam.depthDecoder.onData(d), 'depth'));
-        trackNames.push('depth');
-      }
-
-      log(`[${label}] Subscribed to ${trackNames.join(' + ')} tracks`, 'success', { toast: false });
-      log(`[${label}] Receiving frames...`, 'success', { toast: false });
-      await Promise.all(promises);
-    }
-
-    function cleanupCam(cam) {
-      if (cam.conn) { try { cam.conn.close(); } catch {} cam.conn = null; }
-      if (cam.colorPlayer) { cam.colorPlayer.destroy(); cam.colorPlayer = null; }
-      if (cam.depthDecoder) { cam.depthDecoder.destroy(); cam.depthDecoder = null; }
-    }
-
-    async function connectOneCamera(cam, path, videoElId, label) {
-      if (!path) return;
-      cam.running = true;
-      let lastError = null;
-      while (cam.running) {
-        try {
-          await connectOneCameraOnce(cam, path, videoElId, label);
-          if (!cam.running) break;
-          lastError = null;  // successful session — reset
-          log(`[${label}] Stream ended`, 'info');
-        } catch (e) {
-          if (!cam.running) break;
-          if (lastError) log(`[${label}] ${e.message}`, 'error');
-          lastError = e;
-        }
-        cleanupCam(cam);
-        if (!cam.running) break;
-        await new Promise(r => setTimeout(r, RECONNECT_DELAY));
-      }
-    }
-
-    async function connectRealSense() {
-      const promises = [];
-      const p1 = depthPathInput.value.trim();
-      const p2 = depth2PathInput.value.trim();
-      if (p1) promises.push(connectOneCamera(cam1, p1, "colorVideo", "cam1"));
-      if (p2) promises.push(connectOneCamera(cam2, p2, "colorVideo2", "cam2"));
-      if (promises.length) await Promise.all(promises);
-    }
-
-    function disconnectRealSense() {
-      for (const cam of [cam1, cam2]) {
-        cam.running = false;
-        cleanupCam(cam);
-      }
-      pcGeometry.setDrawRange(0, 0);
-      pcGeometry2.setDrawRange(0, 0);
-    }
-
-    // ─── Motor Query Commands ────────────────────────────
-    // Damiao MIT protocol: zero-torque command (p_des=0, v_des=0, kp=0, kd=0, t_ff=0)
-    // Queries motor state without applying any torque or changing enable state
-    function encodeMitZeroTorque() {
-      // Position: 0 rad → raw = (0 + 12.5) / 25.0 * 65535 = 32768 = 0x8000
-      // Velocity: 0 → raw = (0 + 45) / 90.0 * 4095 = 2048 = 0x800
-      // Kp: 0, Kd: 0
-      // Torque: 0 → raw = (0 + 18) / 36.0 * 4095 = 2048 = 0x800
-      const p = 0x8000, v = 0x800, kp = 0, kd = 0, t = 0x800;
-      return new Uint8Array([
-        p >> 8, p & 0xFF,
-        v >> 4,
-        ((v & 0xF) << 4) | (kp >> 8),
-        kp & 0xFF,
-        kd >> 4,
-        ((kd & 0xF) << 4) | (t >> 8),
-        t & 0xFF,
-      ]);
-    }
-
-    // Wire-encode a CAN frame: [1B flags][4B can_id LE][1B data_len][data]
-    function encodeCanFrame(canId, data) {
-      const buf = new Uint8Array(6 + data.length);
-      buf[0] = 0x00;  // flags: standard CAN
-      buf[1] = canId & 0xFF;
-      buf[2] = (canId >> 8) & 0xFF;
-      buf[3] = (canId >> 16) & 0xFF;
-      buf[4] = (canId >> 24) & 0xFF;
-      buf[5] = data.length;
-      buf.set(data, 6);
-      return buf;
-    }
-
-    // Connect command publisher for one arm
-    async function connectCmdArm(label, statePath) {
-      const relay = relayInput.value;
-      const basePath = statePath.replace(/\/state$/, "");
-      const cmdUrl = `${relay}/${basePath}/commands`;
-      const cs = cmdState[label];
-
-      log(`[${label}] Connecting commands to ${cmdUrl}...`, 'info', { toast: false });
-      const connectOpts = buildConnectOpts();
-      cs.conn = await Promise.race([
-        Moq.Connection.connect(new URL(cmdUrl), connectOpts),
-        new Promise((_, rej) => setTimeout(() => rej(new Error(`[${label}] Command connection timeout`)), 8000)),
-      ]);
-      cs.broadcast = new Moq.Broadcast();
-      cs.conn.publish(Moq.Path.from(""), cs.broadcast);
-
-      log(`[${label}] Waiting for CAN server to subscribe (10s)...`);
-      const request = await Promise.race([
-        cs.broadcast.requested(),
-        new Promise((_, rej) => setTimeout(() => rej(new Error(`[${label}] No subscriber after 10s — is moq-can-server running?`)), 10000)),
-      ]);
-      if (!request) { log(`[${label}] Command broadcast closed`, "error"); return; }
-      cs.track = request.track;
-      log(`[${label}] Command track active`, "success");
-    }
-
-    async function startQueryLoop() {
-      const leftPath = leftPathInput.value.trim();
-      const rightPath = rightPathInput.value.trim();
-
-      // Connect command publishers for active arms
-      const promises = [];
-      if (leftPath) promises.push(connectCmdArm("left", leftPath));
-      if (rightPath) promises.push(connectCmdArm("right", rightPath));
-      await Promise.all(promises);
-
-      const mitCmd = encodeMitZeroTorque();
-      motorIdx = 0;
-      queryArm = 0;
-
-      // Build list of active command tracks
-      const activeTracks = [];
-      if (cmdState.left.track) activeTracks.push(cmdState.left);
-      if (cmdState.right.track) activeTracks.push(cmdState.right);
-      if (activeTracks.length === 0) { log("No command tracks connected", "error"); return; }
-
-      const rateHz = parseInt(document.getElementById("queryRate").value) || 200;
-      const intervalMs = Math.max(1, Math.round(1000 / rateHz));
-
-      queryInterval = setInterval(() => {
-        const cs = activeTracks[queryArm % activeTracks.length];
-        if (!cs.track) return;
-        const canId = motorIdx + 1;  // 0x01-0x08
-        const frame = encodeCanFrame(canId, mitCmd);
-        cs.group = cs.track.appendGroup();
-        cs.group.writeFrame(frame);
-        cs.group.close();
-        motorIdx = (motorIdx + 1) % 8;
-        if (motorIdx === 0) queryArm++;
-      }, intervalMs);
-
-      log(`Query loop started at ${rateHz}Hz (${activeTracks.length} arm${activeTracks.length > 1 ? "s" : ""})`, "success");
-    }
-
-    function stopQueryLoop() {
-      if (queryInterval) { clearInterval(queryInterval); queryInterval = null; }
-      for (const label of ["left", "right"]) {
-        const cs = cmdState[label];
-        cs.group = null;
-        if (cs.track) { try { cs.track.close(); } catch (e) {} cs.track = null; }
-        if (cs.broadcast) { try { cs.broadcast.close(); } catch (e) {} cs.broadcast = null; }
-        if (cs.conn) { try { cs.conn.close(); } catch (e) {} cs.conn = null; }
-      }
-      log("Query loop stopped");
-    }
-
-    // ─── Chat ─────────────────────────────────────────────
-    const chatState = {
-      conn: null,
-      broadcast: null,
-      track: null,
-      announced: null,
-      subscribers: new Map(),
-      running: false,
-    };
-
-    const chatSessionId = Math.random().toString(36).slice(2, 8);
-    function getChatUsername() { return chatUsernameInput.value.trim() || "Anon"; }
-    function getChatPublishPath() { return `${getChatUsername()}_${chatSessionId}`; }
-
-    function showChatMessage(msg) {
-      const toast = document.createElement("div");
-      toast.className = "toast toast-chat toast-sticky";
-      toast.textContent = `${msg.name}: ${msg.text}`;
-      toastsEl.prepend(toast);
-      while (toastsEl.children.length > TOAST_MAX) toastsEl.lastChild.remove();
-    }
-
-    function sendChatMessage(text) {
-      if (!text.trim()) return;
-      const msg = { name: getChatUsername(), text: text.trim(), ts: Date.now() };
-      if (chatState.track) {
-        try { chatState.track.writeJson(msg); } catch (e) {
-          log(`[chat] Send error: ${e.message}`, 'error');
-        }
-      }
-      showChatMessage(msg);
-    }
-
-    async function handleChatPublish() {
-      try {
-        while (chatState.running && chatState.broadcast) {
-          const request = await chatState.broadcast.requested();
-          if (!request) break;
-          if (request.track.name === "messages") {
-            chatState.track = request.track;
-            log(`[chat] Publish track active`, 'success', { toast: false });
-          } else {
-            request.track.close(new Error("unknown track"));
-          }
-        }
-      } catch (e) {
-        if (chatState.running) log(`[chat] Publish error: ${e.message}`, 'error');
-      }
-    }
-
-    async function subscribeToChatUser(username) {
-      try {
-        const broadcast = chatState.conn.consume(Moq.Path.from(username));
-        const track = broadcast.subscribe("messages", 0);
-        chatState.subscribers.set(username, { broadcast, track });
-        log(`[chat] Subscribed to ${username}`, 'data', { toast: false });
-        while (chatState.running) {
-          const msg = await track.readJson();
-          if (!msg) break;
-          showChatMessage(msg);
-        }
-      } catch (e) {
-        if (chatState.running) log(`[chat] ${username}: ${e.message}`, 'error');
-      } finally {
-        chatState.subscribers.delete(username);
-      }
-    }
-
-    function updateViewerCount() {
-      const count = chatState.subscribers.size + (chatState.running ? 1 : 0);
-      document.getElementById("viewerCount").textContent = count === 1 ? "1 viewer" : `${count} viewers`;
-    }
-
-    async function discoverChatUsers() {
-      try {
-        chatState.announced = chatState.conn.announced();
-        while (chatState.running) {
-          const entry = await chatState.announced.next();
-          if (!entry) break;
-          const path = entry.path;
-          if (path === Moq.Path.from(getChatPublishPath())) continue;
-          if (entry.active && !chatState.subscribers.has(path)) {
-            log(`[chat] User joined: ${String(path).replace(/_[a-z0-9]+$/, '')}`, 'data');
-            subscribeToChatUser(path);
-            updateViewerCount();
-          } else if (!entry.active) {
-            chatState.subscribers.delete(path);
-            log(`[chat] User left: ${String(path).replace(/_[a-z0-9]+$/, '')}`, 'info');
-            updateViewerCount();
-          }
-        }
-      } catch (e) {
-        if (chatState.running) log(`[chat] Discovery error: ${e.message}`, 'error');
-      }
-    }
-
-    async function connectChat() {
-      const relay = relayInput.value.trim();
-      const chatPath = chatPathInput.value.trim();
-      if (!chatPath) return;
-
-      chatState.running = true;
-      const fullUrl = `${relay}/${chatPath}`;
-      const connectOpts = buildConnectOpts();
-      try {
-        chatState.conn = await Moq.Connection.connect(new URL(fullUrl), connectOpts);
-        log(`[chat] Connected`, 'success');
-
-        chatState.broadcast = new Moq.Broadcast();
-        chatState.conn.publish(Moq.Path.from(getChatPublishPath()), chatState.broadcast);
-        log(`[chat] Publishing as "${getChatUsername()}"`, 'data', { toast: false });
-        updateViewerCount();
-
-        handleChatPublish();
-        discoverChatUsers();
-      } catch (e) {
-        log(`[chat] ${e.message}`, 'error');
-      }
-    }
-
-    function disconnectChat() {
-      chatState.running = false;
-      for (const [, sub] of chatState.subscribers) {
-        try { sub.broadcast.close(); } catch {}
-      }
-      chatState.subscribers.clear();
-      if (chatState.announced) { try { chatState.announced.close(); } catch {} chatState.announced = null; }
-      if (chatState.track) { try { chatState.track.close(); } catch {} chatState.track = null; }
-      if (chatState.broadcast) { try { chatState.broadcast.close(); } catch {} chatState.broadcast = null; }
-      if (chatState.conn) { try { chatState.conn.close(); } catch {} chatState.conn = null; }
-      updateViewerCount();
-    }
-
-    // Chat input handlers
-    document.getElementById('chatInput').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        sendChatMessage(e.target.value);
-        e.target.value = '';
-      }
+      },
+      onStructuralChange() {
+        log("Config saved. Reconnect to apply path/structure changes.", "info");
+      },
     });
 
-    // ─── Audio: MoQ frame decoder + WebAudio playback ────
-    // 20-byte header: [u32 sample_rate][u16 channels][u16 sample_format][u32 frame_count][u32 timestamp_us][u32 data_length]
-    function decodeAudioMoqHeader(buf) {
-      if (buf.byteLength < 20) return null;
-      const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
-      return {
-        sampleRate:   view.getUint32(0, true),
-        channels:     view.getUint16(4, true),
-        sampleFormat: view.getUint16(6, true),  // 0=I16, 1=F32
-        frameCount:   view.getUint32(8, true),
-        timestampUs:  view.getUint32(12, true),
-        dataLength:   view.getUint32(16, true),
-      };
+    function toggleSettings() {
+      settingsOpen = !settingsOpen;
+      settingsPanel.classList.toggle("active", settingsOpen);
+      settingsToggle.classList.toggle("active", settingsOpen);
+      cameraSplitEl.classList.toggle("settings-hidden", settingsOpen);
+      if (settingsOpen) settingsHandle.renderAll();
+      requestAnimationFrame(onResize);
     }
 
-    function pcmToFloat32(pcmBytes, sampleFormat, frameCount, channels) {
-      const totalSamples = frameCount * channels;
-      if (sampleFormat === 1) {
-        // F32 passthrough
-        return new Float32Array(pcmBytes.buffer, pcmBytes.byteOffset, totalSamples);
-      }
-      // I16 → Float32
-      const i16 = new Int16Array(pcmBytes.buffer, pcmBytes.byteOffset, totalSamples);
-      const f32 = new Float32Array(totalSamples);
-      for (let i = 0; i < totalSamples; i++) f32[i] = i16[i] / 32768;
-      return f32;
-    }
+    settingsToggle.addEventListener("click", toggleSettings);
 
-    function playAudioChunk(header, pcmData) {
-      const ctx = audioState.audioCtx;
-      if (!ctx) return;
+    // ─── Build arm panels with per-pair query + per-arm torque buttons ─
+    const armJointEls = [];
+    const armPanelEls = [];
+    const queryBtns = {}; // pairIdx → button element
+    const torqueBtns = {}; // armId → button element
+    const armPanelsContainer = document.getElementById("armPanelsContainer");
 
-      const f32 = pcmToFloat32(pcmData, header.sampleFormat, header.frameCount, header.channels);
-      const audioBuf = ctx.createBuffer(header.channels, header.frameCount, header.sampleRate);
+    // Group arms by pair
+    const pairIndices = [...new Set(armConfigs.map(a => a.pairIdx))];
+    pairIndices.forEach(pairIdx => {
+      const pair = config.armPairs[pairIdx];
+      const pairArms = armConfigs.filter(a => a.pairIdx === pairIdx);
 
-      if (header.channels === 1) {
-        audioBuf.copyToChannel(f32, 0);
-      } else {
-        // Deinterleave
-        for (let ch = 0; ch < header.channels; ch++) {
-          const chData = new Float32Array(header.frameCount);
-          for (let i = 0; i < header.frameCount; i++) chData[i] = f32[i * header.channels + ch];
-          audioBuf.copyToChannel(chData, ch);
+      // Pair header with query button
+      const header = document.createElement("div");
+      header.style.cssText = "display:flex; align-items:center; gap:0.5rem; padding:0.5rem 0.75rem 0; border-bottom:none;";
+      header.innerHTML = `<span style="font-size:0.8rem; color:#888; text-transform:uppercase; font-weight:bold;">${pair.label || ("Arm Pair " + (pairIdx + 1))}</span>
+        <span style="font-size:0.65rem; color:#555;">${pair.queryRate || 200}Hz</span>`;
+      const qBtn = document.createElement("button");
+      qBtn.className = "query-btn";
+      qBtn.textContent = "Query";
+      qBtn.disabled = true;
+      qBtn.dataset.pair = pairIdx;
+      header.appendChild(qBtn);
+      armPanelsContainer.appendChild(header);
+      queryBtns[pairIdx] = qBtn;
+
+      // Per-arm sections within this pair
+      pairArms.forEach(arm => {
+        const idx = armConfigs.indexOf(arm);
+        const section = document.createElement("div");
+        section.className = "panel-section";
+        section.id = "panelArm" + idx;
+
+        const armHeader = document.createElement("div");
+        armHeader.style.cssText = "display:flex; align-items:center; gap:0.5rem; margin-bottom:0.4rem;";
+        armHeader.innerHTML = `<h3 style="margin:0;">${arm.label || ("Arm " + (idx + 1))}</h3>`;
+        const tBtn = document.createElement("button");
+        tBtn.className = "torque-btn";
+        tBtn.textContent = "Torque";
+        tBtn.disabled = true;
+        tBtn.dataset.armId = arm.id;
+        armHeader.appendChild(tBtn);
+        section.appendChild(armHeader);
+        torqueBtns[arm.id] = tBtn;
+
+        const rows = document.createElement("div");
+        rows.innerHTML = `<div class="joint-row" style="font-size:0.65rem; color:#666;">
+            <span>Joint</span><span style="text-align:right;">Angle</span><span style="text-align:right;">Vel</span><span style="text-align:right;">Tau</span>
+          </div>
+          <div id="armJointRows${idx}"></div>`;
+        section.appendChild(rows);
+
+        armPanelsContainer.appendChild(section);
+        armPanelEls.push(section);
+        armJointEls.push(buildJointRows(section.querySelector(`#armJointRows${idx}`), "arm" + idx));
+      });
+    });
+
+    // Query button click handlers (per pair)
+    for (const [pairIdx, btn] of Object.entries(queryBtns)) {
+      const pi = parseInt(pairIdx);
+      btn.addEventListener("click", async () => {
+        if (!queryIntervals[pi]) {
+          btn.disabled = true;
+          btn.textContent = "Starting...";
+          try {
+            const interval = await startQueryLoopForPair(config, pi, armConfigs, cmdState);
+            if (interval) {
+              queryIntervals[pi] = interval;
+              btn.classList.add("active");
+              btn.textContent = "Stop";
+            } else {
+              btn.textContent = "Query";
+            }
+            btn.disabled = false;
+          } catch (e) {
+            log(`Query start error: ${e.message}`, "error");
+            btn.textContent = "Query";
+            btn.disabled = false;
+          }
+        } else {
+          stopQueryLoopForPair(queryIntervals[pi], pi, armConfigs, cmdState);
+          delete queryIntervals[pi];
+          btn.classList.remove("active");
+          btn.textContent = "Query";
         }
-      }
-
-      const src = ctx.createBufferSource();
-      src.buffer = audioBuf;
-      src.connect(ctx.destination);
-
-      // Snap forward if we've fallen behind (handles gaps/reconnects)
-      if (audioState.nextPlayTime < ctx.currentTime) {
-        audioState.nextPlayTime = ctx.currentTime;
-      }
-      src.start(audioState.nextPlayTime);
-      audioState.nextPlayTime += audioBuf.duration;
+      });
     }
 
-    async function connectAudioOnce() {
-      const relay = relayInput.value.trim();
-      const audioPath = audioPathInput.value.trim();
-      if (!audioPath) return;
-
-      const fullUrl = `${relay}/${audioPath}`;
-      const connectOpts = buildConnectOpts();
-      log(`[audio] Connecting to ${fullUrl}...`, 'info', { toast: false });
-
-      audioState.conn = await Moq.Connection.connect(new URL(fullUrl), connectOpts);
-      log(`[audio] Connected`, 'success');
-
-      const broadcast = audioState.conn.consume(Moq.Path.from(""));
-      const track = broadcast.subscribe("mic", 0);
-      log(`[audio] Subscribed to "mic" track`, 'success', { toast: false });
-
-      while (audioState.running) {
-        const group = await withTimeout(track.nextGroup(), STALE_MS);
-        if (!group) { log(`[audio] Track ended`); break; }
-        while (audioState.running) {
-          const frame = await withTimeout(group.readFrame(), STALE_MS);
-          if (!frame) break;
-          const bytes = new Uint8Array(frame);
-          const header = decodeAudioMoqHeader(bytes);
-          if (!header || bytes.byteLength < 20 + header.dataLength) continue;
-
-          // Create AudioContext on first valid frame (fallback if not created by button click)
-          if (!audioState.audioCtx) {
-            audioState.audioCtx = new AudioContext({ sampleRate: header.sampleRate });
-            audioState.nextPlayTime = 0;
-            log(`[audio] AudioContext created: ${header.sampleRate}Hz, ${header.channels}ch`, 'data', { toast: false });
-          }
-          if (audioState.audioCtx.state === 'suspended') {
-            await audioState.audioCtx.resume();
-          }
-
-          const pcmData = bytes.subarray(20, 20 + header.dataLength);
-          playAudioChunk(header, pcmData);
-          audioState.framesReceived++;
-
-          // Update audio level indicator
-          const f32 = pcmToFloat32(pcmData, header.sampleFormat, header.frameCount, header.channels);
-          let sum = 0, peak = 0;
-          for (let s = 0; s < f32.length; s++) {
-            sum += f32[s] * f32[s];
-            const a = Math.abs(f32[s]);
-            if (a > peak) peak = a;
-          }
-          const rms = Math.sqrt(sum / f32.length);
-          const rmsDb = rms > 0 ? Math.max(-60, 20 * Math.log10(rms)) : -60;
-          const barLen = Math.round(((rmsDb + 60) / 60) * 6); // 0-6 bars
-          const bar = '\u2588'.repeat(Math.max(0, barLen)) + '\u2591'.repeat(6 - Math.max(0, barLen));
-          const levelEl = document.getElementById('audioLevel');
-          if (levelEl) {
-            levelEl.textContent = bar;
-            levelEl.style.color = rmsDb > -10 ? '#f44' : rmsDb > -30 ? '#4f4' : '#555';
-          }
-        }
-      }
-    }
-
-    async function connectAudio() {
-      audioState.running = true;
-      let lastError = null;
-      while (audioState.running) {
+    // Torque button click handlers (per arm)
+    for (const [armId, btn] of Object.entries(torqueBtns)) {
+      const arm = armConfigs.find(a => a.id === armId);
+      if (!arm) continue;
+      btn.addEventListener("click", async () => {
+        const isActive = btn.classList.contains("active");
+        btn.disabled = true;
         try {
-          await connectAudioOnce();
-          if (!audioState.running) break;
-          lastError = null;
-          log(`[audio] Stream ended`, 'info');
+          if (!isActive) {
+            btn.textContent = "Enabling...";
+            await enableArmTorque(config, armId, arm.path, cmdState);
+            btn.classList.add("active");
+            btn.textContent = "Torque ON";
+          } else {
+            btn.textContent = "Disabling...";
+            await disableArmTorque(config, armId, arm.path, cmdState);
+            btn.classList.remove("active");
+            btn.textContent = "Torque";
+          }
         } catch (e) {
-          if (!audioState.running) break;
-          log(`[audio] ${e.message}`, 'error');
-          lastError = e;
+          log(`[${armId}] Torque error: ${e.message}`, "error");
+          btn.classList.remove("active");
+          btn.textContent = "Torque";
         }
-        disconnectAudioConn();
-        if (!audioState.running) break;
-        await new Promise(r => setTimeout(r, RECONNECT_DELAY));
-      }
+        btn.disabled = false;
+      });
     }
 
-    function disconnectAudioConn() {
-      if (audioState.conn) { try { audioState.conn.close(); } catch {} audioState.conn = null; }
-    }
+    // ─── DOM refs ────────────────────────────────────
+    const startBtn = document.getElementById("startBtn");
+    const stopBtn = document.getElementById("stopBtn");
+    const audioBtn = document.getElementById("audioBtn");
 
-    function disconnectAudio() {
-      audioState.running = false;
-      disconnectAudioConn();
-      if (audioState.audioCtx) { try { audioState.audioCtx.close(); } catch {} audioState.audioCtx = null; }
-      audioState.nextPlayTime = 0;
-      audioState.framesReceived = 0;
-      const levelEl = document.getElementById('audioLevel');
-      if (levelEl) { levelEl.textContent = '--'; levelEl.style.color = '#555'; }
-    }
+    // ─── Start render loop + debug ───────────────────
+    startRenderLoop(sceneHandle, armStates);
+    setupDumpDepth(rsCams);
 
-    // Audio toggle button
-    if (audioState.enabled) {
-      audioBtn.classList.add('active');
-      audioBtn.innerHTML = '&#128266; Audio';
-    }
+    // ─── Audio toggle ────────────────────────────────
     audioBtn.addEventListener('click', () => {
       audioState.enabled = !audioState.enabled;
-      localStorage.setItem(LS_PREFIX + "audioEnabled", audioState.enabled);
       if (audioState.enabled) {
-        // Create AudioContext eagerly during user gesture (Chrome autoplay policy)
         if (!audioState.audioCtx) {
           audioState.audioCtx = new AudioContext({ sampleRate: 48000 });
           audioState.nextPlayTime = 0;
@@ -1771,545 +349,96 @@
         if (audioState.audioCtx.state === 'suspended') audioState.audioCtx.resume();
         audioBtn.classList.add('active');
         audioBtn.innerHTML = '&#128266; Audio';
-        if (running) connectAudio().catch(e => log(`[audio] ${e.message}`, 'error'));
+        if (appState.running) connectAudio(config, audioState).catch(e => log(`[audio] ${e.message}`, 'error'));
       } else {
         audioBtn.classList.remove('active');
         audioBtn.innerHTML = '&#128263; Audio';
-        disconnectAudio();
+        disconnectAudio(audioState);
       }
     });
 
-    // ─── Three.js Scene ───────────────────────────────────
-    const canvas = document.getElementById("threeCanvas");
-    let renderer;
-    try {
-      renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-      renderer.setPixelRatio(window.devicePixelRatio);
-      renderer.setClearColor(0x1a1a2e);
-    } catch (e) {
-      log(`WebGL not available: ${e.message} (3D disabled, MoQ still works)`, "error");
-      renderer = null;
-    }
-
-    const scene = new THREE.Scene();
-
-    // Lighting
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
-    scene.add(ambientLight);
-    const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
-    dirLight.position.set(5, 10, 7);
-    scene.add(dirLight);
-    const dirLight2 = new THREE.DirectionalLight(0x4488ff, 0.3);
-    dirLight2.position.set(-5, 3, -5);
-    scene.add(dirLight2);
-
-    // Camera — bimanual model: ~0.7m body + arms extending above
-    const camera = new THREE.PerspectiveCamera(50, 1, 0.01, 100);
-    camera.position.set(1.0, 0.8, 1.2);
-    camera.lookAt(0, 0.4, 0);
-
-    const controls = new OrbitControls(camera, canvas);
-    controls.target.set(0, 0.4, 0);
-    controls.enableDamping = true;
-    controls.dampingFactor = 0.1;
-    controls.update();
-
-    // Ground grid (2m x 2m, 20 divisions = 10cm each)
-    const gridHelper = new THREE.GridHelper(2, 20, 0x333355, 0x222244);
-    scene.add(gridHelper);
-
-    // Axes helper
-    const axesHelper = new THREE.AxesHelper(0.1);
-    scene.add(axesHelper);
-
-    // ─── Point Cloud Geometry ─────────────────────────────
-    const maxPts = 1280 * 720; // supports up to 720p depth
-    const posArr = new Float32Array(maxPts * 3);
-    const colArr = new Float32Array(maxPts * 3);
-
-    const pcGeometry = new THREE.BufferGeometry();
-    pcGeometry.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
-    pcGeometry.setAttribute('color', new THREE.BufferAttribute(colArr, 3));
-    pcGeometry.setDrawRange(0, 0);
-
-    const pcMaterial = new THREE.PointsMaterial({ size: 0.002, vertexColors: true, sizeAttenuation: true });
-    const pcPoints = new THREE.Points(pcGeometry, pcMaterial);
-    pcPoints.scale.set(0.001, 0.001, 0.001); // mm → meters
-
-    // Second point cloud
-    const posArr2 = new Float32Array(maxPts * 3);
-    const colArr2 = new Float32Array(maxPts * 3);
-    const pcGeometry2 = new THREE.BufferGeometry();
-    pcGeometry2.setAttribute('position', new THREE.BufferAttribute(posArr2, 3));
-    pcGeometry2.setAttribute('color', new THREE.BufferAttribute(colArr2, 3));
-    pcGeometry2.setDrawRange(0, 0);
-    const pcMaterial2 = new THREE.PointsMaterial({ size: 0.002, vertexColors: true, sizeAttenuation: true });
-    const pcPoints2 = new THREE.Points(pcGeometry2, pcMaterial2);
-    pcPoints2.scale.set(0.001, 0.001, 0.001);
-
-    // Camera indicator group — red dot + FOV frustum wireframe
-    const camGroup = new THREE.Group();
-    scene.add(camGroup);
-    camGroup.add(pcPoints);
-
-    const camGroup2 = new THREE.Group();
-    scene.add(camGroup2);
-    camGroup2.add(pcPoints2);
-
-    // Red dot at camera origin
-    const camDot = new THREE.Mesh(
-      new THREE.SphereGeometry(0.012, 12, 8),
-      new THREE.MeshBasicMaterial({ color: 0xff2222 })
-    );
-    camGroup.add(camDot);
-
-    const camDot2 = new THREE.Mesh(
-      new THREE.SphereGeometry(0.012, 12, 8),
-      new THREE.MeshBasicMaterial({ color: 0x2222ff })
-    );
-    camGroup2.add(camDot2);
-
-    // FOV frustum wireframe (updated by buildFrustum)
-    function buildFrustumGeometry(color) {
-      const fx = 604.2, fy = 603.5;
-      const DEPTH_SHIFT_F = 0;
-      const nearM = 0.3;
-      const farM  = (1023 << DEPTH_SHIFT_F) * 0.001;
-      const nw = nearM * 320 / fx, nh = nearM * 240 / fy;
-      const fw = farM  * 320 / fx, fh = farM  * 240 / fy;
-      const verts = new Float32Array([
-        -nw,  nh, nearM,   nw,  nh, nearM,   nw, -nh, nearM,  -nw, -nh, nearM,
-        -fw,  fh, farM,    fw,  fh, farM,    fw, -fh, farM,   -fw, -fh, farM,
-      ]);
-      const idx = [
-        0,1, 1,2, 2,3, 3,0,
-        4,5, 5,6, 6,7, 7,4,
-        0,4, 1,5, 2,6, 3,7,
-      ];
-      const geo = new THREE.BufferGeometry();
-      geo.setAttribute('position', new THREE.BufferAttribute(verts, 3));
-      geo.setIndex(idx);
-      return new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color, opacity: 0.5, transparent: true }));
-    }
-    let camFrustum = buildFrustumGeometry(0xff4444);
-    camGroup.add(camFrustum);
-    let camFrustum2 = buildFrustumGeometry(0x4444ff);
-    camGroup2.add(camFrustum2);
-
-    // Offscreen canvases for pixel extraction
-    const colorCanvas = document.createElement('canvas');
-    colorCanvas.width = 640; colorCanvas.height = 480;
-    const colorCtx = colorCanvas.getContext('2d', { willReadFrequently: true });
-
-    // Offscreen canvas for cam2 color extraction
-    const colorCanvas2 = document.createElement('canvas');
-    colorCanvas2.width = 640; colorCanvas2.height = 480;
-    const colorCtx2 = colorCanvas2.getContext('2d', { willReadFrequently: true });
-
-    function updatePointCloudGeneric(videoEl, decoder, cCtx, pArr, cArr, geom) {
-      if (!videoEl.videoWidth) return;
-      if (!decoder || !decoder.latestY) return;
-
-      const dW = decoder.width, dH = decoder.height;
-      const step = 1;
-      // Scale intrinsics from 640x480 baseline to actual depth resolution
-      const fx = 604.2 * dW / 640, fy = 603.5 * dH / 480;
-      const cx = 322.7 * dW / 640, cy = 252.7 * dH / 480;
-      const DEPTH_SHIFT = 0;
-
-      // Resize canvas to match depth resolution
-      if (cCtx.canvas.width !== dW || cCtx.canvas.height !== dH) {
-        cCtx.canvas.width = dW; cCtx.canvas.height = dH;
-      }
-      cCtx.drawImage(videoEl, 0, 0, dW, dH);
-      const dY = decoder.latestY;
-      const cPx = cCtx.getImageData(0, 0, dW, dH).data;
-
-      let n = 0;
-      for (let v = 0; v < dH; v += step) {
-        for (let u = 0; u < dW; u += step) {
-          const dIdx = v * dW + u;
-          const gray = dY[dIdx];
-          if (gray < 2) continue;
-
-          const depth = decoder.is10bit ? (gray << DEPTH_SHIFT) : (gray << 4);
-          const i3 = n * 3;
-          pArr[i3]     = -(u - cx) * depth / fx;
-          pArr[i3 + 1] = -(v - cy) * depth / fy;
-          pArr[i3 + 2] = depth;
-
-          const cIdx = (v * dW + u) * 4;
-          cArr[i3]     = cPx[cIdx] / 255;
-          cArr[i3 + 1] = cPx[cIdx + 1] / 255;
-          cArr[i3 + 2] = cPx[cIdx + 2] / 255;
-          n++;
-        }
-      }
-
-      geom.attributes.position.needsUpdate = true;
-      geom.attributes.color.needsUpdate = true;
-      geom.setDrawRange(0, n);
-      geom.computeBoundingSphere();
-    }
-
-    function updatePointCloud1() {
-      updatePointCloudGeneric(
-        document.getElementById("colorVideo"), cam1.depthDecoder,
-        colorCtx, posArr, colArr, pcGeometry
-      );
-    }
-    function updatePointCloud2() {
-      updatePointCloudGeneric(
-        document.getElementById("colorVideo2"), cam2.depthDecoder,
-        colorCtx2, posArr2, colArr2, pcGeometry2
-      );
-    }
-
-    // Point size slider
-    document.getElementById('ptSize').addEventListener('input', (e) => {
-      const s = parseFloat(e.target.value) * 0.001;
-      pcMaterial.size = s;
-      pcMaterial2.size = s;
-    });
-    pcMaterial.size = parseFloat(document.getElementById('ptSize').value) * 0.001;
-    pcMaterial2.size = pcMaterial.size;
-
-    // Camera XYZRPY — apply transform via explicit matrix product R = Rz(yaw) * Ry(pitch) * Rx(roll)
-    const _rx = new THREE.Matrix4(), _ry = new THREE.Matrix4(), _rz = new THREE.Matrix4(), _tmp = new THREE.Matrix4();
-    function applyCamPose(group, xId, yId, zId, rollId, pitchId, yawId) {
-      const x = parseFloat(document.getElementById(xId).value) || 0;
-      const y = parseFloat(document.getElementById(yId).value) || 0;
-      const z = parseFloat(document.getElementById(zId).value) || 0;
-      const roll  = (parseFloat(document.getElementById(rollId).value)  || 0) * Math.PI / 180;
-      const pitch = (parseFloat(document.getElementById(pitchId).value) || 0) * Math.PI / 180;
-      const yaw   = (parseFloat(document.getElementById(yawId).value)   || 0) * Math.PI / 180;
-      group.position.set(x, y, z);
-      _rx.makeRotationX(roll);
-      _ry.makeRotationY(pitch);
-      _rz.makeRotationZ(yaw);
-      _tmp.multiplyMatrices(_rz, _ry);
-      _tmp.multiply(_rx);
-      group.setRotationFromMatrix(_tmp);
-    }
-    function updateCamPose() { applyCamPose(camGroup, 'camX', 'camY', 'camZ', 'camRoll', 'camPitch', 'camYaw'); }
-    function updateCam2Pose() { applyCamPose(camGroup2, 'cam2X', 'cam2Y', 'cam2Z', 'cam2Roll', 'cam2Pitch', 'cam2Yaw'); }
-    for (const id of ['camX', 'camY', 'camZ', 'camRoll', 'camPitch', 'camYaw']) {
-      document.getElementById(id).addEventListener('input', updateCamPose);
-    }
-    for (const id of ['cam2X', 'cam2Y', 'cam2Z', 'cam2Roll', 'cam2Pitch', 'cam2Yaw']) {
-      document.getElementById(id).addEventListener('input', updateCam2Pose);
-    }
-    updateCamPose();
-    updateCam2Pose();
-
-    // ─── Load URDF model ────────────────────────────────
-    let robot = null;
-
-    const urdfLoader = new URDFLoader();
-    urdfLoader.loadMeshCb = (path, manager, done) => {
-      // Mesh paths resolve relative to URDF → /assets/meshes/...
-      // Vite proxy forwards these to openarm.dev (avoids CORS)
-      if (path.endsWith(".stl")) {
-        new STLLoader(manager).load(path, geom => {
-          done(new THREE.Mesh(geom, new THREE.MeshPhongMaterial()));
-        }, null, err => done(null, err));
-      } else if (path.endsWith(".dae")) {
-        new ColladaLoader(manager).load(path, result => done(result.scene), null, err => done(null, err));
-      } else {
-        done(null, new Error(`Unknown mesh format: ${path}`));
-      }
-    };
-
-    setStatus("Loading 3D model...");
-    log("Loading URDF model...");
-    urdfLoader.load("./assets/openarm_v10.urdf", result => {
-      robot = result;
-      // URDF uses Z-up; Three.js uses Y-up — rotate the whole robot
-      robot.rotation.x = -Math.PI / 2;
-      scene.add(robot);
-      setStatus("Idle");
-      log("3D model loaded", "success");
-    }, undefined, err => {
-      log(`URDF load error: ${err}`, "error");
-      setStatus("Model load failed");
-    });
-
-    // ─── Gripper conversion ───────────────────────────────
-    // Damiao motor radians → URDF prismatic meters (from openarm_ros2 v10_simple_hardware)
-    // Closed: motor=0 rad → joint=0 m, Open: motor=-1.0472 rad → joint=0.044 m
-    const GRIPPER_MOTOR_OPEN_RAD = -1.0472; // -60° = -pi/3
-    const GRIPPER_JOINT_OPEN_M = 0.044;     // 44mm finger travel
-    function gripperMotorToJoint(motorRad) {
-      return Math.max(0, Math.min(GRIPPER_JOINT_OPEN_M,
-        GRIPPER_JOINT_OPEN_M * (motorRad / GRIPPER_MOTOR_OPEN_RAD)));
-    }
-
-    // ─── Apply joint angles (both arms) with lerp smoothing ──
-    const LERP_FACTOR = 0.2;  // per-frame blend toward target (0.2 = smooth, 1.0 = instant)
-    function lerpJointStates(states) {
-      for (const s of states) {
-        s.angle += (s.targetAngle - s.angle) * LERP_FACTOR;
-      }
-    }
-    function updateArmPose() {
-      if (!robot) return;
-      lerpJointStates(leftJointState);
-      lerpJointStates(rightJointState);
-      for (let i = 0; i < 7; i++) {
-        if (robot.joints[L_JOINT_NAMES[i]]) robot.joints[L_JOINT_NAMES[i]].setJointValue(leftJointState[i].angle);
-        if (robot.joints[R_JOINT_NAMES[i]]) robot.joints[R_JOINT_NAMES[i]].setJointValue(rightJointState[i].angle);
-      }
-      // Gripper (joint index 7 = "Grip") — only set primary EE, mimic handles EE2
-      const lGrip = gripperMotorToJoint(leftJointState[7].angle);
-      const rGrip = gripperMotorToJoint(rightJointState[7].angle);
-      if (robot.joints["L_EE"]) robot.joints["L_EE"].setJointValue(lGrip);
-      if (robot.joints["R_EE"]) robot.joints["R_EE"].setJointValue(rGrip);
-    }
-
-    // ─── Update UI ────────────────────────────────────────
-    function updatePanel() {
-      function updateArmEls(els, state) {
-        for (let i = 0; i < JOINTS.length; i++) {
-          const s = state[i];
-          const deg = (s.angle * 180 / Math.PI).toFixed(1);
-          els[i].angle.innerHTML = `${deg}&deg;`;
-          els[i].vel.textContent = s.velocity.toFixed(1);
-          els[i].tau.textContent = s.torque.toFixed(1);
-        }
-      }
-      updateArmEls(leftJointEls, leftJointState);
-      updateArmEls(rightJointEls, rightJointState);
-
-      document.getElementById("frameCount").textContent = frameCount;
-      document.getElementById("bytesReceived").textContent = formatBytes(bytesTotal);
-
-      // FPS calculation
-      const now = performance.now();
-      if (now - lastFpsTime >= 1000) {
-        document.getElementById("canFps").textContent = fpsCounter;
-        fpsCounter = 0;
-        lastFpsTime = now;
-      }
-
-      document.getElementById("lastUpdate").textContent =
-        new Date().toLocaleTimeString().split(" ")[0];
-
-      // Update stream stats (ping + fps) — refresh once per second
-      const vfpsNow = performance.now();
-      if (vfpsNow - videoFpsLastTime >= 1000) {
-        videoFpsValue = videoFpsCount;
-        videoFpsCount = 0;
-        latencyDisplay = latencySamples > 0 ? Math.round(latencySum / latencySamples) : null;
-        latencySum = 0;
-        latencySamples = 0;
-        videoFpsLastTime = vfpsNow;
-
-        const pingEl = document.getElementById('streamPing');
-        const fpsEl = document.getElementById('streamFps');
-        const hasLatency = latencyDisplay !== null && Date.now() - latencyLastUpdate <= 5000;
-        if (hasLatency) {
-          const v = latencyDisplay;
-          const abs = Math.abs(v);
-          pingEl.textContent = (v < 0 ? '~' : '') + 'ping ' + abs + 'ms';
-          pingEl.style.color = abs < 50 ? '#2ed573' : abs < 150 ? '#ffa502' : '#ff4757';
-        } else {
-          pingEl.textContent = '--'; pingEl.style.color = '#555';
-        }
-        if (videoFpsValue !== null) {
-          fpsEl.textContent = videoFpsValue + ' fps';
-          fpsEl.style.color = '#aaa';
-        } else {
-          fpsEl.textContent = '--'; fpsEl.style.color = '#555';
-        }
-      }
-    }
-
-    // ─── Resize handler ───────────────────────────────────
-    function onResize() {
-      if (!renderer) return;
-      const container = canvas.parentElement;
-      const w = container.clientWidth;
-      const h = container.clientHeight;
-      renderer.setSize(w, h);
-      camera.aspect = w / h;
-      camera.updateProjectionMatrix();
-    }
-
-    window.addEventListener("resize", onResize);
-    // Initial size set after first frame
-    requestAnimationFrame(onResize);
-
-    const view3dEl = document.getElementById('view3d');
-
-    // ─── Render loop ──────────────────────────────────────
-    function animate() {
-      requestAnimationFrame(animate);
-      updateArmPose();
-      if (!renderer) return;
-      controls.update();
-      updatePointCloud1();
-      updatePointCloud2();
-      renderer.render(scene, camera);
-    }
-    animate();
-
-    // ─── Debug: expose depth comparison for cross-browser testing ───
-    window.dumpDepth = function() {
-      const dec = cam1.depthDecoder;
-      if (!dec || !dec.latestY) { console.log('No depth data yet'); return; }
-      const Y = dec.latestY;
-      const w = dec.width, h = dec.height;
-      // Sample every 10th pixel from 5 evenly-spaced rows
-      const rows = [0, Math.floor(h/4), Math.floor(h/2), Math.floor(3*h/4), h-1];
-      const samples = {};
-      for (const r of rows) {
-        samples['row_'+r] = [];
-        for (let c = 0; c < w; c += 10) samples['row_'+r].push(Y[r * w + c]);
-      }
-      let min = Infinity, max = 0, nonzero = 0;
-      for (let i = 0; i < Y.length; i++) { const v = Y[i]; if (v > 0) { nonzero++; if (v < min) min = v; if (v > max) max = v; } }
-      // Raw byte samples from the copy buffer (first row, every 10th pixel, 8 bytes each)
-      let rawSamples = null;
-      if (dec.copyBuf && dec._rawDiag) {
-        const d = dec._rawDiag;
-        const src = new Uint8Array(dec.copyBuf);
-        const stride = d.layouts[0].stride;
-        const off = d.layouts[0].offset;
-        rawSamples = { row0: [], midRow: [] };
-        const midR = Math.floor(h / 2);
-        for (let c = 0; c < w && c < d.codedWidth; c += 10) {
-          // 8 raw bytes at this pixel position
-          const i0 = off + 0 * stride + c * 4;
-          const iM = off + midR * stride + c * 4;
-          rawSamples.row0.push(Array.from(src.slice(i0, i0 + 4)));
-          rawSamples.midRow.push(Array.from(src.slice(iM, iM + 4)));
-        }
-      }
-      const result = {
-        browser: navigator.userAgent.includes('Firefox') ? 'Firefox' : navigator.userAgent.includes('Chrome') ? 'Chrome' : 'Other',
-        format: dec.fmtLogged ? 'see log' : 'unknown', codec: dec.configuredCodec,
-        width: w, height: h, is10bit: dec.is10bit, totalPixels: w*h, nonzeroPixels: nonzero, min, max,
-        rawDiag: dec._rawDiag || null, rawSamples, samples
-      };
-      console.log(JSON.stringify(result));
-      navigator.clipboard.writeText(JSON.stringify(result, null, 2)).then(() => console.log('Copied to clipboard'));
-      return result;
-    };
-
-    // ─── Subscribe to one arm's CAN stream ────────────────
-    async function subscribeArmOnce(label, path, jointState) {
-      const relay = relayInput.value;
-      const fullUrl = `${relay}/${path}`;
-      log(`[${label}] Connecting to ${fullUrl}...`, 'info', { toast: false });
-
-      const connectOpts = buildConnectOpts();
-      const conn = await Promise.race([
-        Moq.Connection.connect(new URL(fullUrl), connectOpts),
-        new Promise((_, rej) => setTimeout(() => rej(new Error(`[${label}] Connection timeout`)), 8000)),
-      ]);
-      connections.push(conn);
-      log(`[${label}] Connected`, "success");
-
-      const broadcast = conn.consume(Moq.Path.from(""));
-      const track = broadcast.subscribe("can", 0);
-      log(`[${label}] Subscribed to 'can' track`, "success", { toast: false });
-
-      while (running) {
-        const group = await withTimeout(track.nextGroup(), STALE_MS);
-        if (!group) { log(`[${label}] Track ended`); break; }
-        while (running) {
-          const frame = await withTimeout(group.readFrame(), STALE_MS);
-          if (!frame) break;
-          const bytes = new Uint8Array(frame);
-          bytesTotal += bytes.length;
-          const canFrames = parseAllCanFrames(bytes);
-          frameCount += canFrames.length;
-          fpsCounter += canFrames.length;
-          for (const parsed of canFrames) {
-          const jointIdx = JOINTS.findIndex(j => j.canId === parsed.canId);
-          if (jointIdx < 0) continue;
-          const state = parseDamiaoState(parsed.data);
-          if (!state) continue;
-          jointState[jointIdx].targetAngle = state.qRad;
-          jointState[jointIdx].velocity = state.vel;
-          jointState[jointIdx].torque = state.tau;
-          jointState[jointIdx].tempMos = state.tempMos;
-          jointState[jointIdx].tempRotor = state.tempRotor;
-          jointState[jointIdx].updated = true;
-          }
-        }
-      }
-    }
-
-    async function subscribeArm(label, path, jointState) {
-      let lastError = null;
-      while (running) {
-        try {
-          await subscribeArmOnce(label, path, jointState);
-          if (!running) break;
-          lastError = null;  // successful session — reset
-          log(`[${label}] Stream ended`, 'info');
-        } catch (e) {
-          if (!running) break;
-          if (lastError) log(`[${label}] ${e.message}`, 'error');
-          lastError = e;
-        }
-        if (!running) break;
-        await new Promise(r => setTimeout(r, RECONNECT_DELAY));
-      }
-    }
-
-    // ─── MoQ Connection ───────────────────────────────────
+    // ─── Connect / Disconnect ────────────────────────
     startBtn.addEventListener("click", async () => {
       try {
-        const leftPath = leftPathInput.value.trim();
-        const rightPath = rightPathInput.value.trim();
-        const depthPath = depthPathInput.value.trim();
-        const depth2Path = depth2PathInput.value.trim();
-        if (!leftPath && !rightPath && !depthPath && !depth2Path) { log("No paths configured", "error"); return; }
+        const hasArmPaths = armConfigs.some(a => a.enabled && (a.path || "").trim());
+        const hasRsPaths = config.realsense.some(c => c.enabled !== false && (c.path || "").trim());
+        const hasCamPaths = config.cameras.some(c => c.enabled !== false && (c.path || "").trim());
+        if (!hasArmPaths && !hasRsPaths && !hasCamPaths) { log("No enabled paths configured — open Settings to add arm/camera paths", "error"); return; }
 
         startBtn.disabled = true;
         stopBtn.disabled = false;
-        running = true;
-        frameCount = 0;
-        bytesTotal = 0;
-        fpsCounter = 0;
-        connections = [];
+        appState.running = true;
+        appState.frameCount = 0;
+        appState.bytesTotal = 0;
+        appState.fpsCounter = 0;
+        appState.connections = [];
 
         setStatus("Connecting...");
         log(`WebTransport: ${typeof WebTransport !== 'undefined' ? 'supported' : 'NOT supported'}`, "data", { toast: false });
 
-        const relay = relayInput.value;
-        const certHash = certHashInput.value.trim();
+        // Warn if duplicate arm paths
+        const armPaths = armConfigs.map(a => (a.path || "").trim()).filter(Boolean);
+        const dupPaths = armPaths.filter((p, i) => armPaths.indexOf(p) !== i);
+        if (dupPaths.length) log(`WARNING: Multiple arms share path "${dupPaths[0]}" — cross-talk expected!`, "error");
 
-        // Warn if both arms subscribe to the same path (likely localStorage stale value)
-        if (leftPath && rightPath && leftPath === rightPath) {
-          log(`WARNING: Left and Right arms use the same path "${leftPath}" — gripper cross-talk expected!`, "error");
+        const subs = [];
+
+        // Subscribe to enabled arms
+        armConfigs.forEach((arm, idx) => {
+          const path = (arm.path || "").trim();
+          if (arm.enabled && path) subs.push(subscribeArm(config, appState, arm.id, path, armStates[idx]).catch(e => log(`[${arm.id}] ${e.message}`, "error")));
+        });
+
+        // Connect RealSense cameras
+        if (hasRsPaths) subs.push(connectRealSense(config, appState, rsCams, rsVideoEls).catch(e => log(`[realsense] ${e.message}`, "error")));
+
+        // Connect plain cameras
+        if (hasCamPaths) subs.push(connectCameras(config, camState, camVideoEls).catch(e => log(`[camera] ${e.message}`, "error")));
+
+        // Connect chat (if enabled)
+        if (config.chat.enabled !== false) {
+          subs.push(connectChat(config, chatState, getUsername, toastsEl).catch(e => log(`[chat] ${e.message}`, "error")));
         }
 
-        // Subscribe to both arms concurrently (isolated so CAN errors don't kill depth)
-        const subs = [];
-        if (leftPath) subs.push(subscribeArm("left", leftPath, leftJointState).catch(e => log(`[left] ${e.message}`, "error")));
-        if (rightPath) subs.push(subscribeArm("right", rightPath, rightJointState).catch(e => log(`[right] ${e.message}`, "error")));
+        // Enable audio button (if audio enabled in config) + query buttons + torque buttons
+        if (config.audio.enabled !== false) audioBtn.disabled = false;
+        for (const [pi, btn] of Object.entries(queryBtns)) {
+          const pairArms = armConfigs.filter(a => a.pairIdx === parseInt(pi));
+          if (pairArms.some(a => a.enabled && (a.path || "").trim())) btn.disabled = false;
+        }
+        for (const [armId, btn] of Object.entries(torqueBtns)) {
+          const arm = armConfigs.find(a => a.id === armId);
+          if (arm && arm.enabled && (arm.path || "").trim()) btn.disabled = false;
+        }
 
-        // Connect RealSense point cloud if configured (add to subs so finally waits)
-        if (depthPath || depth2Path) subs.push(connectRealSense().catch(e => log(`[depth] ${e.message}`, "error")));
+        // Auto-start query for enabled pairs with autoQuery
+        for (const [pi, btn] of Object.entries(queryBtns)) {
+          const pairIdx = parseInt(pi);
+          const pair = config.armPairs[pairIdx];
+          if (pair && pair.enabled !== false && pair.autoQuery) {
+            const pairArms = armConfigs.filter(a => a.pairIdx === pairIdx);
+            if (pairArms.some(a => a.enabled && (a.path || "").trim())) {
+              startQueryLoopForPair(config, pairIdx, armConfigs, cmdState).then(interval => {
+                if (interval) {
+                  queryIntervals[pairIdx] = interval;
+                  btn.classList.add("active");
+                  btn.textContent = "Stop";
+                }
+              }).catch(e => log(`Query auto-start error: ${e.message}`, "error"));
+            }
+          }
+        }
 
-        // Connect chat
-        subs.push(connectChat().catch(e => log(`[chat] ${e.message}`, "error")));
-
-        // Connect audio if enabled — create AudioContext here (in Start button click = user gesture)
-        audioBtn.disabled = false;
+        // Connect audio if enabled (user previously toggled it on)
         if (audioState.enabled) {
           if (!audioState.audioCtx) {
             audioState.audioCtx = new AudioContext({ sampleRate: 48000 });
             audioState.nextPlayTime = 0;
           }
           if (audioState.audioCtx.state === 'suspended') audioState.audioCtx.resume();
-          subs.push(connectAudio().catch(e => log(`[audio] ${e.message}`, 'error')));
+          subs.push(connectAudio(config, audioState).catch(e => log(`[audio] ${e.message}`, 'error')));
         }
 
-        queryBtn.disabled = false;
         setStatus("Streaming");
 
         await Promise.all(subs);
@@ -2319,95 +448,92 @@
         console.error(e);
         setStatus("Error");
       } finally {
-        if (queryActive) {
-          stopQueryLoop();
-          queryActive = false;
-          queryBtn.classList.remove("active");
-          queryBtn.textContent = "Query Motors";
+        // Stop all query loops + disconnect command channels
+        stopAllQueryLoops(queryIntervals);
+        for (const k of Object.keys(queryIntervals)) delete queryIntervals[k];
+        disconnectAllCmdArms(armConfigs, cmdState);
+        for (const btn of Object.values(queryBtns)) {
+          btn.classList.remove("active");
+          btn.textContent = "Query";
+          btn.disabled = true;
         }
-        disconnectRealSense();
-        disconnectChat();
-        disconnectAudio();
+        for (const btn of Object.values(torqueBtns)) {
+          btn.classList.remove("active");
+          btn.textContent = "Torque";
+          btn.disabled = true;
+        }
+        disconnectRealSense(rsCams, pointClouds);
+        disconnectCameras(camState);
+        disconnectChat(chatState);
+        disconnectAudio(audioState);
         audioBtn.disabled = true;
-        queryBtn.disabled = true;
         startBtn.disabled = false;
         stopBtn.disabled = true;
       }
     });
 
     stopBtn.addEventListener("click", async () => {
-      running = false;
-      if (queryActive) {
-        stopQueryLoop();
-        queryActive = false;
-        queryBtn.classList.remove("active");
-        queryBtn.textContent = "Query Motors";
+      appState.running = false;
+      // Stop all query loops + disconnect command channels
+      stopAllQueryLoops(queryIntervals);
+      for (const k of Object.keys(queryIntervals)) delete queryIntervals[k];
+      disconnectAllCmdArms(armConfigs, cmdState);
+      for (const btn of Object.values(queryBtns)) {
+        btn.classList.remove("active");
+        btn.textContent = "Query";
+        btn.disabled = true;
       }
-      queryBtn.disabled = true;
+      for (const btn of Object.values(torqueBtns)) {
+        btn.classList.remove("active");
+        btn.textContent = "Torque";
+        btn.disabled = true;
+      }
       setStatus("Stopping...");
-      disconnectRealSense();
-      disconnectChat();
-      disconnectAudio();
-      latencyMs = null;
-      latencyLastUpdate = 0;
-      latencySum = 0;
-      latencySamples = 0;
-      latencyDisplay = null;
-      videoFpsCount = 0;
-      videoFpsValue = null;
+      disconnectRealSense(rsCams, pointClouds);
+      disconnectCameras(camState);
+      disconnectChat(chatState);
+      disconnectAudio(audioState);
+      appState.latency.ms = null;
+      appState.latency.lastUpdate = 0;
+      appState.latency.sum = 0;
+      appState.latency.samples = 0;
+      appState.latency.display = null;
+      appState.videoFps.count = 0;
+      appState.videoFps.value = null;
       audioBtn.disabled = true;
-      for (const conn of connections) { try { conn.close(); } catch (e) {} }
-      connections = [];
+      for (const conn of appState.connections) { try { conn.close(); } catch (e) {} }
+      appState.connections = [];
       startBtn.disabled = false;
       stopBtn.disabled = true;
       setStatus("Disconnected");
       log("Disconnected", "success");
     });
 
-    queryBtn.addEventListener("click", async () => {
-      if (!queryActive) {
-        queryBtn.disabled = true;
-        queryBtn.textContent = "Starting...";
-        try {
-          await startQueryLoop();
-          queryActive = true;
-          queryBtn.classList.add("active");
-          queryBtn.textContent = "Stop Query";
-          queryBtn.disabled = false;
-        } catch (e) {
-          log(`Query start error: ${e.message}`, "error");
-          console.error(e);
-          queryBtn.textContent = "Query Motors";
-          queryBtn.disabled = false;
-        }
-      } else {
-        stopQueryLoop();
-        queryActive = false;
-        queryBtn.classList.remove("active");
-        queryBtn.textContent = "Query Motors";
+    // Chat input
+    document.getElementById('chatInput').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendChatMessage(e.target.value, chatState, getUsername, toastsEl);
+        e.target.value = '';
       }
     });
 
     // Periodic panel update
-    setInterval(updatePanel, 100);
+    setInterval(() => updatePanel(armStates, armJointEls, appState), 100);
 
     log("Ready. Click Connect to start.", "info");
 
-    // Auto-connect on page load (delay to let heavy 3D init complete)
-    log("Auto-connecting in 3s...", "info");
-    setTimeout(() => { log("Connecting now..."); startBtn.click(); }, 3000);
+    // Auto-connect on page load
+    setTimeout(() => startBtn.click(), 500);
 
-    // ─── Settings toggle + tab switching ────────────────
-    document.getElementById('settingsToggle').addEventListener('click', () => {
-      document.getElementById('topBarConfig').classList.toggle('open');
-    });
-
+    // ─── Tab switching ───────────────────────────────
     const tabBar = document.getElementById('tabBar');
     const sidePanel = document.querySelector('.side-panel');
     const logPanel = document.getElementById('log');
     const cameraSplit = document.getElementById('cameraSplit');
+    const view3dEl = document.getElementById('view3d');
     const panelMap = {
-      arms: [document.getElementById('panelLeft'), document.getElementById('panelRight')],
+      arms: armPanelEls,
       stats: [document.getElementById('panelStats')],
     };
     const allPanels = Object.values(panelMap).flat();
@@ -2417,15 +543,14 @@
       if (!btn) return;
       const tab = btn.dataset.tab;
 
-      // Update active button
       tabBar.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
 
-      // Hide everything first
       sidePanel.classList.remove('tab-visible');
       allPanels.forEach(p => p.classList.remove('tab-visible'));
       logPanel.classList.remove('tab-visible');
       cameraSplit.classList.remove('tab-visible');
+      settingsPanel.classList.remove('tab-visible');
       view3dEl.style.display = '';
 
       if (tab === '3d') {
@@ -2435,6 +560,10 @@
         view3dEl.style.display = 'none';
       } else if (tab === 'camera') {
         cameraSplit.classList.add('tab-visible');
+        view3dEl.style.display = 'none';
+      } else if (tab === 'settings') {
+        settingsPanel.classList.add('tab-visible');
+        settingsHandle.renderAll();
         view3dEl.style.display = 'none';
       } else if (tab in panelMap) {
         sidePanel.classList.add('tab-visible');
