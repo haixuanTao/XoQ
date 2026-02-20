@@ -148,6 +148,24 @@
     const sceneHandle = initScene(config, armConfigs, cameraSplitEl);
     const { robots, robotGroups, grids, pointClouds, rsVideoEls, rsCams, rsCamGroups, camVideoEls, camState, onResize } = sceneHandle;
 
+    // Apply initial enabled/disabled visibility
+    config.armPairs.forEach((pair, i) => {
+      const vis = pair.enabled !== false;
+      if (robotGroups[i]) robotGroups[i].visible = vis;
+      if (grids[i]) grids[i].visible = vis;
+    });
+    config.realsense.forEach((rs, i) => {
+      const vis = rs.enabled !== false;
+      if (rsCamGroups[i]) rsCamGroups[i].visible = vis;
+      const feedEl = rsVideoEls[i] && rsVideoEls[i].parentElement;
+      if (feedEl) feedEl.style.display = vis ? "" : "none";
+    });
+    config.cameras.forEach((cam, i) => {
+      const vis = cam.enabled !== false;
+      const feedEl = camVideoEls[i] && camVideoEls[i].parentElement;
+      if (feedEl) feedEl.style.display = vis ? "" : "none";
+    });
+
     // ─── Settings panel ─────────────────────────────
     const settingsPanel = document.getElementById("settingsPanel");
     const settingsToggle = document.getElementById("settingsToggle");
@@ -195,7 +213,24 @@
         }
       },
       onStructuralChange() {
-        log("Config saved. Reconnect to apply path/structure changes.", "info");
+        // Live-update visibility of 3D objects based on enabled state
+        config.armPairs.forEach((pair, i) => {
+          const vis = pair.enabled !== false;
+          if (robotGroups[i]) robotGroups[i].visible = vis;
+          if (grids[i]) grids[i].visible = vis;
+        });
+        config.realsense.forEach((rs, i) => {
+          const vis = rs.enabled !== false;
+          if (rsCamGroups[i]) rsCamGroups[i].visible = vis;
+          const feedEl = rsVideoEls[i] && rsVideoEls[i].parentElement;
+          if (feedEl) feedEl.style.display = vis ? "" : "none";
+        });
+        config.cameras.forEach((cam, i) => {
+          const vis = cam.enabled !== false;
+          const feedEl = camVideoEls[i] && camVideoEls[i].parentElement;
+          if (feedEl) feedEl.style.display = vis ? "" : "none";
+        });
+        log("Config saved. Reconnect to apply path changes.", "info");
       },
     });
 
