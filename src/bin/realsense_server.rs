@@ -265,7 +265,7 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let args = parse_args();
+    let mut args = parse_args();
 
     println!();
     println!("========================================");
@@ -304,10 +304,24 @@ async fn main() -> Result<()> {
         Err(e) => tracing::warn!("Could not list devices: {}", e),
     }
 
-    // Open RealSense camera
+    // Open RealSense camera (fallback to 640x480 if requested resolution fails, e.g. USB 2)
     tracing::info!("Opening RealSense camera...");
     let mut camera =
-        RealSenseCamera::open(args.width, args.height, args.fps, args.serial.as_deref())?;
+        match RealSenseCamera::open(args.width, args.height, args.fps, args.serial.as_deref()) {
+            Ok(cam) => cam,
+            Err(e) if args.width != 640 || args.height != 480 => {
+                tracing::warn!(
+                    "Failed to open at {}x{}: {}. Falling back to 640x480 (USB 2?)",
+                    args.width,
+                    args.height,
+                    e
+                );
+                args.width = 640;
+                args.height = 480;
+                RealSenseCamera::open(args.width, args.height, args.fps, args.serial.as_deref())?
+            }
+            Err(e) => return Err(e),
+        };
     let intr = camera.intrinsics();
     tracing::info!(
         "RealSense opened: {}x{} @ {}fps, depth_scale={}, fx={:.1} fy={:.1} ppx={:.1} ppy={:.1}",

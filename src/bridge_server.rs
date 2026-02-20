@@ -444,16 +444,32 @@ async fn moq_command_subscriber(
     let cmd_path = format!("{}/{}", path, command_subpath);
 
     loop {
-        tracing::debug!("MoQ command subscriber connecting on {}...", cmd_path);
+        tracing::info!("MoQ command subscriber connecting on {}...", cmd_path);
 
-        let cmd_sub = match builder.clone().path(&cmd_path).connect_subscriber().await {
-            Ok(sub) => sub,
-            Err(e) => {
+        // Timeout connect_subscriber() — it blocks on AnnounceInit from relay,
+        // which may hang if no publisher exists yet on this path.
+        let cmd_sub = match tokio::time::timeout(
+            Duration::from_secs(5),
+            builder.clone().path(&cmd_path).connect_subscriber(),
+        )
+        .await
+        {
+            Ok(Ok(sub)) => sub,
+            Ok(Err(e)) => {
                 tracing::warn!("MoQ command subscriber connect error: {}, retrying...", e);
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 continue;
             }
+            Err(_) => {
+                tracing::info!(
+                    "MoQ command subscriber connect timeout (no publisher yet?), retrying..."
+                );
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
         };
+
+        tracing::info!("MoQ command subscriber session established on {}", cmd_path);
 
         let (cmd_reader, cmd_sub) = match tokio::time::timeout(Duration::from_secs(5), async {
             let mut sub = cmd_sub;
@@ -463,23 +479,27 @@ async fn moq_command_subscriber(
         .await
         {
             Ok((Ok(Some(reader)), sub)) => {
-                tracing::info!("MoQ command subscriber connected on {}", cmd_path);
+                tracing::info!(
+                    "MoQ command subscriber subscribed to track '{}' on {}",
+                    track_name,
+                    cmd_path
+                );
                 (reader, sub)
             }
             Ok((Ok(None), sub)) => {
-                tracing::debug!("Command broadcast ended, retrying...");
+                tracing::info!("Command broadcast ended, retrying...");
                 drop(sub);
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 continue;
             }
             Ok((Err(e), sub)) => {
-                tracing::debug!("Command subscribe error: {}, retrying...", e);
+                tracing::info!("Command subscribe error: {}, retrying...", e);
                 drop(sub);
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 continue;
             }
             Err(_) => {
-                tracing::debug!("No command publisher yet, retrying...");
+                tracing::info!("No command publisher yet (subscribe timeout), retrying...");
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 continue;
             }
@@ -506,7 +526,7 @@ async fn moq_command_subscriber(
                     break;
                 }
                 Err(e) => {
-                    tracing::warn!("MoQ command read error: {}, will reconnect...", e);
+                    tracing::debug!("MoQ command read error: {}, will reconnect...", e);
                     break;
                 }
             }
