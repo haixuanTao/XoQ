@@ -524,7 +524,7 @@ async fn run_cmd_test(relay: &str, base_path: &str) -> Result<()> {
                 eprintln!("[state] Subscribed to 'can' track, reading...");
                 let mut count = 0u64;
                 loop {
-                    match tokio::time::timeout(Duration::from_secs(10), reader.read()).await {
+                    match tokio::time::timeout(Duration::from_secs(30), reader.read()).await {
                         Ok(Ok(Some(data))) => {
                             count += 1;
                             // Decode all wire frames in this chunk
@@ -535,8 +535,8 @@ async fn run_cmd_test(relay: &str, base_path: &str) -> Result<()> {
                                 {
                                     if let Some(state) = parse_damiao_response(&frame_data) {
                                         eprintln!(
-                                            "[state] #{} CAN 0x{:03X}: {}",
-                                            count, can_id, state
+                                            "[state] #{} CAN 0x{:03X}: {} | raw: {:02X?}",
+                                            count, can_id, state, &frame_data
                                         );
                                     } else {
                                         eprintln!(
@@ -575,7 +575,7 @@ async fn run_cmd_test(relay: &str, base_path: &str) -> Result<()> {
                         }
                         Err(_) => {
                             eprintln!(
-                                "[state] No data for 10s (after {} reads). Motors may not be responding.",
+                                "[state] No data for 30s (after {} reads). Motors may not be responding.",
                                 count
                             );
                             break;
@@ -676,25 +676,28 @@ async fn run_cmd_test(relay: &str, base_path: &str) -> Result<()> {
             mit_cmd
         );
 
-        for round in 0..3 {
+        // Send 20 rounds over 20s to ensure CAN server has time to reconnect
+        for round in 0..20 {
             for motor_id in 1u32..=8 {
                 let frame = encode_can_wire_frame(motor_id, &mit_cmd);
                 track.write(bytes::Bytes::from(frame));
             }
-            eprintln!("[cmd] Round {} sent (8 motors)", round + 1);
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            if round < 5 || round % 5 == 0 {
+                eprintln!("[cmd] Round {} sent (8 motors)", round + 1);
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
 
-        eprintln!("[cmd] All commands sent. Keeping publisher alive for 15s...");
+        eprintln!("[cmd] All 20 rounds sent. Keeping publisher alive for 15s...");
         tokio::time::sleep(Duration::from_secs(15)).await;
         eprintln!("[cmd] Done.");
     });
 
     // Wait for all with overall timeout
     tokio::select! {
-        _ = tokio::time::sleep(Duration::from_secs(35)) => {
+        _ = tokio::time::sleep(Duration::from_secs(60)) => {
             eprintln!();
-            eprintln!("=== Test timeout after 35s ===");
+            eprintln!("=== Test timeout after 60s ===");
         }
         _ = async {
             let _ = tokio::join!(state_handle, cmd_handle, verify_handle);

@@ -509,40 +509,58 @@ async fn moq_command_subscriber(
             let track_consumer = broadcast.subscribe_track(&Track::new(track_name));
             let mut reader = MoqTrackReader::from_track(track_consumer);
 
-            // Drain cached/stale data: read with very short timeout (50ms).
-            // Cached frames arrive instantly; live data takes time between frames.
-            // Discard everything that arrives within 50ms to avoid forwarding stale commands.
+            // Phase 1: Drain cached/stale data (arrives within 50ms per frame).
+            // Cached frames from dead publishers arrive instantly in a burst.
             let mut drained = 0u32;
             loop {
                 match tokio::time::timeout(Duration::from_millis(50), reader.read()).await {
-                    Ok(Ok(Some(_))) => {
-                        drained += 1;
-                    }
+                    Ok(Ok(Some(_))) => drained += 1,
                     Ok(Ok(None)) | Ok(Err(_)) => {
-                        // Broadcast ended or errored during drain — it's fully stale
+                        // Broadcast ended during drain — fully stale
                         if drained > 0 {
-                            tracing::info!(
-                                "Drained {} stale command frames, broadcast ended",
-                                drained
-                            );
+                            tracing::info!("Drained {} stale frames, broadcast dead", drained);
                         }
                         continue; // try next broadcast
                     }
-                    Err(_) => {
-                        // 50ms timeout — cache is drained, ready for live data
-                        break;
-                    }
+                    Err(_) => break, // 50ms timeout — cache drained
                 }
             }
             if drained > 0 {
                 tracing::info!("Drained {} stale cached command frames", drained);
             }
 
-            tracing::info!(
-                "MoQ command subscriber listening on track '{}' at {}",
-                track_name,
-                cmd_path
-            );
+            // Phase 2: Wait for live data (2s). If a live publisher is sending,
+            // data will arrive within this window.
+            match tokio::time::timeout(Duration::from_secs(2), reader.read()).await {
+                Ok(Ok(Some(data))) => {
+                    // Live publisher detected — forward and continue
+                    tracing::info!(
+                        "MoQ command subscriber active on track '{}' at {}",
+                        track_name,
+                        cmd_path
+                    );
+                    got_data = true;
+                    match write_tx.try_send(data.to_vec()) {
+                        Ok(_) => {
+                            tracing::debug!("MoQ command forwarded ({} bytes)", data.len());
+                        }
+                        Err(mpsc::error::TrySendError::Full(_)) => {}
+                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                            backend_died = true;
+                            break;
+                        }
+                    }
+                }
+                Ok(Ok(None)) | Ok(Err(_)) => {
+                    tracing::debug!("Broadcast ended after drain, trying next...");
+                    continue; // try next broadcast
+                }
+                Err(_) => {
+                    // No live data after 2s — no active publisher on this broadcast
+                    tracing::debug!("No live data after drain (2s), trying next broadcast...");
+                    continue;
+                }
+            }
 
             // Read live commands and forward to backend
             loop {
