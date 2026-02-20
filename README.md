@@ -102,6 +102,20 @@ flowchart TD
 
 ## Getting Started
 
+### One-Liner Deploy
+
+Setup and deploy all hardware on a fresh NVIDIA Linux machine:
+
+```bash
+# Install deps + build + deploy all detected hardware as systemd services
+bash scripts/setup-nvidia-server.sh && bash scripts/deploy.sh --build --boot
+```
+
+<!-- TODO: Remote one-liner deploy via SSH:
+  curl -sSf https://raw.githubusercontent.com/haixuanTao/wser/main/scripts/setup-nvidia-server.sh | bash
+  curl -sSf https://raw.githubusercontent.com/haixuanTao/wser/main/scripts/deploy.sh | bash -s -- --build --boot
+-->
+
 ### Bridge a camera
 
 Server (on the machine with the camera):
@@ -426,67 +440,46 @@ Clients target macOS, Linux, and Windows. Future: C/C++ bindings via Rust ABI.
 | `realsense`     | Intel RealSense depth camera (Linux server)      |
 | `image`         | Image processing support                         |
 
-### Quick Setup (NVIDIA Linux Server)
+### Quick Setup & Deploy
 
-For a fresh Ubuntu server with an NVIDIA GPU, the setup script installs all dependencies (CUDA toolkit, RealSense SDK, Rust, system libs), clones, and builds:
+#### 1. Setup (install dependencies)
+
+For a fresh Ubuntu server with an NVIDIA GPU:
 
 ```bash
 bash scripts/setup-nvidia-server.sh              # Full setup + build with realsense feature
 bash scripts/setup-nvidia-server.sh --skip-build # Install deps only
 bash scripts/setup-nvidia-server.sh --all-features # Build with all Linux features
+```
 
-# Configure CAN interfaces (auto-detects available interfaces)
+This installs: CUDA toolkit, RealSense SDK, Rust, system libs, and CAN sudoers (if CAN interfaces are detected).
+
+#### 2. Deploy (auto-discover hardware, generate services, start)
+
+```bash
+bash scripts/deploy.sh              # Discover hardware → generate systemd services → start
+bash scripts/deploy.sh --build      # Also build binaries with auto-detected feature flags
+bash scripts/deploy.sh --boot       # Enable start-on-boot (systemd enable + linger)
+bash scripts/deploy.sh --dry-run    # Show what would happen without doing anything
+bash scripts/deploy.sh --status     # Show status of all xoq services + machine.json
+bash scripts/deploy.sh --uninstall  # Stop + disable + remove services (keeps keys)
+```
+
+The deploy script:
+- Auto-discovers CAN interfaces, RealSense cameras, V4L2 cameras, and audio devices
+- Generates per-device systemd services (Linux) or launchd plists (macOS)
+- Uses machine-unique MoQ paths: `anon/<machine-id>/<service>` (e.g., `anon/7e58263812ba/xoq-can-can0`)
+- Writes `~/.config/xoq/machine.json` with all service info
+- Cleans up previous deployment before starting fresh
+
+#### 3. CAN interface setup (manual, if needed)
+
+```bash
 bash scripts/setup-can.sh              # All detected CAN interfaces
 bash scripts/setup-can.sh can0 can1    # Specific interfaces only
 ```
 
-### Prerequisites
-
-#### Intel RealSense SDK (for depth cameras)
-
-```bash
-# Add Intel RealSense repo
-sudo mkdir -p /etc/apt/keyrings
-curl -sSf https://librealsense.intel.com/Debian/librealsense.pgp | sudo tee /etc/apt/keyrings/librealsense.pgp > /dev/null
-echo "deb [signed-by=/etc/apt/keyrings/librealsense.pgp] https://librealsense.intel.com/Debian/apt-repo `lsb_release -cs` main" | \
-  sudo tee /etc/apt/sources.list.d/librealsense.list
-sudo apt update
-
-# Install
-sudo apt install librealsense2-dev librealsense2-utils
-```
-
-#### NVIDIA Video Codec SDK (for NVENC AV1/H.264 encoding)
-
-```bash
-sudo apt install nvidia-cuda-toolkit
-```
-
-The NVENC headers are bundled in `packages/nvidia-video-codec-sdk/`. Requires an NVIDIA GPU with NVENC support (GTX 1650+, RTX 20+ for H.264; RTX 30+ for AV1).
-
-#### CAN Bus Setup (Linux, PCAN USB Pro FD)
-
-```bash
-# 1. Stop the can-server first (it holds stale socket handles)
-systemctl --user stop can-server
-
-# 2. Bring all interfaces down
-sudo ip link set can0 down
-sudo ip link set can1 down
-sudo ip link set can2 down
-sudo ip link set can3 down
-
-# 3. Bring them up: CAN FD (1 Mbps nominal, 5 Mbps data) + auto-restart from BUS-OFF
-sudo ip link set can0 up type can bitrate 1000000 dbitrate 5000000 fd on restart-ms 100
-sudo ip link set can1 up type can bitrate 1000000 dbitrate 5000000 fd on restart-ms 100
-sudo ip link set can2 up type can bitrate 1000000 dbitrate 5000000 fd on restart-ms 100
-sudo ip link set can3 up type can bitrate 1000000 dbitrate 5000000 fd on restart-ms 100
-
-# 4. Start the CAN server
-can-server can0:fd can1:fd --moq-relay https://cdn.1ms.ai
-```
-
-> **Important:** Always stop the can-server before reconfiguring interfaces — otherwise it holds stale sockets and writes fail with "No such device or address". The `restart-ms 100` flag is critical for auto-recovery from BUS-OFF state.
+> **Note:** The deploy script handles CAN setup automatically via systemd `ExecStartPre`. The `setup-can.sh` script is for manual use outside of deploy.
 
 ### License
 

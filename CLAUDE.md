@@ -76,6 +76,21 @@ let data = reader.read_string().await?;
 - `src/moq.rs` — MoqBuilder, MoqPublisher, MoqSubscriber, MoqStream
 - `examples/moq_test.rs` — Simple pub/sub test (`pub`, `sub` modes)
 
+## Iroh P2P Relay
+
+Iroh 0.96.1 defaults to **canary relay infrastructure** (iroh-canary.iroh.link) which is unstable. Use `--iroh-relay` to point at our self-hosted relay instead:
+
+```bash
+# Servers
+can-server can0:fd --moq-relay https://cdn.1ms.ai --iroh-relay https://cdn.1ms.ai:3341
+fake-can-server --iroh-relay https://cdn.1ms.ai:3341
+
+# Python client
+bus = xoq_can.Bus(channel='<server-id>', interface='xoq', iroh_relay='https://cdn.1ms.ai:3341')
+```
+
+Self-hosted iroh-relay runs on `cdn.1ms.ai:3341` (HTTPS with Let's Encrypt TLS). Systemd service: `iroh-relay.service` on `root@46.225.102.32`.
+
 ## CAN Bus Setup
 
 ### DANGER: NEVER Send CAN Commands Without Explicit User Approval

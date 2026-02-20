@@ -120,6 +120,8 @@ pub enum Transport {
     Iroh {
         /// Custom ALPN protocol
         alpn: Option<Vec<u8>>,
+        /// Custom relay URL (None = use default iroh relays)
+        relay_url: Option<String>,
     },
     /// MoQ relay connection
     Moq {
@@ -132,7 +134,10 @@ pub enum Transport {
 
 impl Default for Transport {
     fn default() -> Self {
-        Transport::Iroh { alpn: None }
+        Transport::Iroh {
+            alpn: None,
+            relay_url: None,
+        }
     }
 }
 
@@ -192,14 +197,32 @@ impl CanSocketBuilder {
 
     /// Use iroh P2P transport (default).
     pub fn with_iroh(mut self) -> Self {
-        self.transport = Transport::Iroh { alpn: None };
+        self.transport = Transport::Iroh {
+            alpn: None,
+            relay_url: None,
+        };
         self
     }
 
     /// Set custom ALPN for iroh connection.
     pub fn alpn(mut self, alpn: &[u8]) -> Self {
-        if let Transport::Iroh { alpn: ref mut a } = self.transport {
+        if let Transport::Iroh {
+            alpn: ref mut a, ..
+        } = self.transport
+        {
             *a = Some(alpn.to_vec());
+        }
+        self
+    }
+
+    /// Set custom iroh relay URL (for self-hosted iroh relay).
+    pub fn iroh_relay(mut self, url: &str) -> Self {
+        if let Transport::Iroh {
+            relay_url: ref mut r,
+            ..
+        } = self.transport
+        {
+            *r = Some(url.to_string());
         }
         self
     }
@@ -230,10 +253,13 @@ impl CanSocketBuilder {
         let runtime = tokio::runtime::Runtime::new()?;
 
         let client = match self.transport {
-            Transport::Iroh { alpn } => runtime.block_on(async {
+            Transport::Iroh { alpn, relay_url } => runtime.block_on(async {
                 let mut builder = IrohClientBuilder::new();
                 if let Some(alpn) = alpn {
                     builder = builder.alpn(&alpn);
+                }
+                if let Some(url) = relay_url {
+                    builder = builder.relay_url(url);
                 }
                 let conn = builder.connect_str(&self.server_id).await?;
                 let stream = conn.open_stream().await?;

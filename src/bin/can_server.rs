@@ -24,6 +24,7 @@ struct InterfaceConfig {
     interface: String,
     enable_fd: bool,
     identity_path: PathBuf,
+    iroh_relay: Option<String>,
     moq_relay: Option<String>,
     moq_path: Option<String>,
     moq_insecure: bool,
@@ -39,6 +40,7 @@ fn parse_args() -> Option<(Vec<InterfaceConfig>, PathBuf)> {
 
     let mut interfaces = Vec::new();
     let mut key_dir = PathBuf::from(".");
+    let mut iroh_relay: Option<String> = None;
     let mut moq_relay: Option<String> = None;
     let mut moq_path: Option<String> = None;
     let mut moq_insecure = false;
@@ -54,6 +56,17 @@ fn parse_args() -> Option<(Vec<InterfaceConfig>, PathBuf)> {
                 continue;
             } else {
                 eprintln!("Error: --key-dir requires a path argument");
+                return None;
+            }
+        }
+
+        if arg == "--iroh-relay" {
+            if i + 1 < args.len() {
+                iroh_relay = Some(args[i + 1].clone());
+                i += 2;
+                continue;
+            } else {
+                eprintln!("Error: --iroh-relay requires a URL argument");
                 return None;
             }
         }
@@ -116,6 +129,7 @@ fn parse_args() -> Option<(Vec<InterfaceConfig>, PathBuf)> {
                 interface,
                 enable_fd,
                 identity_path,
+                iroh_relay: iroh_relay.clone(),
                 moq_relay: moq_relay.clone(),
                 moq_path: moq_path.clone(),
                 moq_insecure,
@@ -196,6 +210,7 @@ async fn run_server(config: &InterfaceConfig) -> Result<()> {
         &config.interface,
         config.enable_fd,
         Some(&identity_path_str),
+        config.iroh_relay.as_deref(),
         config.moq_relay.as_deref(),
         config.moq_path.as_deref(),
         config.moq_insecure,

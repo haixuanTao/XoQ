@@ -352,6 +352,7 @@ impl CanServer {
         interface: &str,
         enable_fd: bool,
         identity_path: Option<&str>,
+        iroh_relay_url: Option<&str>,
         moq_relay: Option<&str>,
         moq_path: Option<&str>,
         moq_insecure: bool,
@@ -449,8 +450,15 @@ impl CanServer {
             track_name: "can".to_string(),
         });
 
-        let bridge =
-            BridgeServer::new(identity_path, write_tx, read_rx, moq_rx, moq_config).await?;
+        let bridge = BridgeServer::new(
+            identity_path,
+            iroh_relay_url,
+            write_tx,
+            read_rx,
+            moq_rx,
+            moq_config,
+        )
+        .await?;
 
         Ok(Self {
             interface: interface.to_string(),

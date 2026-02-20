@@ -201,8 +201,9 @@ impl Bus {
     ///     timeout: Default receive timeout in seconds (None for blocking)
     ///     relay: MoQ relay URL (default: https://cdn.moq.dev). Only used for MoQ paths.
     ///     insecure: Disable TLS verification for self-signed certs (default: False)
+    ///     iroh_relay: Custom iroh relay URL (default: use iroh's public relays)
     #[new]
-    #[pyo3(signature = (channel=None, interface=None, bitrate=None, data_bitrate=None, receive_own_messages=false, fd=false, timeout=None, relay=None, insecure=true, **kwargs))]
+    #[pyo3(signature = (channel=None, interface=None, bitrate=None, data_bitrate=None, receive_own_messages=false, fd=false, timeout=None, relay=None, insecure=true, iroh_relay=None, **kwargs))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         channel: Option<&str>,
@@ -214,6 +215,7 @@ impl Bus {
         timeout: Option<f64>,
         relay: Option<&str>,
         insecure: bool,
+        iroh_relay: Option<&str>,
         kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<Self> {
         // These parameters are accepted for python-can compatibility but ignored for remote connections
@@ -257,6 +259,7 @@ impl Bus {
                 )
             };
         // Run open() in a dedicated thread since it creates its own tokio runtime
+        let iroh_relay_str = iroh_relay.map(|s| s.to_string());
         let socket = run_in_thread(move || {
             let mut builder = xoq::socketcan::new(&channel_str);
             if fd {
@@ -267,6 +270,9 @@ impl Bus {
             }
             if is_moq {
                 builder = builder.with_moq(&relay_str).insecure(insecure);
+            }
+            if let Some(ref url) = iroh_relay_str {
+                builder = builder.iroh_relay(url);
             }
             builder
                 .open()
