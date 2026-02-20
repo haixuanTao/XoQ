@@ -156,7 +156,7 @@ discover_can() {
         [ -e "$iface" ] || continue
         interfaces+=("$(basename "$iface")")
     done
-    echo "${interfaces[@]}"
+    echo "${interfaces[*]:-}"
 }
 
 discover_realsense() {
@@ -181,7 +181,7 @@ discover_realsense() {
         fi
     fi
 
-    echo "${serials[@]}"
+    echo "${serials[*]:-}"
 }
 
 discover_cameras() {
@@ -213,7 +213,7 @@ discover_v4l2_cameras() {
 
         cameras+=("$idx")
     done
-    echo "${cameras[@]}"
+    echo "${cameras[*]:-}"
 }
 
 discover_macos_cameras() {
@@ -227,7 +227,7 @@ discover_macos_cameras() {
     for (( i=0; i<count; i++ )); do
         cameras+=("$i")
     done
-    echo "${cameras[@]}"
+    echo "${cameras[*]:-}"
 }
 
 discover_audio() {
@@ -295,6 +295,7 @@ do_build() {
     if [ ${#can_ifaces[@]} -gt 0 ] && [ -n "${can_ifaces[0]:-}" ]; then
         features+=("can")
         bins+=("can-server")
+        bins+=("fake-can-server")
     fi
 
     if [ ${#rs_serials[@]} -gt 0 ] && [ -n "${rs_serials[0]:-}" ]; then
@@ -486,6 +487,26 @@ WantedBy=xoq.target
 UNIT
 }
 
+generate_fake_can_template() {
+    cat > "${XOQ_SYSTEMD_DIR}/xoq-fake-can@.service" <<UNIT
+[Unit]
+Description=XoQ Fake CAN Server (%i)
+PartOf=xoq.target
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+[Service]
+Type=simple
+ExecStart=${BIN_DIR}/fake-can-server --key-dir ${XOQ_KEY_DIR} --moq-relay ${XOQ_RELAY} --moq-path anon/${XOQ_MACHINE_ID}/xoq-can-%i-test
+Restart=always
+RestartSec=5
+Environment=RUST_LOG=xoq=info,warn
+
+[Install]
+WantedBy=xoq.target
+UNIT
+}
+
 generate_realsense_template() {
     cat > "${XOQ_SYSTEMD_DIR}/xoq-realsense@.service" <<UNIT
 [Unit]
@@ -632,17 +653,25 @@ setup_can_sudo() {
 extract_node_id() {
     local label="$1"
     local node_id=""
+    local attempts=0
 
-    if [ "$PLATFORM" = "linux" ]; then
-        node_id=$(journalctl --user -u "$label" --since "60s ago" --no-pager -o cat 2>/dev/null \
-            | grep -oP 'Server ID: \K\S+' | tail -1 || true)
-    else
-        # macOS: check log file
-        local log_file="${XOQ_CONFIG_DIR}/logs/${label}.log"
-        if [ -f "$log_file" ]; then
-            node_id=$(tail -50 "$log_file" 2>/dev/null | grep -oE 'Server ID: [^ ]+' | tail -1 | sed 's/Server ID: //' || true)
+    # Retry up to 6 times (total ~15s) — services may take a moment to log their ID
+    while [ $attempts -lt 6 ] && [ -z "$node_id" ]; do
+        if [ "$PLATFORM" = "linux" ]; then
+            node_id=$(journalctl --user -u "$label" --since "120s ago" --no-pager -o cat 2>/dev/null \
+                | grep -oP '(?:Server ID|bridge server running\. ID): \K\S+' | tail -1 || true)
+        else
+            # macOS: check log file
+            local log_file="${XOQ_CONFIG_DIR}/logs/${label}.log"
+            if [ -f "$log_file" ]; then
+                node_id=$(tail -100 "$log_file" 2>/dev/null | grep -oE '(Server ID|bridge server running\. ID): [^ ]+' | tail -1 | sed 's/.*ID: //' || true)
+            fi
         fi
-    fi
+        if [ -z "$node_id" ]; then
+            attempts=$((attempts + 1))
+            [ $attempts -lt 6 ] && sleep 2
+        fi
+    done
 
     if [ -z "$node_id" ]; then
         echo "pending"
@@ -668,10 +697,10 @@ generate_machine_json() {
     json+="\"generated_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\","
     json+="\"services\":{"
 
-    # CAN
+    # CAN (real)
     json+="\"can\":["
     local first=true
-    for iface in "${can_ifaces[@]}"; do
+    for iface in "${can_ifaces[@]+"${can_ifaces[@]}"}"; do
         [ -z "$iface" ] && continue
         local unit="xoq-can@${iface}.service"
         local node_id
@@ -685,10 +714,28 @@ generate_machine_json() {
     done
     json+="],"
 
+    # Fake CAN (simulated motors, mirrors discovered interfaces)
+    local discovered_can=(${5:-})
+    json+="\"fake_can\":["
+    first=true
+    for iface in "${discovered_can[@]+"${discovered_can[@]}"}"; do
+        [ -z "$iface" ] && continue
+        local unit="xoq-fake-can@${iface}.service"
+        local node_id
+        node_id=$(extract_node_id "$unit")
+        $first || json+=","
+        first=false
+        json+="{\"interface\":\"${iface}\","
+        json+="\"moq_path\":\"anon/${XOQ_MACHINE_ID}/xoq-can-${iface}-test\","
+        json+="\"iroh_node_id\":\"${node_id}\","
+        json+="\"unit\":\"${unit}\"}"
+    done
+    json+="],"
+
     # RealSense
     json+="\"realsense\":["
     first=true
-    for serial in "${rs_serials[@]}"; do
+    for serial in "${rs_serials[@]+"${rs_serials[@]}"}"; do
         [ -z "$serial" ] && continue
         local label
         if [ "$PLATFORM" = "linux" ]; then
@@ -707,7 +754,7 @@ generate_machine_json() {
     # Cameras
     json+="\"cameras\":["
     first=true
-    for idx in "${cam_indices[@]}"; do
+    for idx in "${cam_indices[@]+"${cam_indices[@]}"}"; do
         [ -z "$idx" ] && continue
         local label
         if [ "$PLATFORM" = "linux" ]; then
@@ -751,9 +798,9 @@ generate_machine_json() {
 # Deploy — Linux (systemd)
 # ============================================================================
 deploy_linux() {
-    local can_ifaces=("${CAN_IFACES[@]}")
-    local rs_serials=("${RS_SERIALS[@]}")
-    local cam_indices=("${CAM_INDICES[@]}")
+    local can_ifaces=("${CAN_IFACES[@]+"${CAN_IFACES[@]}"}")
+    local rs_serials=("${RS_SERIALS[@]+"${RS_SERIALS[@]}"}")
+    local cam_indices=("${CAM_INDICES[@]+"${CAM_INDICES[@]}"}")
 
     # --- CAN sudo setup ---
     if [ ${#can_ifaces[@]} -gt 0 ]; then
@@ -761,7 +808,7 @@ deploy_linux() {
         if setup_can_sudo; then
             ok "Passwordless sudo for ip link: available"
         else
-            warn "Skipping CAN services (no sudo access)."
+            warn "Skipping real CAN services (no sudo access). Fake CAN will still be deployed."
             can_ifaces=()
             CAN_IFACES=()
         fi
@@ -808,6 +855,11 @@ deploy_linux() {
         ok "xoq-can@.service"
     fi
 
+    if [ ${#DISCOVERED_CAN[@]} -gt 0 ]; then
+        generate_fake_can_template
+        ok "xoq-fake-can@.service (simulated motors)"
+    fi
+
     if [ ${#rs_serials[@]} -gt 0 ]; then
         generate_realsense_template
         ok "xoq-realsense@.service"
@@ -834,19 +886,26 @@ deploy_linux() {
         systemctl --user enable xoq.target
     fi
 
-    for iface in "${can_ifaces[@]}"; do
+    for iface in "${can_ifaces[@]+"${can_ifaces[@]}"}"; do
         [ "$ENABLE_BOOT" = true ] && systemctl --user enable "xoq-can@${iface}.service"
         systemctl --user restart "xoq-can@${iface}.service"
         ok "Started xoq-can@${iface}.service"
     done
 
-    for serial in "${rs_serials[@]}"; do
+    for iface in "${DISCOVERED_CAN[@]+"${DISCOVERED_CAN[@]}"}"; do
+        [ -z "$iface" ] && continue
+        [ "$ENABLE_BOOT" = true ] && systemctl --user enable "xoq-fake-can@${iface}.service"
+        systemctl --user restart "xoq-fake-can@${iface}.service"
+        ok "Started xoq-fake-can@${iface}.service"
+    done
+
+    for serial in "${rs_serials[@]+"${rs_serials[@]}"}"; do
         [ "$ENABLE_BOOT" = true ] && systemctl --user enable "xoq-realsense@${serial}.service"
         systemctl --user restart "xoq-realsense@${serial}.service"
         ok "Started xoq-realsense@${serial}.service"
     done
 
-    for idx in "${cam_indices[@]}"; do
+    for idx in "${cam_indices[@]+"${cam_indices[@]}"}"; do
         [ "$ENABLE_BOOT" = true ] && systemctl --user enable "xoq-camera@${idx}.service"
         systemctl --user restart "xoq-camera@${idx}.service"
         ok "Started xoq-camera@${idx}.service"
@@ -869,8 +928,8 @@ deploy_linux() {
 # Deploy — macOS (launchd)
 # ============================================================================
 deploy_macos() {
-    local rs_serials=("${RS_SERIALS[@]}")
-    local cam_indices=("${CAM_INDICES[@]}")
+    local rs_serials=("${RS_SERIALS[@]+"${RS_SERIALS[@]}"}")
+    local cam_indices=("${CAM_INDICES[@]+"${CAM_INDICES[@]}"}")
 
     # --- Stop and clean up previous deployment ---
     header "Cleaning Previous Deployment"
@@ -907,7 +966,7 @@ deploy_macos() {
 
     # --- Generate launchd plists ---
 
-    for serial in "${rs_serials[@]}"; do
+    for serial in "${rs_serials[@]+"${rs_serials[@]}"}"; do
         local label="com.xoq.realsense-${serial}"
         generate_launchd_plist "$plist_dir" "$label" \
             "${BIN_DIR}/realsense-server" \
@@ -917,7 +976,7 @@ deploy_macos() {
         ok "${label}"
     done
 
-    for idx in "${cam_indices[@]}"; do
+    for idx in "${cam_indices[@]+"${cam_indices[@]}"}"; do
         local label="com.xoq.camera-${idx}"
         generate_launchd_plist "$plist_dir" "$label" \
             "${BIN_DIR}/camera-server" \
@@ -965,6 +1024,23 @@ do_deploy() {
     echo "Relay:      ${XOQ_RELAY}"
     echo "Key dir:    ${XOQ_KEY_DIR}"
 
+    # --- Stop existing services so hardware is not locked during discovery ---
+    if [ "$PLATFORM" = "linux" ]; then
+        systemctl --user stop xoq.target 2>/dev/null || true
+        for running in $(systemctl --user list-units --no-legend 'xoq-*' 2>/dev/null | awk '{print $1}'); do
+            systemctl --user stop "$running" 2>/dev/null || true
+        done
+    elif [ "$PLATFORM" = "macos" ]; then
+        for dir in "${XOQ_AGENTS_DIR}" "${XOQ_LAUNCHD_DIR}"; do
+            for plist in "${dir}"/com.xoq.*.plist; do
+                [ -f "$plist" ] || continue
+                local label
+                label=$(basename "$plist" .plist)
+                launchctl bootout "gui/$(id -u)/${label}" 2>/dev/null || true
+            done
+        done
+    fi
+
     # --- Discover hardware ---
     header "Hardware Discovery"
 
@@ -979,6 +1055,8 @@ do_deploy() {
         info "No CAN interfaces found"
         CAN_IFACES=()
     fi
+    # Save discovered interfaces for fake-can (deployed regardless of sudo)
+    DISCOVERED_CAN=("${CAN_IFACES[@]+"${CAN_IFACES[@]}"}")
 
     if [ ${#RS_SERIALS[@]} -gt 0 ] && [ -n "${RS_SERIALS[0]:-}" ]; then
         ok "RealSense cameras: ${RS_SERIALS[*]}"
@@ -1015,17 +1093,21 @@ do_deploy() {
     if [ "$DRY_RUN" = true ]; then
         # --- Plan summary ---
         header "Planned Services"
-        for iface in "${CAN_IFACES[@]}"; do
+        for iface in "${CAN_IFACES[@]+"${CAN_IFACES[@]}"}"; do
             echo "  xoq-can@${iface}.service → anon/${XOQ_MACHINE_ID}/xoq-can-${iface}"
         done
-        for serial in "${RS_SERIALS[@]}"; do
+        for iface in "${DISCOVERED_CAN[@]+"${DISCOVERED_CAN[@]}"}"; do
+            [ -z "$iface" ] && continue
+            echo "  xoq-fake-can@${iface}.service → anon/${XOQ_MACHINE_ID}/xoq-can-${iface}-test"
+        done
+        for serial in "${RS_SERIALS[@]+"${RS_SERIALS[@]}"}"; do
             if [ "$PLATFORM" = "linux" ]; then
                 echo "  xoq-realsense@${serial}.service → anon/${XOQ_MACHINE_ID}/realsense-${serial}"
             else
                 echo "  com.xoq.realsense-${serial} → anon/${XOQ_MACHINE_ID}/realsense-${serial}"
             fi
         done
-        for idx in "${CAM_INDICES[@]}"; do
+        for idx in "${CAM_INDICES[@]+"${CAM_INDICES[@]}"}"; do
             if [ "$PLATFORM" = "linux" ]; then
                 echo "  xoq-camera@${idx}.service → anon/${XOQ_MACHINE_ID}/camera-${idx}"
             else
@@ -1051,6 +1133,10 @@ do_deploy() {
     if [ ${#CAN_IFACES[@]} -gt 0 ]; then
         local bin; bin=$(find_bin can-server)
         if [ -n "$bin" ]; then ok "can-server: ${bin}"; else err "can-server not found"; missing=true; fi
+    fi
+    if [ ${#DISCOVERED_CAN[@]} -gt 0 ] && [ -n "${DISCOVERED_CAN[0]:-}" ]; then
+        local bin; bin=$(find_bin fake-can-server)
+        if [ -n "$bin" ]; then ok "fake-can-server: ${bin}"; else err "fake-can-server not found"; missing=true; fi
     fi
     if [ ${#RS_SERIALS[@]} -gt 0 ]; then
         local bin; bin=$(find_bin realsense-server)
@@ -1086,7 +1172,8 @@ do_deploy() {
         "${CAN_IFACES[*]}" \
         "${RS_SERIALS[*]}" \
         "${CAM_INDICES[*]}" \
-        "$HAS_AUDIO"
+        "$HAS_AUDIO" \
+        "${DISCOVERED_CAN[*]}"
 
     ok "machine.json written to ${XOQ_CONFIG_DIR}/machine.json"
     echo ""
@@ -1111,13 +1198,29 @@ do_json() {
     [ ${#RS_SERIALS[@]} -gt 0 ] && [ -z "${RS_SERIALS[0]:-}" ] && RS_SERIALS=()
     [ ${#CAM_INDICES[@]} -gt 0 ] && [ -z "${CAM_INDICES[0]:-}" ] && CAM_INDICES=()
 
+    # Fallback: if hardware discovery missed devices (e.g. busy), check running services
+    if [ "$PLATFORM" = "linux" ] && [ ${#RS_SERIALS[@]} -eq 0 ]; then
+        while IFS= read -r unit; do
+            local serial="${unit#xoq-realsense@}"
+            serial="${serial%.service}"
+            [ -n "$serial" ] && RS_SERIALS+=("$serial")
+        done < <(systemctl --user list-units --no-legend 'xoq-realsense@*' 2>/dev/null | awk '{print $1}')
+        if [ ${#RS_SERIALS[@]} -gt 0 ]; then
+            info "RealSense discovered from running services: ${RS_SERIALS[*]}"
+        fi
+    fi
+
+    # For --json mode, DISCOVERED_CAN is the same as CAN_IFACES (no sudo filtering)
+    DISCOVERED_CAN=("${CAN_IFACES[@]+"${CAN_IFACES[@]}"}")
+
     mkdir -p "${XOQ_CONFIG_DIR}"
 
     generate_machine_json \
         "${CAN_IFACES[*]}" \
         "${RS_SERIALS[*]}" \
         "${CAM_INDICES[*]}" \
-        "$HAS_AUDIO"
+        "$HAS_AUDIO" \
+        "${DISCOVERED_CAN[*]}"
 
     ok "machine.json written to ${XOQ_CONFIG_DIR}/machine.json"
     cat "${XOQ_CONFIG_DIR}/machine.json"

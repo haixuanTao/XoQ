@@ -508,8 +508,12 @@ async fn moq_command_subscriber(
         let _cmd_sub = cmd_sub; // keep alive while reading
 
         loop {
-            match cmd_reader.read().await {
-                Ok(Some(data)) => match write_tx.try_send(data.to_vec()) {
+            // Timeout reads to detect stale/phantom broadcasts cached by the relay.
+            // If no data arrives within 10s, assume the subscription is stale and reconnect.
+            // This handles the case where the relay cached a broadcast from a previous
+            // publisher session that no longer exists.
+            match tokio::time::timeout(Duration::from_secs(10), cmd_reader.read()).await {
+                Ok(Ok(Some(data))) => match write_tx.try_send(data.to_vec()) {
                     Ok(_) => {
                         tracing::debug!("MoQ command forwarded to backend");
                     }
@@ -521,12 +525,18 @@ async fn moq_command_subscriber(
                         return Ok(());
                     }
                 },
-                Ok(None) => {
+                Ok(Ok(None)) => {
                     tracing::info!("MoQ command stream ended, will reconnect...");
                     break;
                 }
-                Err(e) => {
-                    tracing::debug!("MoQ command read error: {}, will reconnect...", e);
+                Ok(Err(e)) => {
+                    tracing::info!("MoQ command read error: {}, will reconnect...", e);
+                    break;
+                }
+                Err(_) => {
+                    tracing::info!(
+                        "MoQ command read timeout (stale subscription?), will reconnect..."
+                    );
                     break;
                 }
             }
