@@ -165,8 +165,8 @@ fn parse_args() -> Args {
         serial: None,
         width: 1280,
         height: 720,
-        fps: 30,
-        color_bitrate: 4_000_000,
+        fps: 15,
+        color_bitrate: 2_000_000,
         depth_qp: 10,
         insecure: false,
     };
@@ -196,11 +196,11 @@ fn parse_args() -> Args {
                 i += 2;
             }
             "--fps" if i + 1 < args.len() => {
-                result.fps = args[i + 1].parse().unwrap_or(30);
+                result.fps = args[i + 1].parse().unwrap_or(15);
                 i += 2;
             }
             "--bitrate" if i + 1 < args.len() => {
-                result.color_bitrate = args[i + 1].parse().unwrap_or(4_000_000);
+                result.color_bitrate = args[i + 1].parse().unwrap_or(2_000_000);
                 i += 2;
             }
             "--depth-qp" if i + 1 < args.len() => {
@@ -234,8 +234,8 @@ fn print_usage() {
     println!("  --path <path>           MoQ broadcast path (default: anon/realsense)");
     println!("  --width <px>            Resolution width (default: 1280)");
     println!("  --height <px>           Resolution height (default: 720)");
-    println!("  --fps <rate>            Framerate (default: 30)");
-    println!("  --bitrate <bps>         AV1 color bitrate (default: 4000000)");
+    println!("  --fps <rate>            Framerate (default: 15)");
+    println!("  --bitrate <bps>         AV1 color bitrate (default: 2000000)");
     println!("  --depth-qp <qp>        AV1 depth QP (0=lossless, 20=high quality, default: 20)");
     println!("  --serial <serial>       RealSense serial number (default: first device)");
     println!("  --insecure              Disable TLS verification");
@@ -437,12 +437,13 @@ async fn main() -> Result<()> {
         moq_delay = std::time::Duration::from_secs(1); // reset backoff on success
 
         // Fresh muxers + init segments so new subscribers get clean state on reconnect
+        let frag_ms = 1000 / args.fps;
         let mut color_muxer = Av1CmafMuxer::new(CmafConfig {
-            fragment_duration_ms: 33,
+            fragment_duration_ms: frag_ms,
             timescale: 90000,
         });
         let mut depth_muxer = Av1CmafMuxer::new(CmafConfig {
-            fragment_duration_ms: 33,
+            fragment_duration_ms: frag_ms,
             timescale: 90000,
         });
         depth_muxer.set_high_bitdepth(true);
