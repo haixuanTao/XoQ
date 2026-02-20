@@ -529,12 +529,14 @@ async fn moq_command_subscriber(
         tokio::pin!(timeout);
 
         let mut backend_died = false;
+        let mut err_count = 0u32;
         loop {
             tokio::select! {
                 // Read data from current broadcast (disabled when reader ended)
                 read_result = reader.read(), if reader_alive => {
                     match read_result {
                         Ok(Some(data)) => {
+                            err_count = 0;
                             timeout.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(30));
                             match write_tx.try_send(data.to_vec()) {
                                 Ok(_) => {
@@ -558,17 +560,21 @@ async fn moq_command_subscriber(
                             reader_alive = false;
                         }
                         Err(e) => {
-                            // Read error (e.g. burst-induced group pruning).
-                            // Re-subscribe to the same broadcast — if it's still alive
-                            // (burst case), the new reader picks up from the latest group.
-                            // If the broadcast is dead (publisher disconnected), the new
-                            // reader returns Ok(None) on the next iteration, falling into
-                            // the reannounce-wait path above.
-                            tracing::info!("MoQ command read error: {}, re-subscribing...", e);
-                            reader = MoqTrackReader::from_track(
-                                current_broadcast.subscribe_track(&Track::new(track_name)),
-                            );
-                            timeout.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(30));
+                            err_count += 1;
+                            if err_count <= 3 {
+                                // Read error — try re-subscribing to same broadcast.
+                                // Works for burst recovery (broadcast still alive).
+                                tracing::info!("MoQ command read error: {}, re-subscribing ({}/3)...", e, err_count);
+                                reader = MoqTrackReader::from_track(
+                                    current_broadcast.subscribe_track(&Track::new(track_name)),
+                                );
+                            } else {
+                                // Broadcast is dead (re-subscribe keeps failing).
+                                // Disable reader and wait for reannounce.
+                                tracing::info!("MoQ command read error: {}, waiting for reannounce...", e);
+                                reader_alive = false;
+                                err_count = 0;
+                            }
                         }
                     }
                 }
