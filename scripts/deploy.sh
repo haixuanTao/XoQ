@@ -466,6 +466,7 @@ EOF
 }
 
 generate_can_template() {
+    local has_sudo="$1"
     cat > "${XOQ_SYSTEMD_DIR}/xoq-can@.service" <<UNIT
 [Unit]
 Description=XoQ CAN Server (%i)
@@ -475,12 +476,14 @@ StartLimitBurst=10
 
 [Service]
 Type=simple
-ExecStartPre=-/usr/bin/sudo /usr/sbin/ip link set %i down
-ExecStartPre=/usr/bin/sudo /usr/sbin/ip link set %i up type can bitrate 1000000 dbitrate 5000000 fd on restart-ms 100
+$(if [ "$has_sudo" = "true" ]; then
+    echo "ExecStartPre=-/usr/bin/sudo /usr/sbin/ip link set %i down"
+    echo "ExecStartPre=/usr/bin/sudo /usr/sbin/ip link set %i up type can bitrate 1000000 dbitrate 5000000 fd on restart-ms 100"
+fi)
 ExecStart=${BIN_DIR}/can-server %i:fd --key-dir ${XOQ_KEY_DIR} --moq-relay ${XOQ_RELAY} --moq-path anon/${XOQ_MACHINE_ID}/xoq-can-%i
 Restart=always
 RestartSec=5
-Environment=RUST_LOG=xoq=info,warn
+Environment=RUST_LOG=xoq=info,warn,netlink_packet_route=error,netlink_packet_route=error
 
 [Install]
 WantedBy=xoq.target
@@ -500,7 +503,7 @@ Type=simple
 ExecStart=${BIN_DIR}/fake-can-server --key-dir ${XOQ_KEY_DIR} --moq-relay ${XOQ_RELAY} --moq-path anon/${XOQ_MACHINE_ID}/xoq-can-%i-test
 Restart=always
 RestartSec=5
-Environment=RUST_LOG=xoq=info,warn
+Environment=RUST_LOG=xoq=info,warn,netlink_packet_route=error
 
 [Install]
 WantedBy=xoq.target
@@ -520,7 +523,7 @@ Type=simple
 ExecStart=${BIN_DIR}/realsense-server --relay ${XOQ_RELAY} --path anon/${XOQ_MACHINE_ID}/realsense-%i --serial %i
 Restart=always
 RestartSec=5
-Environment=RUST_LOG=xoq=info,warn
+Environment=RUST_LOG=xoq=info,warn,netlink_packet_route=error
 
 [Install]
 WantedBy=xoq.target
@@ -540,7 +543,7 @@ Type=simple
 ExecStart=${BIN_DIR}/camera-server %i --key-dir ${XOQ_KEY_DIR} --moq anon/${XOQ_MACHINE_ID}/camera-%i --relay ${XOQ_RELAY} --insecure
 Restart=always
 RestartSec=5
-Environment=RUST_LOG=xoq=info,warn
+Environment=RUST_LOG=xoq=info,warn,netlink_packet_route=error
 
 [Install]
 WantedBy=xoq.target
@@ -560,7 +563,7 @@ Type=simple
 ExecStart=${BIN_DIR}/audio-server --identity ${XOQ_KEY_DIR}/.xoq_audio_server_key --moq anon/${XOQ_MACHINE_ID}/audio
 Restart=always
 RestartSec=5
-Environment=RUST_LOG=xoq=info,warn
+Environment=RUST_LOG=xoq=info,warn,netlink_packet_route=error
 
 [Install]
 WantedBy=xoq.target
@@ -803,14 +806,14 @@ deploy_linux() {
     local cam_indices=("${CAM_INDICES[@]+"${CAM_INDICES[@]}"}")
 
     # --- CAN sudo setup ---
+    local can_has_sudo=false
     if [ ${#can_ifaces[@]} -gt 0 ]; then
         header "CAN Setup"
         if setup_can_sudo; then
             ok "Passwordless sudo for ip link: available"
+            can_has_sudo=true
         else
-            warn "Skipping real CAN services (no sudo access). Fake CAN will still be deployed."
-            can_ifaces=()
-            CAN_IFACES=()
+            warn "No sudo access — CAN services will start without interface setup (assumes interfaces are already UP)"
         fi
     fi
 
@@ -851,8 +854,8 @@ deploy_linux() {
     ok "xoq.target"
 
     if [ ${#can_ifaces[@]} -gt 0 ]; then
-        generate_can_template
-        ok "xoq-can@.service"
+        generate_can_template "$can_has_sudo"
+        ok "xoq-can@.service$([ "$can_has_sudo" = false ] && echo ' (no sudo — skipping interface setup)')"
     fi
 
     if [ ${#DISCOVERED_CAN[@]} -gt 0 ]; then
