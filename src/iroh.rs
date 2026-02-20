@@ -118,6 +118,7 @@ pub struct IrohServerBuilder {
     key_path: Option<PathBuf>,
     secret_key: Option<SecretKey>,
     alpn: Vec<u8>,
+    relay_url: Option<String>,
 }
 
 impl IrohServerBuilder {
@@ -127,6 +128,7 @@ impl IrohServerBuilder {
             key_path: None,
             secret_key: None,
             alpn: DEFAULT_ALPN.to_vec(),
+            relay_url: None,
         }
     }
 
@@ -148,6 +150,12 @@ impl IrohServerBuilder {
         self
     }
 
+    /// Use a custom relay URL instead of the default iroh relays.
+    pub fn relay_url(mut self, url: impl Into<String>) -> Self {
+        self.relay_url = Some(url.into());
+        self
+    }
+
     /// Build and start the server
     pub async fn bind(self) -> Result<IrohServer> {
         let secret_key = match (self.secret_key, self.key_path) {
@@ -156,17 +164,32 @@ impl IrohServerBuilder {
             (None, None) => SecretKey::generate(&mut rand::rng()),
         };
 
+        let relay_mode = match &self.relay_url {
+            Some(url) => {
+                let relay_url: iroh::RelayUrl = url
+                    .parse()
+                    .map_err(|e| anyhow::anyhow!("Invalid relay URL '{}': {}", url, e))?;
+                tracing::info!("Using custom iroh relay: {}", url);
+                RelayMode::custom([relay_url])
+            }
+            None => RelayMode::Default,
+        };
+
         let endpoint = Endpoint::builder()
             .alpns(vec![self.alpn])
             .secret_key(secret_key)
-            .relay_mode(RelayMode::Default)
+            .relay_mode(relay_mode)
             .transport_config(low_latency_transport_config())
             .bind()
             .await?;
 
-        // Wait for relay registration so remote clients can discover us via NAT traversal
-        endpoint.online().await;
-        tracing::info!("Iroh server: relay enabled, low-latency transport config active");
+        // Wait for relay registration (with timeout — don't block forever if relay is down)
+        match tokio::time::timeout(Duration::from_secs(5), endpoint.online()).await {
+            Ok(_) => {
+                tracing::info!("Iroh server: relay connected, low-latency transport config active")
+            }
+            Err(_) => tracing::warn!("Iroh server: relay timeout (5s), starting without relay"),
+        }
 
         Ok(IrohServer { endpoint })
     }
@@ -181,6 +204,7 @@ impl Default for IrohServerBuilder {
 /// Builder for iroh client (initiates connections)
 pub struct IrohClientBuilder {
     alpn: Vec<u8>,
+    relay_url: Option<String>,
 }
 
 impl IrohClientBuilder {
@@ -188,6 +212,7 @@ impl IrohClientBuilder {
     pub fn new() -> Self {
         Self {
             alpn: DEFAULT_ALPN.to_vec(),
+            relay_url: None,
         }
     }
 
@@ -197,10 +222,27 @@ impl IrohClientBuilder {
         self
     }
 
+    /// Use a custom relay URL instead of the default iroh relays.
+    pub fn relay_url(mut self, url: impl Into<String>) -> Self {
+        self.relay_url = Some(url.into());
+        self
+    }
+
     /// Connect to a server by endpoint ID
     pub async fn connect(self, server_id: PublicKey) -> Result<IrohConnection> {
+        let relay_mode = match &self.relay_url {
+            Some(url) => {
+                let relay_url: iroh::RelayUrl = url
+                    .parse()
+                    .map_err(|e| anyhow::anyhow!("Invalid relay URL '{}': {}", url, e))?;
+                tracing::info!("Using custom iroh relay: {}", url);
+                RelayMode::custom([relay_url])
+            }
+            None => RelayMode::Default,
+        };
+
         let endpoint = Endpoint::builder()
-            .relay_mode(RelayMode::Default)
+            .relay_mode(relay_mode)
             .transport_config(low_latency_transport_config())
             .bind()
             .await?;

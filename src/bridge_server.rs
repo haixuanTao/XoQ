@@ -45,6 +45,7 @@ impl BridgeServer {
     /// - `moq_config`: MoQ configuration (None = disabled)
     pub async fn new(
         identity_path: Option<&str>,
+        iroh_relay_url: Option<&str>,
         write_tx: mpsc::Sender<Vec<u8>>,
         read_rx: mpsc::Receiver<Vec<u8>>,
         moq_read_rx: Option<mpsc::Receiver<Vec<u8>>>,
@@ -53,6 +54,9 @@ impl BridgeServer {
         let mut builder = IrohServerBuilder::new();
         if let Some(path) = identity_path {
             builder = builder.identity_path(path);
+        }
+        if let Some(url) = iroh_relay_url {
+            builder = builder.relay_url(url);
         }
         let server = builder.bind().await?;
         let server_id = server.id().to_string();

@@ -23,6 +23,7 @@ use tokio::sync::mpsc;
 use xoq::bridge_server::{BridgeServer, MoqConfig};
 
 struct Args {
+    iroh_relay: Option<String>,
     moq_relay: Option<String>,
     moq_path: String,
     moq_insecure: bool,
@@ -32,6 +33,7 @@ struct Args {
 fn parse_args() -> Args {
     let args: Vec<String> = std::env::args().collect();
     let mut result = Args {
+        iroh_relay: None,
         moq_relay: None,
         moq_path: "anon/xoq-serial".to_string(),
         moq_insecure: false,
@@ -41,6 +43,10 @@ fn parse_args() -> Args {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "--iroh-relay" if i + 1 < args.len() => {
+                result.iroh_relay = Some(args[i + 1].clone());
+                i += 2;
+            }
             "--moq-relay" if i + 1 < args.len() => {
                 result.moq_relay = Some(args[i + 1].clone());
                 i += 2;
@@ -166,6 +172,7 @@ async fn main() -> Result<()> {
     let identity_path = format!("{}/.xoq_fake_serial_server_key", args.key_dir);
     let bridge = BridgeServer::new(
         Some(&identity_path),
+        args.iroh_relay.as_deref(),
         write_tx,
         read_rx,
         moq_read_rx,

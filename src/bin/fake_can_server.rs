@@ -164,6 +164,7 @@ fn process_command(motors: &Motors, can_id: u32, data: &[u8]) -> Option<Vec<u8>>
 }
 
 struct Args {
+    iroh_relay: Option<String>,
     moq_relay: Option<String>,
     moq_path: String,
     moq_insecure: bool,
@@ -173,6 +174,7 @@ struct Args {
 fn parse_args() -> Args {
     let args: Vec<String> = std::env::args().collect();
     let mut result = Args {
+        iroh_relay: None,
         moq_relay: None,
         moq_path: "anon/xoq-can-can0".to_string(),
         moq_insecure: false,
@@ -182,6 +184,10 @@ fn parse_args() -> Args {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "--iroh-relay" if i + 1 < args.len() => {
+                result.iroh_relay = Some(args[i + 1].clone());
+                i += 2;
+            }
             "--moq-relay" if i + 1 < args.len() => {
                 result.moq_relay = Some(args[i + 1].clone());
                 i += 2;
@@ -242,11 +248,17 @@ async fn motor_sim_task(
     let mut last_moq_positions = [f64::NAN; 8];
 
     while let Some(data) = write_rx.recv().await {
+        tracing::debug!("Motor sim received {} bytes", data.len());
         pending.extend_from_slice(&data);
 
         let mut response_batch = Vec::new();
 
         while let Some((can_id, frame_data, consumed)) = decode_wire_frame(&pending) {
+            tracing::debug!(
+                "Decoded CAN frame: id=0x{:X} data_len={}",
+                can_id,
+                frame_data.len()
+            );
             if let Some(resp) = process_command(&motors, can_id, &frame_data) {
                 response_batch.extend_from_slice(&resp);
             }
@@ -254,6 +266,7 @@ async fn motor_sim_task(
         }
 
         if !response_batch.is_empty() {
+            tracing::debug!("Motor sim sending {} bytes response", response_batch.len());
             // Send response to network (via BridgeServer)
             if read_tx.send(response_batch.clone()).await.is_err() {
                 break;
@@ -338,6 +351,7 @@ async fn main() -> Result<()> {
     let identity_path = format!("{}/.xoq_fake_can_server_key", args.key_dir);
     let bridge = BridgeServer::new(
         Some(&identity_path),
+        args.iroh_relay.as_deref(),
         write_tx,
         read_rx,
         moq_read_rx,

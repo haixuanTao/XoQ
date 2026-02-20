@@ -101,7 +101,7 @@ impl Server {
         });
 
         let bridge =
-            BridgeServer::new(identity_path, write_tx, read_rx, moq_rx, moq_config).await?;
+            BridgeServer::new(identity_path, None, write_tx, read_rx, moq_rx, moq_config).await?;
 
         Ok(Self { bridge })
     }
