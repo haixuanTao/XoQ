@@ -427,9 +427,9 @@ async fn moq_state_publisher(
 /// Uses `try_send()` so iroh commands always have priority.
 /// Automatically reconnects on disconnect.
 ///
-/// Watches for new announcements while reading from the current track,
-/// so when a browser (re)connects and publishes a new broadcast, we switch
-/// to it immediately instead of waiting for a read timeout.
+/// Uses a simple connect-subscribe-read loop. Each iteration creates a fresh
+/// connection to the relay, avoiding issues with reannounce-based track switching
+/// where data doesn't flow from reannounced broadcasts (confirmed by testing).
 async fn moq_command_subscriber(
     relay: &str,
     path: &str,
@@ -439,60 +439,59 @@ async fn moq_command_subscriber(
     write_tx: mpsc::Sender<Vec<u8>>,
 ) -> Result<()> {
     use crate::moq::MoqBuilder;
-    use moq_native::moq_lite::Track;
 
-    let builder = MoqBuilder::new().relay(relay);
-    let builder = if insecure {
-        builder.disable_tls_verify()
-    } else {
-        builder
-    };
+    let mut builder = MoqBuilder::new().relay(relay);
+    if insecure {
+        builder = builder.disable_tls_verify();
+    }
 
     let cmd_path = format!("{}/{}", path, command_subpath);
 
     loop {
         tracing::info!("MoQ command subscriber connecting on {}...", cmd_path);
 
-        // Connect at low level so we retain access to origin_consumer for
-        // watching new announcements while reading from the current track.
-        let (mut origin_consumer, _session) = match tokio::time::timeout(
+        // Fresh connection each iteration — this ensures we get the latest broadcast
+        let mut subscriber = match tokio::time::timeout(
             Duration::from_secs(5),
-            cmd_connect_subscriber(&builder, &cmd_path),
+            builder.clone().path(&cmd_path).connect_subscriber(),
         )
         .await
         {
-            Ok(Ok(result)) => result,
+            Ok(Ok(sub)) => sub,
             Ok(Err(e)) => {
                 tracing::warn!("MoQ command subscriber connect error: {}, retrying...", e);
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 continue;
             }
             Err(_) => {
-                tracing::info!(
-                    "MoQ command subscriber connect timeout (no publisher yet?), retrying..."
-                );
+                tracing::info!("MoQ command subscriber connect timeout, retrying...");
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 continue;
             }
         };
 
-        tracing::info!("MoQ command subscriber session established on {}", cmd_path);
-
-        // Get initial broadcast announcement from relay
-        let broadcast = match tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                match origin_consumer.announced().await {
-                    Some((_path, Some(broadcast))) => return Some(broadcast),
-                    Some((_path, None)) => continue, // skip unannounce
-                    None => return None,
-                }
-            }
-        })
+        // Subscribe to the command track (waits for broadcast announcement)
+        let mut reader = match tokio::time::timeout(
+            Duration::from_secs(5),
+            subscriber.subscribe_track(track_name),
+        )
         .await
         {
-            Ok(Some(bc)) => bc,
-            Ok(None) => {
-                tracing::info!("Command origin closed, retrying...");
+            Ok(Ok(Some(r))) => {
+                tracing::info!(
+                    "MoQ command subscriber subscribed to track '{}' on {}",
+                    track_name,
+                    cmd_path
+                );
+                r
+            }
+            Ok(Ok(None)) => {
+                tracing::info!("Command track subscribe returned None, retrying...");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+            Ok(Err(e)) => {
+                tracing::warn!("Command track subscribe error: {}, retrying...", e);
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 continue;
             }
@@ -503,71 +502,32 @@ async fn moq_command_subscriber(
             }
         };
 
-        // Subscribe to the track on this broadcast
-        let track_consumer = broadcast.subscribe_track(&Track::new(track_name));
-        tracing::info!(
-            "MoQ command subscriber subscribed to track '{}' on {}",
-            track_name,
-            cmd_path
-        );
-
-        let mut reader = crate::moq::MoqTrackReader::from_track(track_consumer);
-
-        // Read loop: simultaneously read commands AND watch for new announcements.
-        // When the browser (re)connects and the relay sends a reannounce, we switch
-        // to the new broadcast immediately instead of cycling with timeouts.
-        let backend_died = 'read: loop {
-            tokio::select! {
-                read_result = reader.read() => {
-                    match read_result {
-                        Ok(Some(data)) => match write_tx.try_send(data.to_vec()) {
-                            Ok(_) => {
-                                tracing::debug!("MoQ command forwarded to backend");
-                            }
-                            Err(mpsc::error::TrySendError::Full(_)) => {
-                                tracing::debug!("MoQ command dropped (iroh has priority)");
-                            }
-                            Err(mpsc::error::TrySendError::Closed(_)) => {
-                                tracing::error!("Backend writer died");
-                                break 'read true;
-                            }
-                        },
-                        Ok(None) => {
-                            tracing::info!("MoQ command stream ended, will reconnect...");
-                            break 'read false;
-                        }
-                        Err(e) => {
-                            tracing::info!("MoQ command read error: {}, will reconnect...", e);
-                            break 'read false;
-                        }
+        // Read commands and forward to backend
+        let backend_died = loop {
+            match tokio::time::timeout(Duration::from_secs(10), reader.read()).await {
+                Ok(Ok(Some(data))) => match write_tx.try_send(data.to_vec()) {
+                    Ok(_) => {
+                        tracing::debug!("MoQ command forwarded ({} bytes)", data.len());
                     }
-                }
-                // Watch for new broadcast announcements (reannounce from relay)
-                announce = origin_consumer.announced() => {
-                    match announce {
-                        Some((_path, Some(new_broadcast))) => {
-                            tracing::info!("MoQ command subscriber: new broadcast announced, switching...");
-                            let new_track = new_broadcast.subscribe_track(&Track::new(track_name));
-                            reader = crate::moq::MoqTrackReader::from_track(new_track);
-                            // Continue reading from the new track
-                        }
-                        Some((_path, None)) => {
-                            // Unannounce — old broadcast going away, keep reading
-                            tracing::debug!("MoQ command subscriber: broadcast unannounced");
-                        }
-                        None => {
-                            tracing::info!("MoQ command origin closed, will reconnect...");
-                            break 'read false;
-                        }
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        tracing::debug!("MoQ command dropped (iroh has priority)");
                     }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        tracing::error!("Backend writer died");
+                        break true;
+                    }
+                },
+                Ok(Ok(None)) => {
+                    tracing::info!("MoQ command stream ended, will reconnect...");
+                    break false;
                 }
-                // Timeout: detect stale subscriptions where no data ever arrives
-                // and no reannounce happens (relay cached phantom broadcast)
-                _ = tokio::time::sleep(Duration::from_secs(30)) => {
-                    tracing::info!(
-                        "MoQ command read timeout (stale subscription?), will reconnect..."
-                    );
-                    break 'read false;
+                Ok(Err(e)) => {
+                    tracing::info!("MoQ command read error: {}, will reconnect...", e);
+                    break false;
+                }
+                Err(_) => {
+                    tracing::debug!("MoQ command read timeout (10s), will reconnect...");
+                    break false;
                 }
             }
         };
@@ -578,23 +538,4 @@ async fn moq_command_subscriber(
 
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-}
-
-/// Low-level subscriber connect — returns the origin_consumer for announcement monitoring.
-async fn cmd_connect_subscriber(
-    builder: &crate::moq::MoqBuilder,
-    cmd_path: &str,
-) -> Result<(
-    moq_native::moq_lite::OriginConsumer,
-    moq_native::moq_lite::Session,
-)> {
-    let url = builder.build_url_for_path(cmd_path)?;
-    let client = builder.create_client_public()?;
-    let origin = moq_native::moq_lite::Origin::produce();
-    let session = client
-        .with_consume(origin.producer)
-        .connect(url)
-        .await
-        .map_err(|e| anyhow::anyhow!("MoQ connect error: {}", e))?;
-    Ok((origin.consumer, session))
 }
