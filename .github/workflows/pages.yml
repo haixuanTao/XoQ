@@ -23,7 +23,17 @@ jobs:
         run: npm run build:pages
 
       - name: Add HF Space README
-        run: printf '%s\n' '---' 'title: XoQ Examples' 'emoji: 🤖' 'colorFrom: blue' 'colorTo: green' 'sdk: static' 'pinned: false' '---' > js/dist-pages/README.md
+        run: |
+          cat > js/dist-pages/README.md <<'EOF'
+          ---
+          title: XoQ Examples
+          emoji: 🤖
+          colorFrom: blue
+          colorTo: green
+          sdk: static
+          pinned: false
+          ---
+          EOF
 
       - name: Deploy to Hugging Face Spaces
         env:
