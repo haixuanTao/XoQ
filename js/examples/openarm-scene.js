@@ -49,7 +49,7 @@ export function applyCamPoseFromConfig(group, camCfg) {
 }
 
 // ─── Frustum wireframe ──────────────────────────────
-const DEFAULT_INTRINSICS = { fx: 604.2, fy: 603.5, ppx: 322.7, ppy: 252.7, width: 640, height: 480 };
+const FALLBACK_INTRINSICS = { fx: 920, fy: 920, ppx: 640, ppy: 360, width: 1280, height: 720 };
 const NEAR_M = 0.3, FAR_M = 1.023;
 
 function computeFrustumVerts(intr) {
@@ -63,7 +63,7 @@ function computeFrustumVerts(intr) {
 }
 
 function buildFrustumGeometry(color) {
-  const verts = computeFrustumVerts(DEFAULT_INTRINSICS);
+  const verts = computeFrustumVerts(FALLBACK_INTRINSICS);
   const idx = [0,1, 1,2, 2,3, 3,0, 4,5, 5,6, 6,7, 7,4, 0,4, 1,5, 2,6, 3,7];
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(verts, 3));
@@ -93,6 +93,12 @@ function lerpJointStates(states) {
   for (const s of states) {
     s.angle += (s.targetAngle - s.angle) * LERP_FACTOR;
   }
+}
+
+// ─── Label text with tags ────────────────────────────
+export function labelWithTags(label, tags) {
+  if (!tags || tags.length === 0) return label;
+  return label + " \u00b7 " + tags.join(" \u00b7 ");
 }
 
 // ─── Text label sprite ──────────────────────────────
@@ -210,7 +216,7 @@ export function initScene(config, armConfigs, cameraSplitEl) {
     group.add(buildFrustumGeometry(FRUSTUM_COLORS[i % FRUSTUM_COLORS.length]));
 
     // Label above the camera
-    const label = makeTextSprite(rsCfg.label || ("RS " + (i + 1)), "#ff8c42");
+    const label = makeTextSprite(labelWithTags(rsCfg.label || ("RS " + (i + 1)), rsCfg.tags), "#ff8c42");
     label.position.set(0, 0.06, 0);
     group.add(label);
 
@@ -218,7 +224,7 @@ export function initScene(config, armConfigs, cameraSplitEl) {
 
     // Offscreen canvas for color extraction
     const colorCanvas = document.createElement('canvas');
-    colorCanvas.width = 640; colorCanvas.height = 480;
+    colorCanvas.width = 1280; colorCanvas.height = 720;
     const colorCtx = colorCanvas.getContext('2d', { willReadFrequently: true });
 
     pointClouds.push({ posArr, colArr, geometry, material, points, group, colorCtx });
@@ -272,7 +278,7 @@ export function initScene(config, armConfigs, cameraSplitEl) {
     robotGroups.push(group);
 
     // Label above the arm pair
-    const label = makeTextSprite(pair.label || ("Arm Pair " + (pairIdx + 1)), "#00d4ff");
+    const label = makeTextSprite(labelWithTags(pair.label || ("Arm Pair " + (pairIdx + 1)), pair.tags), "#00d4ff");
     label.position.set(0, 0.85, 0);
     group.add(label);
 

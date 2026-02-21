@@ -221,14 +221,15 @@ async function connectRealSenseOnce(config, appState, cam, path, videoEl, label)
   const videoTrack = broadcast.subscribe("video", 0);
   const trackNames = ['video'];
 
-  async function readTrack(track, handler, name) {
+  async function readTrack(track, handler, name, hasTimestamp = true) {
     while (cam.running) {
       const group = await withTimeout(track.nextGroup(), STALE_MS);
       if (!group) { log(`[${label}] ${name} track ended`); break; }
       while (cam.running) {
         const frame = await withTimeout(group.readFrame(), STALE_MS);
         if (!frame) break;
-        handler(stripTimestamp(new Uint8Array(frame), appState.latency));
+        const bytes = new Uint8Array(frame);
+        handler(hasTimestamp ? stripTimestamp(bytes, appState.latency) : bytes);
       }
     }
   }
@@ -249,12 +250,12 @@ async function connectRealSenseOnce(config, appState, cam, path, videoEl, label)
         if (meta.fx && meta.fy) {
           cam.intrinsics = meta;
           if (!cam._intrinsicsLogged) {
-            log(`[${label}] Intrinsics: ${meta.width}x${meta.height} fx=${meta.fx} fy=${meta.fy}`, 'data', { toast: false });
+            log(`[${label}] Intrinsics: ${meta.width}x${meta.height} fx=${meta.fx} fy=${meta.fy} ppx=${meta.ppx} ppy=${meta.ppy}`, 'data', { toast: false });
             cam._intrinsicsLogged = true;
           }
         }
-      } catch {}
-    }, 'metadata'));
+      } catch (e) { console.warn('metadata parse error:', e); }
+    }, 'metadata', false));
     trackNames.push('metadata');
   }
 

@@ -1,19 +1,27 @@
 //! OpenArm command playback
 //!
 //! Plays back recorded motor commands from a JSON file.
-//! Each entry has a timestamp and base64-encoded CAN wire frames.
+//! Supports two formats:
 //!
-//! JSON format:
+//! **v1** (wire-encoded bundles):
 //! ```json
 //! [
-//!   {"t": 0.0,    "left": "base64...", "right": "base64..."},
-//!   {"t": 0.05,   "left": "base64...", "right": "base64..."},
+//!   {"t": 0.0, "left": "base64...", "right": "base64..."},
 //!   ...
 //! ]
 //! ```
 //!
-//! Each base64 value decodes to one or more wire-encoded CAN frames:
-//!   [1B flags][4B can_id LE][1B data_len][8B data] = 14 bytes per motor
+//! **v2** (per-motor frames):
+//! ```json
+//! {
+//!   "version": 2,
+//!   "metadata": {"arm": "right", ...},
+//!   "commands": [
+//!     {"t": 0.0, "frames": [{"id": "0x01", "data": "base64..."}, ...]},
+//!     ...
+//!   ]
+//! }
+//! ```
 //!
 //! Usage:
 //!   openarm_playback <json-file> [<arm-name> <server-id> ...]
@@ -62,64 +70,114 @@ fn base64_decode(input: &str) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// One frame in the recording.
-struct Frame {
+/// A single CAN frame to send.
+struct CanCmd {
+    can_id: u32,
+    data: Vec<u8>,
+}
+
+/// One timestep in the recording.
+struct Timestep {
     t: f64,
-    /// arm_name -> raw wire-encoded CAN bytes
-    commands: HashMap<String, Vec<u8>>,
+    /// arm_name -> list of CAN frames to send
+    commands: HashMap<String, Vec<CanCmd>>,
 }
 
-/// Parse the JSON recording file.
-/// Format: [{"t": 0.0, "left": "base64...", "right": "base64..."}, ...]
-fn parse_recording(path: &str) -> Result<Vec<Frame>> {
+/// Parse the JSON recording file (auto-detects v1 array or v2 object format).
+fn parse_recording(path: &str) -> Result<Vec<Timestep>> {
     let content = std::fs::read_to_string(path)?;
-
-    // Minimal JSON array-of-objects parser
     let content = content.trim();
-    if !content.starts_with('[') || !content.ends_with(']') {
-        anyhow::bail!("JSON must be an array");
+
+    if content.starts_with('{') {
+        parse_recording_v2(content)
+    } else if content.starts_with('[') {
+        parse_recording_v1(content)
+    } else {
+        anyhow::bail!("JSON must be an array (v1) or object (v2)");
     }
-
-    let mut frames = Vec::new();
-    // Split by objects — find matching braces
-    let inner = &content[1..content.len() - 1];
-    let mut depth = 0;
-    let mut obj_start = None;
-
-    for (i, ch) in inner.char_indices() {
-        match ch {
-            '{' => {
-                if depth == 0 {
-                    obj_start = Some(i);
-                }
-                depth += 1;
-            }
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    if let Some(start) = obj_start {
-                        let obj_str = &inner[start..=i];
-                        frames.push(parse_frame_obj(obj_str)?);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    frames.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap());
-    Ok(frames)
 }
 
-fn parse_frame_obj(s: &str) -> Result<Frame> {
+// ---------------------------------------------------------------------------
+// v2 parser
+// ---------------------------------------------------------------------------
+
+fn parse_recording_v2(content: &str) -> Result<Vec<Timestep>> {
+    let arm_name = extract_string_field(content, "arm").unwrap_or_else(|| "right".to_string());
+
+    let commands_idx = content
+        .find("\"commands\"")
+        .ok_or_else(|| anyhow::anyhow!("v2: missing 'commands' field"))?;
+    let after = &content[commands_idx..];
+    let arr_start = after
+        .find('[')
+        .ok_or_else(|| anyhow::anyhow!("v2: missing commands array"))?;
+    let arr_content = &after[arr_start..];
+
+    let arr_end = find_matching_bracket(arr_content, '[', ']')
+        .ok_or_else(|| anyhow::anyhow!("v2: unterminated commands array"))?;
+    let arr_inner = &arr_content[1..arr_end];
+
+    let mut timesteps = Vec::new();
+    for obj_str in iter_objects(arr_inner) {
+        timesteps.push(parse_v2_command(obj_str, &arm_name)?);
+    }
+
+    timesteps.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap());
+    Ok(timesteps)
+}
+
+fn parse_v2_command(s: &str, arm_name: &str) -> Result<Timestep> {
+    let t = extract_number_field(s, "t").unwrap_or(0.0);
+
+    let frames_idx = s
+        .find("\"frames\"")
+        .ok_or_else(|| anyhow::anyhow!("v2 command: missing 'frames'"))?;
+    let after = &s[frames_idx..];
+    let arr_start = after.find('[').unwrap_or(0);
+    let arr_end = after.rfind(']').unwrap_or(after.len());
+    let arr_inner = &after[arr_start + 1..arr_end];
+
+    let mut can_frames = Vec::new();
+    for frame_str in iter_objects(arr_inner) {
+        let id_str = extract_string_field(frame_str, "id")
+            .ok_or_else(|| anyhow::anyhow!("frame missing 'id'"))?;
+        let data_b64 = extract_string_field(frame_str, "data")
+            .ok_or_else(|| anyhow::anyhow!("frame missing 'data'"))?;
+
+        can_frames.push(CanCmd {
+            can_id: u32::from_str_radix(id_str.trim_start_matches("0x"), 16)?,
+            data: base64_decode(&data_b64)?,
+        });
+    }
+
+    let mut commands = HashMap::new();
+    commands.insert(arm_name.to_string(), can_frames);
+    Ok(Timestep { t, commands })
+}
+
+// ---------------------------------------------------------------------------
+// v1 parser
+// ---------------------------------------------------------------------------
+
+fn parse_recording_v1(content: &str) -> Result<Vec<Timestep>> {
+    let inner = &content[1..content.len() - 1];
+    let mut timesteps = Vec::new();
+
+    for obj_str in iter_objects(inner) {
+        timesteps.push(parse_v1_obj(obj_str)?);
+    }
+
+    timesteps.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap());
+    Ok(timesteps)
+}
+
+fn parse_v1_obj(s: &str) -> Result<Timestep> {
     let inner = s.trim().trim_start_matches('{').trim_end_matches('}');
     let mut t: f64 = 0.0;
     let mut commands = HashMap::new();
 
-    // Parse key-value pairs (simple: split by comma, handle "key": value)
     let mut remaining = inner;
     while !remaining.trim().is_empty() {
-        // Find key
         let key_start = remaining.find('"').unwrap_or(remaining.len());
         if key_start >= remaining.len() {
             break;
@@ -131,14 +189,12 @@ fn parse_frame_obj(s: &str) -> Result<Frame> {
         let key = &after_key_start[..key_end];
         remaining = &after_key_start[key_end + 1..];
 
-        // Skip colon
         let colon = remaining
             .find(':')
             .ok_or_else(|| anyhow::anyhow!("expected colon"))?;
         remaining = remaining[colon + 1..].trim_start();
 
         if key == "t" {
-            // Parse number
             let end = remaining
                 .find(|c: char| c == ',' || c == '}' || c == '\n')
                 .unwrap_or(remaining.len());
@@ -149,7 +205,6 @@ fn parse_frame_obj(s: &str) -> Result<Frame> {
                 ""
             };
         } else {
-            // Parse string value (base64)
             let val_start = remaining
                 .find('"')
                 .ok_or_else(|| anyhow::anyhow!("expected string value"))?;
@@ -160,18 +215,107 @@ fn parse_frame_obj(s: &str) -> Result<Frame> {
             let val = &after_val_start[..val_end];
             remaining = &after_val_start[val_end + 1..];
 
-            // Skip comma if present
             if let Some(comma) = remaining.find(',') {
                 remaining = &remaining[comma + 1..];
             }
 
-            let decoded = base64_decode(val)?;
-            commands.insert(key.to_string(), decoded);
+            // Decode wire-encoded CAN frames
+            let wire = base64_decode(val)?;
+            let mut can_frames = Vec::new();
+            let mut offset = 0;
+            while offset + 6 <= wire.len() {
+                let data_len = wire[offset + 5] as usize;
+                if offset + 6 + data_len > wire.len() {
+                    break;
+                }
+                let can_id = u32::from_le_bytes([
+                    wire[offset + 1],
+                    wire[offset + 2],
+                    wire[offset + 3],
+                    wire[offset + 4],
+                ]);
+                can_frames.push(CanCmd {
+                    can_id,
+                    data: wire[offset + 6..offset + 6 + data_len].to_vec(),
+                });
+                offset += 6 + data_len;
+            }
+            commands.insert(key.to_string(), can_frames);
         }
     }
 
-    Ok(Frame { t, commands })
+    Ok(Timestep { t, commands })
 }
+
+// ---------------------------------------------------------------------------
+// JSON helpers
+// ---------------------------------------------------------------------------
+
+fn extract_string_field(s: &str, key: &str) -> Option<String> {
+    let pattern = format!("\"{}\"", key);
+    let idx = s.find(&pattern)?;
+    let after = &s[idx + pattern.len()..];
+    let quote1 = after.find('"')?;
+    let rest = &after[quote1 + 1..];
+    let quote2 = rest.find('"')?;
+    Some(rest[..quote2].to_string())
+}
+
+fn extract_number_field(s: &str, key: &str) -> Option<f64> {
+    let pattern = format!("\"{}\"", key);
+    let idx = s.find(&pattern)?;
+    let after = &s[idx + pattern.len()..];
+    let colon = after.find(':')?;
+    let rest = after[colon + 1..].trim_start();
+    let end = rest.find(|c: char| c == ',' || c == '}' || c == '\n')?;
+    rest[..end].trim().parse().ok()
+}
+
+fn find_matching_bracket(s: &str, open: char, close: char) -> Option<usize> {
+    let mut depth = 0;
+    for (i, ch) in s.char_indices() {
+        if ch == open {
+            depth += 1;
+        }
+        if ch == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
+fn iter_objects(s: &str) -> Vec<&str> {
+    let mut results = Vec::new();
+    let mut depth = 0;
+    let mut obj_start = None;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '{' => {
+                if depth == 0 {
+                    obj_start = Some(i);
+                }
+                depth += 1;
+            }
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    if let Some(start) = obj_start {
+                        results.push(&s[start..=i]);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    results
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -186,12 +330,7 @@ fn main() -> Result<()> {
     if args.len() < 2 {
         println!("Usage: openarm_playback <json-file> [<arm-name> <server-id> ...]");
         println!();
-        println!("JSON format:");
-        println!(r#"  [{{"t": 0.0, "left": "base64...", "right": "base64..."}}, ...]"#);
-        println!();
-        println!("Each base64 value decodes to wire-encoded CAN frames:");
-        println!("  [1B flags][4B can_id LE][1B data_len][8B data] per motor");
-        println!();
+        println!("Supports v1 (wire-encoded bundles) and v2 (per-motor frames) JSON formats.");
         println!("Default arms: champagne left + right");
         return Ok(());
     }
@@ -225,15 +364,15 @@ fn main() -> Result<()> {
 
     // Parse recording
     println!("Loading {}...", json_path);
-    let frames = parse_recording(json_path)?;
-    if frames.is_empty() {
+    let timesteps = parse_recording(json_path)?;
+    if timesteps.is_empty() {
         println!("No frames in recording.");
         return Ok(());
     }
 
-    let duration = frames.last().unwrap().t - frames.first().unwrap().t;
+    let duration = timesteps.last().unwrap().t - timesteps.first().unwrap().t;
     let arm_names_in_file: Vec<&str> = {
-        let mut names: Vec<&str> = frames
+        let mut names: Vec<&str> = timesteps
             .iter()
             .flat_map(|f| f.commands.keys().map(|k| k.as_str()))
             .collect();
@@ -243,7 +382,7 @@ fn main() -> Result<()> {
     };
     println!(
         "  {} frames, {:.1}s duration, arms: {:?}",
-        frames.len(),
+        timesteps.len(),
         duration,
         arm_names_in_file
     );
@@ -252,7 +391,6 @@ fn main() -> Result<()> {
     println!("Connecting...");
     let mut arms: HashMap<String, socketcan::RemoteCanSocket> = HashMap::new();
     for (name, server_id) in &arm_configs {
-        // Only connect if this arm appears in the recording
         if !arm_names_in_file.contains(&name.as_str()) {
             println!("  {} — skipped (not in recording)", name);
             continue;
@@ -263,7 +401,6 @@ fn main() -> Result<()> {
             .open()
         {
             Ok(mut socket) => {
-                // Use short timeout for reads during playback
                 let _ = socket.set_timeout(Duration::from_millis(100));
                 println!("connected");
                 arms.insert(name.clone(), socket);
@@ -293,58 +430,40 @@ fn main() -> Result<()> {
     // Play back
     println!(
         "\nPlaying {} frames over {:.1}s...\n",
-        frames.len(),
+        timesteps.len(),
         duration
     );
 
     let start = Instant::now();
-    let t_offset = frames[0].t;
+    let t_offset = timesteps[0].t;
     let mut sent = 0usize;
 
-    for frame in &frames {
-        // Wait until the right time
-        let target = Duration::from_secs_f64(frame.t - t_offset);
+    for timestep in &timesteps {
+        let target = Duration::from_secs_f64(timestep.t - t_offset);
         let elapsed = start.elapsed();
         if target > elapsed {
             std::thread::sleep(target - elapsed);
         }
 
-        // Send commands to each arm
-        for (arm_name, data) in &frame.commands {
+        for (arm_name, can_cmds) in &timestep.commands {
             if let Some(socket) = arms.get_mut(arm_name) {
-                // Parse wire frames from the data and send them
-                let mut offset = 0;
-                while offset + 6 <= data.len() {
-                    let data_len = data[offset + 5] as usize;
-                    if offset + 6 + data_len > data.len() {
-                        break;
-                    }
-                    let can_id = u32::from_le_bytes([
-                        data[offset + 1],
-                        data[offset + 2],
-                        data[offset + 3],
-                        data[offset + 4],
-                    ]);
-                    let frame_data = &data[offset + 6..offset + 6 + data_len];
-
-                    if let Ok(can_frame) = socketcan::CanFrame::new(can_id, frame_data) {
+                for cmd in can_cmds {
+                    if let Ok(can_frame) = socketcan::CanFrame::new(cmd.can_id, &cmd.data) {
                         let _ = socket.write_frame(&can_frame);
+                        sent += 1;
                     }
-                    offset += 6 + data_len;
-                    sent += 1;
                 }
                 // Drain responses
                 while socket.read_frame().ok().flatten().is_some() {}
             }
         }
 
-        // Progress
-        let pct = ((frame.t - t_offset) / duration * 100.0) as u32;
+        let pct = ((timestep.t - t_offset) / duration * 100.0) as u32;
         let elapsed = start.elapsed();
         print!(
             "\r  [{:>3}%] t={:.2}s elapsed={:.2}s frames_sent={}",
             pct,
-            frame.t - t_offset,
+            timestep.t - t_offset,
             elapsed.as_secs_f64(),
             sent
         );

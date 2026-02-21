@@ -433,8 +433,8 @@ export class MsePlayer {
   }
 }
 
-// ─── Default intrinsics (fallback when metadata not yet received) ──
-const DEFAULT_INTRINSICS = { fx: 604.2, fy: 603.5, ppx: 322.7, ppy: 252.7, width: 640, height: 480 };
+// ─── Default intrinsics (approximate D435I at 1280x720, used until metadata arrives) ──
+const DEFAULT_INTRINSICS = { fx: 920, fy: 920, ppx: 640, ppy: 360, width: 1280, height: 720 };
 
 // ─── Point cloud update ─────────────────────────────
 export function updatePointCloudGeneric(videoEl, decoder, cCtx, pArr, cArr, geom, intrinsics) {
