@@ -132,6 +132,11 @@ path = "examples/openarm_query.rs"
 required-features = ["can-remote"]
 
 [[example]]
+name = "openarm_playback"
+path = "examples/openarm_playback.rs"
+required-features = ["can-remote"]
+
+[[example]]
 name = "can_benchmark"
 path = "examples/can_benchmark.rs"
 required-features = ["can-remote"]
