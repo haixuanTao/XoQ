@@ -21,11 +21,11 @@ export function defaultConfig() {
     realsense: [
       { id: "rs3", enabled: true, label: "baguette-realsense",
         path: "anon/7e58263812ba/realsense-243222073892",
-        position: {x:0.77,y:0.81,z:1.2}, rotation: {roll:90,pitch:-45,yaw:0},
+        position: {x:0.79,y:0.81,z:1.23}, rotation: {roll:90,pitch:-45,yaw:0},
         showColor: true, pointSize: 2 },
       { id: "rs2", enabled: true, label: "champagne-realsense",
         path: "anon/a13af1d39199/realsense-233522074606",
-        position: {x:-0.28,y:0.7,z:0.28}, rotation: {roll:90,pitch:-45,yaw:0},
+        position: {x:-0.26,y:0.71,z:0.3}, rotation: {roll:90,pitch:-45,yaw:0},
         showColor: true, pointSize: 2 },
     ],
     audio: { enabled: false, path: "anon/openarm-audio" },
@@ -140,6 +140,10 @@ export function loadConfig(opts = {}) {
   }
   if (!cfg.cameras) cfg.cameras = [];
   cfg.cameras.forEach(c => { if (c.enabled === undefined) c.enabled = true; });
+  // Ensure tags arrays exist
+  if (cfg.armPairs) cfg.armPairs.forEach(p => { if (!p.tags) p.tags = []; });
+  if (cfg.realsense) cfg.realsense.forEach(r => { if (!r.tags) r.tags = []; });
+  cfg.cameras.forEach(c => { if (!c.tags) c.tags = []; });
   if (cfg.audio && cfg.audio.enabled === undefined) cfg.audio.enabled = true;
   if (cfg.chat && cfg.chat.enabled === undefined) cfg.chat.enabled = true;
   // URL param overrides (openarm.html only)

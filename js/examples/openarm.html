@@ -102,7 +102,7 @@
     import { subscribeArm, connectRealSense, disconnectRealSense, connectCameras, disconnectCameras, startQueryLoopForPair, stopQueryLoopForPair, stopAllQueryLoops, enableArmTorque, disableArmTorque, disconnectAllCmdArms } from "./openarm-moq.js";
     import { createAudioState, connectAudio, disconnectAudio } from "./openarm-audio.js";
     import { createChatState, connectChat, disconnectChat, sendChatMessage } from "./openarm-chat.js";
-    import { initScene, buildJointRows, updatePanel, startRenderLoop, setupDumpDepth, applyCamPoseFromConfig, makeTextSprite } from "./openarm-scene.js";
+    import { initScene, buildJointRows, updatePanel, startRenderLoop, setupDumpDepth, applyCamPoseFromConfig, makeTextSprite, labelWithTags } from "./openarm-scene.js";
     import { initSettings } from "./openarm-settings.js";
 
     // ─── Config ──────────────────────────────────────
@@ -189,7 +189,7 @@
             oldLabel.material.map.dispose();
             oldLabel.material.dispose();
           }
-          const newLabel = makeTextSprite(pair.label || ("Arm Pair " + (index + 1)), "#00d4ff");
+          const newLabel = makeTextSprite(labelWithTags(pair.label || ("Arm Pair " + (index + 1)), pair.tags), "#00d4ff");
           newLabel.position.set(0, 0.85, 0);
           robotGroups[index].add(newLabel);
         }
@@ -203,7 +203,7 @@
             oldLabel.material.map.dispose();
             oldLabel.material.dispose();
           }
-          const newLabel = makeTextSprite(rs.label || ("RS " + (index + 1)), "#ff8c42");
+          const newLabel = makeTextSprite(labelWithTags(rs.label || ("RS " + (index + 1)), rs.tags), "#ff8c42");
           newLabel.position.set(0, 0.06, 0);
           rsCamGroups[index].add(newLabel);
           // Update point size

@@ -4,6 +4,66 @@ import { defaultConfig, saveConfig } from "./openarm-config.js";
 
 function esc(s) { return (s || "").replace(/"/g, "&quot;").replace(/</g, "&lt;"); }
 
+const TAG_COLORS = ["#ff6b6b","#ffa502","#2ed573","#1e90ff","#a855f7","#ff6348","#00d4ff","#eccc68"];
+const TAG_PRESETS = [];
+
+function tagColor(tag) {
+  let h = 0;
+  for (let i = 0; i < tag.length; i++) h = ((h << 5) - h + tag.charCodeAt(i)) | 0;
+  return TAG_COLORS[Math.abs(h) % TAG_COLORS.length];
+}
+
+function renderTagsField(card, tags, onChange) {
+  let wrap = card.querySelector(".tags-field");
+  if (!wrap) {
+    wrap = document.createElement("div");
+    wrap.className = "tags-field";
+    wrap.innerHTML = `<label>Tags</label><div class="tags-wrap"></div>`;
+    // Insert after the Label field
+    const labelField = card.querySelector(".field");
+    if (labelField && labelField.nextSibling) {
+      labelField.parentNode.insertBefore(wrap, labelField.nextSibling);
+    } else {
+      card.appendChild(wrap);
+    }
+  }
+  card.dataset.tags = JSON.stringify(tags);
+  const inner = wrap.querySelector(".tags-wrap");
+  inner.innerHTML = "";
+  tags.forEach((t, i) => {
+    const pill = document.createElement("span");
+    pill.className = "tag-pill";
+    pill.style.background = tagColor(t);
+    pill.textContent = t;
+    const x = document.createElement("span");
+    x.className = "tag-x";
+    x.textContent = "\u00d7";
+    x.addEventListener("click", () => { tags.splice(i, 1); renderTagsField(card, tags, onChange); onChange(); });
+    pill.appendChild(x);
+    inner.appendChild(pill);
+  });
+  // Preset pills (only those not already added)
+  TAG_PRESETS.filter(p => !tags.includes(p)).forEach(p => {
+    const pill = document.createElement("span");
+    pill.className = "tag-pill tag-preset";
+    pill.style.color = tagColor(p);
+    pill.textContent = p;
+    pill.addEventListener("click", () => { tags.push(p); renderTagsField(card, tags, onChange); onChange(); });
+    inner.appendChild(pill);
+  });
+  // Custom input
+  const inp = document.createElement("input");
+  inp.type = "text"; inp.className = "tag-input"; inp.placeholder = "add...";
+  inp.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && inp.value.trim()) {
+      const v = inp.value.trim().toLowerCase();
+      if (!tags.includes(v)) { tags.push(v); renderTagsField(card, tags, onChange); onChange(); }
+      else inp.value = "";
+    }
+  });
+  inner.appendChild(inp);
+}
+
 /**
  * Initialize the settings UI inside a container element.
  * @param {HTMLElement} containerEl — DOM element to render into
@@ -96,6 +156,7 @@ export function initSettings(containerEl, config, callbacks = {}) {
         id: card.dataset.id,
         enabled: card.querySelector(".pair-enabled").checked,
         label: card.querySelector(".pair-label").value,
+        tags: JSON.parse(card.dataset.tags || "[]"),
         leftPath: card.querySelector(".pair-left").value,
         rightPath: card.querySelector(".pair-right").value,
         position: {
@@ -119,6 +180,7 @@ export function initSettings(containerEl, config, callbacks = {}) {
         id: card.dataset.id,
         enabled: card.querySelector(".rs-enabled").checked,
         label: card.querySelector(".rs-label").value,
+        tags: JSON.parse(card.dataset.tags || "[]"),
         path: card.querySelector(".rs-path").value,
         position: {
           x: parseFloat(card.querySelector(".rs-px").value) || 0,
@@ -141,6 +203,7 @@ export function initSettings(containerEl, config, callbacks = {}) {
         id: card.dataset.id,
         enabled: card.querySelector(".cam-enabled").checked,
         label: card.querySelector(".cam-label").value,
+        tags: JSON.parse(card.dataset.tags || "[]"),
         path: card.querySelector(".cam-path").value,
       });
     });
@@ -218,6 +281,9 @@ export function initSettings(containerEl, config, callbacks = {}) {
         <span style="font-size:0.75rem; color:#666;">Send zero-torque queries on connect</span>
       </div>
     `;
+    // Tags
+    renderTagsField(card, pair.tags || [], () => autoSave({ type: 'armPair', index: idx }));
+
     card.querySelector('[data-action="remove"]').addEventListener('click', () => {
       if (config.armPairs.length <= 1) return;
       card.remove();
@@ -284,6 +350,9 @@ export function initSettings(containerEl, config, callbacks = {}) {
         <input type="number" class="rs-ptsize" value="${rs.pointSize || 2}" min="0.5" max="8" step="0.5" />
       </div>
     `;
+    // Tags
+    renderTagsField(card, rs.tags || [], () => autoSave({ type: 'realsense', index: idx }));
+
     card.querySelector('[data-action="remove"]').addEventListener('click', () => {
       if (config.realsense.length <= 1) return;
       card.remove();
@@ -322,6 +391,9 @@ export function initSettings(containerEl, config, callbacks = {}) {
         <input type="text" class="cam-path" value="${esc(cam.path)}" placeholder="e.g. anon/webcam" />
       </div>
     `;
+    // Tags
+    renderTagsField(card, cam.tags || [], () => autoSave(null));
+
     card.querySelector('[data-action="remove"]').addEventListener('click', () => {
       card.remove();
       structuralChange();

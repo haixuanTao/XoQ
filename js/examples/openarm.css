@@ -362,8 +362,8 @@ body {
   .settings-panel.active {
     flex: none;
     height: 100%;
-    width: 360px;
-    max-width: 50%;
+    width: 480px;
+    max-width: 55%;
   }
   .tab-btn[data-tab="camera"] { display: none; }
   .tab-btn[data-tab="settings"] { display: none; }
