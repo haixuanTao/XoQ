@@ -1,36 +1,12 @@
 // openarm-config.js — Config loading/saving/migration (shared by openarm.html + settings.html)
 
+import DEFAULT_CONFIG from "./default-config.json";
+
 export const LS_KEY = "openarm.config";
 export const LS_PREFIX = "openarm.";
 
 export function defaultConfig() {
-  return {
-    version: 3,
-    general: { relay: "https://cdn.1ms.ai", certHash: "" },
-    armPairs: [
-      { id: "pair2", enabled: true, label: "Baguette Arm",
-        leftPath: "anon/7e58263812ba/xoq-can-can0", rightPath: "anon/7e58263812ba/xoq-can-can1",
-        position: {x:1,y:0,z:1}, rotation: {roll:0,pitch:0,yaw:0},
-        queryRate: 1, autoQuery: true },
-      { id: "pair3", enabled: true, label: "champagne-arm",
-        leftPath: "anon/a13af1d39199/xoq-can-can0", rightPath: "anon/a13af1d39199/xoq-can-can1",
-        position: {x:0,y:0,z:0}, rotation: {roll:0,pitch:0,yaw:0},
-        queryRate: 1, autoQuery: true },
-    ],
-    cameras: [],
-    realsense: [
-      { id: "rs3", enabled: true, label: "baguette-realsense",
-        path: "anon/7e58263812ba/realsense-243222073892",
-        position: {x:0.79,y:0.81,z:1.23}, rotation: {roll:90,pitch:-45,yaw:0},
-        showColor: true, pointSize: 2 },
-      { id: "rs2", enabled: true, label: "champagne-realsense",
-        path: "anon/a13af1d39199/realsense-233522074606",
-        position: {x:-0.26,y:0.71,z:0.3}, rotation: {roll:90,pitch:-45,yaw:0},
-        showColor: true, pointSize: 2 },
-    ],
-    audio: { enabled: false, path: "anon/openarm-audio" },
-    chat: { enabled: false, path: "anon/openarm-chat", username: "anon" },
-  };
+  return structuredClone(DEFAULT_CONFIG);
 }
 
 export function migrateLegacy() {
