@@ -40,5 +40,4 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           pip install huggingface_hub
-          export PATH="$HOME/.local/bin:$PATH"
-          huggingface-cli upload haixuantao/openarm js/dist-pages . --repo-type space
+          python -c "from huggingface_hub import HfApi; HfApi().upload_folder(folder_path='js/dist-pages', repo_id='haixuantao/openarm', repo_type='space')"
