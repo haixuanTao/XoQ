@@ -348,7 +348,12 @@ async fn main() -> Result<()> {
     });
 
     // Create and run BridgeServer
-    let identity_path = format!("{}/.xoq_fake_can_server_key", args.key_dir);
+    // Derive unique key filename from moq_path so each instance gets its own identity
+    let key_suffix = args
+        .moq_path
+        .replace('/', "_")
+        .replace(|c: char| !c.is_alphanumeric() && c != '_' && c != '-', "");
+    let identity_path = format!("{}/.xoq_fake_can_server_key_{}", args.key_dir, key_suffix);
     let bridge = BridgeServer::new(
         Some(&identity_path),
         args.iroh_relay.as_deref(),
