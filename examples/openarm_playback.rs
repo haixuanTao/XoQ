@@ -6,8 +6,8 @@
 //! JSON format:
 //! ```json
 //! [
-//!   {"t": 0.0,    "L": "base64...", "R": "base64..."},
-//!   {"t": 0.05,   "L": "base64...", "R": "base64..."},
+//!   {"t": 0.0,    "left": "base64...", "right": "base64..."},
+//!   {"t": 0.05,   "left": "base64...", "right": "base64..."},
 //!   ...
 //! ]
 //! ```
@@ -23,7 +23,7 @@
 //!   openarm_playback recording.json
 //!
 //!   # Play to specific arm
-//!   openarm_playback recording.json L b370fdea...
+//!   openarm_playback recording.json left b370fdea...
 //!
 //!   # Play to custom arms
 //!   openarm_playback recording.json left <id1> right <id2>
@@ -70,7 +70,7 @@ struct Frame {
 }
 
 /// Parse the JSON recording file.
-/// Format: [{"t": 0.0, "L": "base64...", "R": "base64..."}, ...]
+/// Format: [{"t": 0.0, "left": "base64...", "right": "base64..."}, ...]
 fn parse_recording(path: &str) -> Result<Vec<Frame>> {
     let content = std::fs::read_to_string(path)?;
 
@@ -187,12 +187,12 @@ fn main() -> Result<()> {
         println!("Usage: openarm_playback <json-file> [<arm-name> <server-id> ...]");
         println!();
         println!("JSON format:");
-        println!(r#"  [{{"t": 0.0, "L": "base64...", "R": "base64..."}}, ...]"#);
+        println!(r#"  [{{"t": 0.0, "left": "base64...", "right": "base64..."}}, ...]"#);
         println!();
         println!("Each base64 value decodes to wire-encoded CAN frames:");
         println!("  [1B flags][4B can_id LE][1B data_len][8B data] per motor");
         println!();
-        println!("Default arms: champagne L + R");
+        println!("Default arms: champagne left + right");
         return Ok(());
     }
 
@@ -213,11 +213,11 @@ fn main() -> Result<()> {
     } else {
         vec![
             (
-                "L".to_string(),
+                "left".to_string(),
                 "b370fdea33b52371b89d1b4c029d992c02a2591ee7b3e204ff1b606f75c43309".to_string(),
             ),
             (
-                "R".to_string(),
+                "right".to_string(),
                 "9280c3883e7bc2d41c219d9a0bf156fcff818da7fbdcb29cef33aeb1650ac426".to_string(),
             ),
         ]

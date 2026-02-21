@@ -49,20 +49,20 @@ fn main() -> Result<()> {
     let default_arms = vec![
         // baguette
         (
-            "baguette L",
+            "baguette left",
             "d3cd5a3b4e5e877b1092333559b2673ca29b2f9e3257cd0945049dd1627f9b24",
         ),
         (
-            "baguette R",
+            "baguette right",
             "d1c0840bab8324b50dfc67b5c3c736629000ff7b3d269f79cda321feb1f79824",
         ),
         // champagne
         (
-            "champagne L",
+            "champagne left",
             "b370fdea33b52371b89d1b4c029d992c02a2591ee7b3e204ff1b606f75c43309",
         ),
         (
-            "champagne R",
+            "champagne right",
             "9280c3883e7bc2d41c219d9a0bf156fcff818da7fbdcb29cef33aeb1650ac426",
         ),
     ];
