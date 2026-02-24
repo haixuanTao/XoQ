@@ -435,6 +435,11 @@ async fn moq_state_publisher(
         let mut batch_buf = Vec::with_capacity(1024);
         let mut write_count = 0u64;
         let mut last_heartbeat = tokio::time::Instant::now();
+        // Publish at a fixed 100Hz rate so the subscriber can always keep up.
+        // All CAN frames arriving between ticks are batched into one group.
+        let mut tick = tokio::time::interval(Duration::from_millis(10));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut has_data = false;
         let disconnected = loop {
             tokio::select! {
                 result = publisher.closed() => {
@@ -442,27 +447,29 @@ async fn moq_state_publisher(
                     break false;
                 }
                 data = rx.recv() => {
-                    let first = match data {
-                        Some(d) => d,
+                    match data {
+                        Some(d) => {
+                            batch_buf.extend_from_slice(&d);
+                            has_data = true;
+                            // Drain everything already queued
+                            while let Ok(d) = rx.try_recv() {
+                                batch_buf.extend_from_slice(&d);
+                            }
+                        }
                         None => break true,
                     };
+                }
+                _ = tick.tick() => {
+                    if has_data {
+                        writer.write(batch_buf.clone());
+                        write_count += 1;
+                        batch_buf.clear();
+                        has_data = false;
 
-                    batch_buf.clear();
-                    batch_buf.extend_from_slice(&first);
-
-                    // Wait briefly to collect the full motor burst (~8 responses within 1-2ms)
-                    tokio::time::sleep(Duration::from_millis(2)).await;
-
-                    while let Ok(d) = rx.try_recv() {
-                        batch_buf.extend_from_slice(&d);
-                    }
-
-                    writer.write(batch_buf.clone());
-                    write_count += 1;
-
-                    if last_heartbeat.elapsed() >= Duration::from_secs(10) {
-                        tracing::info!("MoQ state publisher: {} writes, {} bytes last batch", write_count, batch_buf.len());
-                        last_heartbeat = tokio::time::Instant::now();
+                        if last_heartbeat.elapsed() >= Duration::from_secs(10) {
+                            tracing::info!("MoQ state publisher: {} writes", write_count);
+                            last_heartbeat = tokio::time::Instant::now();
+                        }
                     }
                 }
             }
