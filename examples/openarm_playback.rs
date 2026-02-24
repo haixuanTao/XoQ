@@ -24,7 +24,7 @@
 //! ```
 //!
 //! Usage:
-//!   openarm_playback <json-file> [<arm-name> <server-id> ...]
+//!   openarm_playback <json-file> [--loop [N]] [--step] [<arm-name> <server-id> ...]
 //!
 //! Examples:
 //!   # Play to champagne arms (default)
@@ -35,14 +35,84 @@
 //!
 //!   # Play to custom arms
 //!   openarm_playback recording.json left <id1> right <id2>
+//!
+//!   # Loop forever (Ctrl-C to stop)
+//!   openarm_playback recording.json --loop right <id>
+//!
+//!   # Loop 5 times
+//!   openarm_playback recording.json --loop 5 right <id>
+//!
+//!   # Slowly interpolate between each waypoint (~1s per transition)
+//!   openarm_playback recording.json --step left <id>
 
 use anyhow::Result;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use xoq::socketcan;
 
 const ENABLE_MIT: [u8; 8] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFC];
 const DISABLE_MIT: [u8; 8] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFD];
+
+// Zero-torque query: p=0, v=0, kp=0, kd=0, tau=0
+const QUERY_CMD: [u8; 8] = [0x80, 0x00, 0x80, 0x00, 0x00, 0x00, 0x08, 0x00];
+
+const POSITION_THRESHOLD_RAD: f64 = 0.175; // ~10 degrees
+const MOVE_STEPS: usize = 100;
+const MOVE_STEP_MS: u64 = 30;
+const STEP_MAX_SPEED: f64 = 1.0; // rad/s — max interpolation speed per motor
+const STEP_MIN_SUBSTEPS: usize = 3; // minimum substeps even for tiny moves
+const STEP_MAX_SUBSTEPS: usize = 100; // cap for very large moves
+
+const POS_MIN: f64 = -12.5;
+const POS_MAX: f64 = 12.5;
+const VEL_MIN: f64 = -45.0;
+const VEL_MAX: f64 = 45.0;
+const TAU_MIN: f64 = -18.0;
+const TAU_MAX: f64 = 18.0;
+
+/// Decode a Damiao MIT command (8 bytes) into (pos, vel, kp, kd, tau).
+fn decode_damiao_cmd(data: &[u8]) -> (f64, f64, f64, f64, f64) {
+    let pos_raw = ((data[0] as u16) << 8) | data[1] as u16;
+    let vel_raw = ((data[2] as u16) << 4) | ((data[3] as u16) >> 4);
+    let kp_raw = (((data[3] & 0x0F) as u16) << 8) | data[4] as u16;
+    let kd_raw = ((data[5] as u16) << 4) | ((data[6] as u16) >> 4);
+    let tau_raw = (((data[6] & 0x0F) as u16) << 8) | data[7] as u16;
+
+    (
+        pos_raw as f64 / 65535.0 * (POS_MAX - POS_MIN) + POS_MIN,
+        vel_raw as f64 / 4095.0 * (VEL_MAX - VEL_MIN) + VEL_MIN,
+        kp_raw as f64 / 4095.0 * 500.0,
+        kd_raw as f64 / 4095.0 * 5.0,
+        tau_raw as f64 / 4095.0 * (TAU_MAX - TAU_MIN) + TAU_MIN,
+    )
+}
+
+/// Encode a Damiao MIT command from (pos, vel, kp, kd, tau) into 8 bytes.
+fn encode_damiao_cmd(pos: f64, vel: f64, kp: f64, kd: f64, tau: f64) -> [u8; 8] {
+    let pos_raw = (((pos - POS_MIN) / (POS_MAX - POS_MIN)) * 65535.0).clamp(0.0, 65535.0) as u16;
+    let vel_raw = (((vel - VEL_MIN) / (VEL_MAX - VEL_MIN)) * 4095.0).clamp(0.0, 4095.0) as u16;
+    let kp_raw = ((kp / 500.0) * 4095.0).clamp(0.0, 4095.0) as u16;
+    let kd_raw = ((kd / 5.0) * 4095.0).clamp(0.0, 4095.0) as u16;
+    let tau_raw = (((tau - TAU_MIN) / (TAU_MAX - TAU_MIN)) * 4095.0).clamp(0.0, 4095.0) as u16;
+    [
+        (pos_raw >> 8) as u8,
+        (pos_raw & 0xFF) as u8,
+        (vel_raw >> 4) as u8,
+        (((vel_raw & 0x0F) << 4) | ((kp_raw >> 8) & 0x0F)) as u8,
+        (kp_raw & 0xFF) as u8,
+        (kd_raw >> 4) as u8,
+        (((kd_raw & 0x0F) << 4) | ((tau_raw >> 8) & 0x0F)) as u8,
+        (tau_raw & 0xFF) as u8,
+    ]
+}
+
+/// Decode position from a motor response frame (response bytes layout: data[1..3]).
+fn decode_response_pos(data: &[u8]) -> f64 {
+    let pos_raw = ((data[1] as u16) << 8) | data[2] as u16;
+    pos_raw as f64 / 65535.0 * (POS_MAX - POS_MIN) + POS_MIN
+}
 
 /// Minimal base64 decoder (no external dep).
 fn base64_decode(input: &str) -> Result<Vec<u8>> {
@@ -314,6 +384,32 @@ fn iter_objects(s: &str) -> Vec<&str> {
 }
 
 // ---------------------------------------------------------------------------
+// Motor query / slow-move helpers
+// ---------------------------------------------------------------------------
+
+/// Query all 8 motors on a socket. Returns motor_id -> position (radians).
+fn query_motor_positions(socket: &mut socketcan::RemoteCanSocket) -> Result<HashMap<u32, f64>> {
+    for motor_id in 0x01..=0x08u32 {
+        let frame = socketcan::CanFrame::new(motor_id, &QUERY_CMD)?;
+        socket.write_frame(&frame)?;
+    }
+    let mut positions = HashMap::new();
+    for _ in 0..8 {
+        match socket.read_frame()? {
+            Some(frame) => {
+                let can_id = frame.id();
+                if (0x11..=0x18).contains(&can_id) && frame.data().len() >= 8 {
+                    let cmd_id = can_id - 0x10;
+                    positions.insert(cmd_id, decode_response_pos(frame.data()));
+                }
+            }
+            None => break,
+        }
+    }
+    Ok(positions)
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -328,18 +424,47 @@ fn main() -> Result<()> {
 
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        println!("Usage: openarm_playback <json-file> [<arm-name> <server-id> ...]");
+        println!("Usage: openarm_playback <json-file> [--loop [N]] [--step] [<arm-name> <server-id> ...]");
         println!();
         println!("Supports v1 (wire-encoded bundles) and v2 (per-motor frames) JSON formats.");
         println!("Default arms: champagne left + right");
+        println!();
+        println!("Options:");
+        println!("  --loop [N]   Loop playback N times (0 or omitted = infinite, Ctrl-C to stop)");
+        println!("  --step       Step mode: slowly interpolate between each waypoint (~1s per transition)");
         return Ok(());
     }
 
     let json_path = &args[1];
 
-    // Parse arm configs from CLI or use defaults
-    let arm_configs: Vec<(String, String)> = if args.len() >= 4 {
-        args[2..]
+    // Parse --loop, --step, and arm configs from remaining args
+    let mut loop_count: Option<u64> = None; // None = no loop, Some(0) = infinite, Some(n) = n times
+    let mut step_mode = false;
+    let mut rest_args: Vec<String> = Vec::new();
+    let mut i = 2;
+    while i < args.len() {
+        if args[i] == "--loop" || args[i] == "-l" {
+            // Check if next arg is a number
+            if i + 1 < args.len() {
+                if let Ok(n) = args[i + 1].parse::<u64>() {
+                    loop_count = Some(n);
+                    i += 2;
+                    continue;
+                }
+            }
+            loop_count = Some(0); // infinite
+            i += 1;
+        } else if args[i] == "--step" || args[i] == "-s" {
+            step_mode = true;
+            i += 1;
+        } else {
+            rest_args.push(args[i].clone());
+            i += 1;
+        }
+    }
+
+    let arm_configs: Vec<(String, String)> = if rest_args.len() >= 2 {
+        rest_args
             .chunks(2)
             .filter_map(|c| {
                 if c.len() == 2 {
@@ -416,59 +541,384 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Enable motors
+    // Ctrl-C handler
+    let running = Arc::new(AtomicBool::new(true));
+    {
+        let running = running.clone();
+        ctrlc::set_handler(move || {
+            running.store(false, Ordering::SeqCst);
+        })?;
+    }
+
+    // Enable motors — immediately follow with zero-torque query to prevent position jump
     println!("Enabling motors...");
     for (name, socket) in &mut arms {
         for motor_id in 0x01..=0x08u32 {
             let frame = socketcan::CanFrame::new(motor_id, &ENABLE_MIT)?;
             socket.write_frame(&frame)?;
             let _ = socket.read_frame();
+            // Zero-torque query holds motor in place instead of jumping to stale position
+            let frame = socketcan::CanFrame::new(motor_id, &QUERY_CMD)?;
+            socket.write_frame(&frame)?;
+            let _ = socket.read_frame();
         }
         println!("  {} enabled", name);
     }
 
-    // Play back
-    println!(
-        "\nPlaying {} frames over {:.1}s...\n",
-        timesteps.len(),
-        duration
-    );
+    // --- Pre-playback safety check ---
+    // Query current motor positions and compare with first waypoint.
+    // If any motor is too far from its target, offer to slow-move there.
+    println!("\nChecking motor positions...");
+    let first_timestep = &timesteps[0];
+    let mut needs_slow_move = false;
 
-    let start = Instant::now();
-    let t_offset = timesteps[0].t;
-    let mut sent = 0usize;
+    // Collect per-arm data: (arm_name, motor_id, current_pos, target_pos, kp, kd)
+    let mut mismatches: Vec<(String, u32, f64, f64, f64, f64)> = Vec::new();
 
-    for timestep in &timesteps {
-        let target = Duration::from_secs_f64(timestep.t - t_offset);
-        let elapsed = start.elapsed();
-        if target > elapsed {
-            std::thread::sleep(target - elapsed);
-        }
+    for (arm_name, socket) in &mut arms {
+        let current_positions = query_motor_positions(socket)?;
 
-        for (arm_name, can_cmds) in &timestep.commands {
-            if let Some(socket) = arms.get_mut(arm_name) {
-                for cmd in can_cmds {
-                    if let Ok(can_frame) = socketcan::CanFrame::new(cmd.can_id, &cmd.data) {
-                        let _ = socket.write_frame(&can_frame);
-                        sent += 1;
+        if let Some(target_cmds) = first_timestep.commands.get(arm_name) {
+            for cmd in target_cmds {
+                if cmd.data.len() == 8 {
+                    let (target_pos, _vel, kp, kd, _tau) = decode_damiao_cmd(&cmd.data);
+                    if let Some(&current_pos) = current_positions.get(&cmd.can_id) {
+                        let delta = (current_pos - target_pos).abs();
+                        if delta > POSITION_THRESHOLD_RAD {
+                            needs_slow_move = true;
+                        }
+                        mismatches.push((
+                            arm_name.clone(),
+                            cmd.can_id,
+                            current_pos,
+                            target_pos,
+                            kp,
+                            kd,
+                        ));
                     }
                 }
-                // Drain responses
-                while socket.read_frame().ok().flatten().is_some() {}
+            }
+        }
+    }
+
+    if needs_slow_move {
+        println!("\n  Motors far from start position:");
+        println!(
+            "  {:>6} {:>6} {:>10} {:>10} {:>10}",
+            "Arm", "Motor", "Current", "Target", "Delta"
+        );
+        for (arm_name, motor_id, current, target, _kp, _kd) in &mismatches {
+            let delta = current - target;
+            let flag = if delta.abs() > POSITION_THRESHOLD_RAD {
+                " <<"
+            } else {
+                ""
+            };
+            println!(
+                "  {:>6} 0x{:02X}  {:>8.1}° {:>8.1}° {:>8.1}°{}",
+                arm_name,
+                motor_id,
+                current.to_degrees(),
+                target.to_degrees(),
+                delta.to_degrees(),
+                flag,
+            );
+        }
+        print!("\n  Press Enter to slowly move to start position, or q to quit: ");
+        use std::io::Write;
+        std::io::stdout().flush()?;
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        if input.trim().eq_ignore_ascii_case("q") {
+            // Disable motors before exit
+            println!("Disabling motors...");
+            for (name, socket) in &mut arms {
+                for motor_id in 0x01..=0x08u32 {
+                    let frame = socketcan::CanFrame::new(motor_id, &DISABLE_MIT)?;
+                    socket.write_frame(&frame)?;
+                    let _ = socket.read_frame();
+                }
+                println!("  {} disabled", name);
+            }
+            return Ok(());
+        }
+
+        // Slow-move interpolation to start position
+        println!(
+            "  Moving to start position ({:.1}s)...",
+            MOVE_STEPS as f64 * MOVE_STEP_MS as f64 / 1000.0
+        );
+
+        // Group mismatches by arm for efficient sending
+        let mut arm_targets: HashMap<String, Vec<(u32, f64, f64, f64, f64)>> = HashMap::new();
+        for (arm_name, motor_id, current, target, kp, kd) in &mismatches {
+            arm_targets
+                .entry(arm_name.clone())
+                .or_default()
+                .push((*motor_id, *current, *target, *kp, *kd));
+        }
+
+        for step in 0..MOVE_STEPS {
+            if !running.load(Ordering::SeqCst) {
+                println!("\n  Interrupted.");
+                break;
+            }
+            let t = (step + 1) as f64 / MOVE_STEPS as f64;
+
+            for (arm_name, targets) in &arm_targets {
+                if let Some(socket) = arms.get_mut(arm_name) {
+                    for &(motor_id, current, target, kp, kd) in targets {
+                        let interp_pos = current + t * (target - current);
+                        let cmd_data = encode_damiao_cmd(interp_pos, 0.0, kp, kd, 0.0);
+                        if let Ok(frame) = socketcan::CanFrame::new(motor_id, &cmd_data) {
+                            let _ = socket.write_frame(&frame);
+                        }
+                    }
+                    // Drain responses
+                    while socket.read_frame().ok().flatten().is_some() {}
+                }
+            }
+
+            std::thread::sleep(Duration::from_millis(MOVE_STEP_MS));
+
+            let pct = ((step + 1) as f64 / MOVE_STEPS as f64 * 100.0) as u32;
+            print!("\r  Moving... {:>3}%", pct);
+            let _ = std::io::stdout().flush();
+        }
+        if running.load(Ordering::SeqCst) {
+            println!("\n  Reached start position.");
+        }
+    } else {
+        println!("  Motors within tolerance of start position.");
+    }
+
+    // For step mode: track previous positions to interpolate between waypoints.
+    // Built from safety-check data (no extra zero-torque query that would drop stiffness).
+    let mut prev_positions: HashMap<String, HashMap<u32, f64>> = HashMap::new();
+    if step_mode {
+        for (arm_name, motor_id, current, target, _, _) in &mismatches {
+            let pos = if needs_slow_move { *target } else { *current };
+            prev_positions
+                .entry(arm_name.clone())
+                .or_default()
+                .insert(*motor_id, pos);
+        }
+    }
+
+    let total_loops = loop_count.unwrap_or(1); // 0 = infinite
+    let mut iteration = 0u64;
+    let mut total_sent = 0usize;
+
+    loop {
+        iteration += 1;
+        if total_loops > 0 && iteration > total_loops {
+            break;
+        }
+        if !running.load(Ordering::SeqCst) {
+            break;
+        }
+
+        let loop_label = if total_loops == 0 {
+            format!("Loop {} (infinite, Ctrl-C to stop)", iteration)
+        } else if total_loops == 1 {
+            String::new()
+        } else {
+            format!("Loop {}/{}", iteration, total_loops)
+        };
+
+        if !loop_label.is_empty() {
+            println!("\n{}", loop_label);
+        }
+
+        println!(
+            "Playing {} frames over {:.1}s...\n",
+            timesteps.len(),
+            duration
+        );
+
+        let start = Instant::now();
+        let t_offset = timesteps[0].t;
+        let mut sent = 0usize;
+
+        for (step_i, timestep) in timesteps.iter().enumerate() {
+            if !running.load(Ordering::SeqCst) {
+                break;
+            }
+
+            if step_mode {
+                // Decode current waypoint targets: (arm_name, motor_id, pos, kp, kd)
+                let mut curr_targets: Vec<(String, u32, f64, f64, f64)> = Vec::new();
+                for (arm_name, can_cmds) in &timestep.commands {
+                    for cmd in can_cmds {
+                        if cmd.data.len() == 8 {
+                            let (pos, _vel, kp, kd, _tau) = decode_damiao_cmd(&cmd.data);
+                            curr_targets.push((arm_name.clone(), cmd.can_id, pos, kp, kd));
+                        }
+                    }
+                }
+
+                // Read buffered responses from previous interpolation (no new commands sent)
+                use std::io::Write;
+                let mut actual_positions: HashMap<String, HashMap<u32, f64>> = HashMap::new();
+                for (arm_name, socket) in arms.iter_mut() {
+                    let mut arm_pos = HashMap::new();
+                    while let Ok(Some(frame)) = socket.read_frame() {
+                        let can_id = frame.id();
+                        if (0x11..=0x18).contains(&can_id) && frame.data().len() >= 8 {
+                            arm_pos.insert(can_id - 0x10, decode_response_pos(frame.data()));
+                        }
+                    }
+                    actual_positions.insert(arm_name.clone(), arm_pos);
+                }
+
+                println!("[Step {}/{}]", step_i + 1, timesteps.len());
+                for &(ref arm_name, motor_id, target_pos, _, _) in &curr_targets {
+                    let curr_pos = actual_positions
+                        .get(arm_name.as_str())
+                        .and_then(|m| m.get(&motor_id))
+                        .copied()
+                        .or_else(|| {
+                            prev_positions
+                                .get(arm_name.as_str())
+                                .and_then(|m| m.get(&motor_id))
+                                .copied()
+                        });
+                    let delta_str = match curr_pos {
+                        Some(cp) => format!("{:>+6.1}°", (target_pos - cp).to_degrees()),
+                        None => "   n/a".to_string(),
+                    };
+                    let curr_str = match curr_pos {
+                        Some(cp) => format!("{:>7.1}°", cp.to_degrees()),
+                        None => "    n/a".to_string(),
+                    };
+                    println!(
+                        "  {} 0x{:02X}: {} -> {:>7.1}° ({})",
+                        arm_name,
+                        motor_id,
+                        curr_str,
+                        target_pos.to_degrees(),
+                        delta_str,
+                    );
+                }
+                print!("  Press Enter to move (q to quit)...");
+                std::io::stdout().flush()?;
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                if input.trim() == "q" {
+                    break;
+                }
+
+                // Compute substep count from max motor delta so speed is constant
+                let mut max_delta: f64 = 0.0;
+                for &(ref arm_name, motor_id, target_pos, _, _) in &curr_targets {
+                    let prev_pos = prev_positions
+                        .get(arm_name.as_str())
+                        .and_then(|m| m.get(&motor_id))
+                        .copied()
+                        .unwrap_or(target_pos);
+                    let delta = (target_pos - prev_pos).abs();
+                    if delta > max_delta {
+                        max_delta = delta;
+                    }
+                }
+                // time = distance / speed, substeps = time / step_period
+                let move_time_s = max_delta / STEP_MAX_SPEED;
+                let substeps = (move_time_s / (MOVE_STEP_MS as f64 / 1000.0)).ceil() as usize;
+                let substeps = substeps.clamp(STEP_MIN_SUBSTEPS, STEP_MAX_SUBSTEPS);
+
+                // Interpolate from previous positions to current targets
+                for substep in 0..substeps {
+                    if !running.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let t = (substep + 1) as f64 / substeps as f64;
+
+                    for (arm_name, socket) in arms.iter_mut() {
+                        let arm_prev = prev_positions.get(arm_name.as_str());
+                        for &(ref target_arm, motor_id, target_pos, kp, kd) in &curr_targets {
+                            if target_arm != arm_name {
+                                continue;
+                            }
+                            let prev_pos = arm_prev
+                                .and_then(|m| m.get(&motor_id))
+                                .copied()
+                                .unwrap_or(target_pos);
+                            let interp_pos = prev_pos + t * (target_pos - prev_pos);
+                            let cmd_data = encode_damiao_cmd(interp_pos, 0.0, kp, kd, 0.0);
+                            if let Ok(frame) = socketcan::CanFrame::new(motor_id, &cmd_data) {
+                                let _ = socket.write_frame(&frame);
+                                sent += 1;
+                            }
+                        }
+                    }
+
+                    std::thread::sleep(Duration::from_millis(MOVE_STEP_MS));
+
+                    let pct = ((substep + 1) as f64 / substeps as f64 * 100.0) as u32;
+                    print!(
+                        "\r[Step {}/{}] Moving... {:>3}% ({:.1}s)",
+                        step_i + 1,
+                        timesteps.len(),
+                        pct,
+                        substeps as f64 * MOVE_STEP_MS as f64 / 1000.0,
+                    );
+                    let _ = std::io::stdout().flush();
+                }
+                println!();
+
+                // Update prev_positions for next waypoint
+                for &(ref arm_name, motor_id, target_pos, _, _) in &curr_targets {
+                    prev_positions
+                        .entry(arm_name.clone())
+                        .or_default()
+                        .insert(motor_id, target_pos);
+                }
+
+                continue;
+            }
+
+            // Normal mode: wait for target time
+            let target = Duration::from_secs_f64(timestep.t - t_offset);
+            let elapsed = start.elapsed();
+            if target > elapsed {
+                std::thread::sleep(target - elapsed);
+            }
+
+            for (arm_name, can_cmds) in &timestep.commands {
+                if let Some(socket) = arms.get_mut(arm_name) {
+                    for cmd in can_cmds {
+                        if let Ok(can_frame) = socketcan::CanFrame::new(cmd.can_id, &cmd.data) {
+                            let _ = socket.write_frame(&can_frame);
+                            sent += 1;
+                        }
+                    }
+                    // Drain responses
+                    while socket.read_frame().ok().flatten().is_some() {}
+                }
+            }
+
+            {
+                let pct = ((timestep.t - t_offset) / duration * 100.0) as u32;
+                let elapsed = start.elapsed();
+                print!(
+                    "\r  [{:>3}%] t={:.2}s elapsed={:.2}s frames_sent={}",
+                    pct,
+                    timestep.t - t_offset,
+                    elapsed.as_secs_f64(),
+                    sent
+                );
             }
         }
 
-        let pct = ((timestep.t - t_offset) / duration * 100.0) as u32;
-        let elapsed = start.elapsed();
-        print!(
-            "\r  [{:>3}%] t={:.2}s elapsed={:.2}s frames_sent={}",
-            pct,
-            timestep.t - t_offset,
-            elapsed.as_secs_f64(),
-            sent
-        );
+        total_sent += sent;
+        println!();
+
+        if total_loops == 1 {
+            break;
+        }
     }
-    println!("\n\nPlayback complete ({} CAN frames sent).", sent);
+
+    println!("\nPlayback complete ({} CAN frames sent).", total_sent);
 
     // Disable motors
     println!("Disabling motors...");

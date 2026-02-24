@@ -454,7 +454,7 @@ async fn moq_state_publisher(
                         batch_buf.extend_from_slice(&d);
                     }
 
-                    writer.write(batch_buf.clone());
+                    writer.write_stream(batch_buf.clone());
                     write_count += 1;
 
                     if last_heartbeat.elapsed() >= Duration::from_secs(10) {

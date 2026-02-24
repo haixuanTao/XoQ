@@ -95,7 +95,9 @@ fn can_reader_thread_fd(
                 };
                 let bytes = wire::encode(&any_frame);
                 if let Some(ref moq) = moq_tx {
-                    let _ = moq.try_send(bytes.clone());
+                    if moq.try_send(bytes.clone()).is_err() {
+                        tracing::debug!("MoQ channel full, dropping CAN frame");
+                    }
                 }
                 if tx.blocking_send(bytes).is_err() {
                     break;
@@ -156,7 +158,9 @@ fn can_reader_thread_std(
                 };
                 let bytes = wire::encode(&any_frame);
                 if let Some(ref moq) = moq_tx {
-                    let _ = moq.try_send(bytes.clone());
+                    if moq.try_send(bytes.clone()).is_err() {
+                        tracing::debug!("MoQ channel full, dropping CAN frame");
+                    }
                 }
                 if tx.blocking_send(bytes).is_err() {
                     break;
