@@ -450,11 +450,14 @@ async fn moq_state_publisher(
                     batch_buf.clear();
                     batch_buf.extend_from_slice(&first);
 
+                    // Wait briefly to collect the full motor burst (~8 responses within 1-2ms)
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+
                     while let Ok(d) = rx.try_recv() {
                         batch_buf.extend_from_slice(&d);
                     }
 
-                    writer.write_stream(batch_buf.clone());
+                    writer.write(batch_buf.clone());
                     write_count += 1;
 
                     if last_heartbeat.elapsed() >= Duration::from_secs(10) {
