@@ -461,6 +461,17 @@ async fn moq_state_publisher(
                 }
                 _ = tick.tick() => {
                     if has_data {
+                        // Count CAN frames in batch (wire format: 6+data_len per frame)
+                        let mut n_frames = 0u32;
+                        let mut off = 0usize;
+                        while off + 6 <= batch_buf.len() {
+                            let dlen = batch_buf[off + 5] as usize;
+                            if off + 6 + dlen > batch_buf.len() { break; }
+                            n_frames += 1;
+                            off += 6 + dlen;
+                        }
+                        tracing::debug!("MoQ publish: {} bytes, {} CAN frames", batch_buf.len(), n_frames);
+
                         writer.write(batch_buf.clone());
                         write_count += 1;
                         batch_buf.clear();
