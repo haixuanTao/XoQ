@@ -225,7 +225,7 @@
           const feedEl = camVideoEls[i] && camVideoEls[i].parentElement;
           if (feedEl) feedEl.style.display = vis ? "" : "none";
         });
-        log("Config saved. Reconnect to apply path changes.", "info");
+        log("Config saved. Disconnect and reconnect to apply path changes.", "info");
       },
     });
 
@@ -314,7 +314,10 @@
     // ─── Connect / Disconnect ────────────────────────
     startBtn.addEventListener("click", async () => {
       try {
-        const hasArmPaths = armConfigs.some(a => a.enabled && (a.path || "").trim());
+        // Re-read arm configs from current settings (paths may have changed)
+        const liveArmConfigs = flattenArmPairs(config);
+
+        const hasArmPaths = liveArmConfigs.some(a => a.enabled && (a.path || "").trim());
         const hasRsPaths = config.realsense.some(c => c.enabled !== false && (c.path || "").trim());
         const hasCamPaths = config.cameras.some(c => c.enabled !== false && (c.path || "").trim());
         if (!hasArmPaths && !hasRsPaths && !hasCamPaths) { log("No enabled paths configured — open Settings to add arm/camera paths", "error"); return; }
@@ -331,14 +334,14 @@
         log(`WebTransport: ${typeof WebTransport !== 'undefined' ? 'supported' : 'NOT supported'}`, "data", { toast: false });
 
         // Warn if duplicate arm paths
-        const armPaths = armConfigs.map(a => (a.path || "").trim()).filter(Boolean);
+        const armPaths = liveArmConfigs.map(a => (a.path || "").trim()).filter(Boolean);
         const dupPaths = armPaths.filter((p, i) => armPaths.indexOf(p) !== i);
         if (dupPaths.length) log(`WARNING: Multiple arms share path "${dupPaths[0]}" — cross-talk expected!`, "error");
 
         const subs = [];
 
         // Subscribe to enabled arms
-        armConfigs.forEach((arm, idx) => {
+        liveArmConfigs.forEach((arm, idx) => {
           const path = (arm.path || "").trim();
           if (arm.enabled && path) subs.push(subscribeArm(config, appState, arm.id, path, armStates[idx]).catch(e => log(`[${arm.id}] ${e.message}`, "error")));
         });
