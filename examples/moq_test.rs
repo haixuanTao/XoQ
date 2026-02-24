@@ -55,6 +55,23 @@ async fn main() -> Result<()> {
             let count: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1000);
             run_burst_test(relay, count).await
         }
+        "watch" => {
+            let base_path = match args.get(2) {
+                Some(p) => p.as_str(),
+                None => {
+                    eprintln!("Usage: moq_test watch <base-path> [relay]");
+                    eprintln!();
+                    eprintln!("  base-path: CAN server MoQ path (e.g. anon/NODE_ID/xoq-can-can0)");
+                    eprintln!("  relay:     Relay URL (default: {})", DEFAULT_CMD_RELAY);
+                    eprintln!();
+                    eprintln!("Read-only monitor: subscribes to <base-path>/state track 'can'");
+                    eprintln!("and prints decoded motor positions. Runs until Ctrl-C.");
+                    return Ok(());
+                }
+            };
+            let relay = args.get(3).map(|s| s.as_str()).unwrap_or(DEFAULT_CMD_RELAY);
+            run_watch(relay, base_path).await
+        }
         "cmd" => {
             let base_path = match args.get(2) {
                 Some(p) => p.as_str(),
@@ -74,11 +91,14 @@ async fn main() -> Result<()> {
             run_cmd_test(relay, base_path).await
         }
         _ => {
-            eprintln!("Usage: moq_test <pub|sub|stream|cmd|burst> [args...]");
+            eprintln!("Usage: moq_test <pub|sub|stream|watch|cmd|burst> [args...]");
             eprintln!();
             eprintln!("  pub                    - Run publisher (one-way test)");
             eprintln!("  sub                    - Run subscriber (one-way test)");
             eprintln!("  stream                 - Bidirectional MoqStream test (server + client)");
+            eprintln!(
+                "  watch <path> [url]     - Monitor CAN state (read-only, prints motor positions)"
+            );
             eprintln!(
                 "  cmd <path> [url]       - CAN command test (simulates browser motor query)"
             );
@@ -233,6 +253,153 @@ async fn run_stream_test(relay: &str) -> Result<()> {
     }
     if let Err(e) = client_res? {
         eprintln!("[client] Error: {}", e);
+    }
+
+    Ok(())
+}
+
+// ─── Watch mode (read-only CAN state monitor) ─────────────
+
+async fn run_watch(relay: &str, base_path: &str) -> Result<()> {
+    let state_path = format!("{}/state", base_path);
+    eprintln!("=== CAN State Watch ===");
+    eprintln!("Relay: {}", relay);
+    eprintln!("Path:  {}", state_path);
+    eprintln!();
+
+    eprintln!("[watch] Connecting subscriber...");
+    let mut sub = xoq::MoqBuilder::new()
+        .relay(relay)
+        .path(&state_path)
+        .connect_subscriber()
+        .await?;
+
+    eprintln!("[watch] Subscribing to track 'can' (10s timeout)...");
+    let mut reader =
+        match tokio::time::timeout(Duration::from_secs(10), sub.subscribe_track("can")).await {
+            Ok(Ok(Some(r))) => {
+                eprintln!("ASSERT PASS: subscribed to track 'can'");
+                r
+            }
+            Ok(Ok(None)) => {
+                eprintln!("ASSERT FAIL: subscribe returned None (no broadcast found)");
+                return Ok(());
+            }
+            Ok(Err(e)) => {
+                eprintln!("ASSERT FAIL: subscribe error: {}", e);
+                return Ok(());
+            }
+            Err(_) => {
+                eprintln!("ASSERT FAIL: no broadcast within 10s — CAN server not publishing?");
+                return Ok(());
+            }
+        };
+
+    eprintln!("[watch] Reading frames (Ctrl-C to stop)...");
+    eprintln!();
+
+    let mut frame_count = 0u64;
+    let mut last_stats = std::time::Instant::now();
+    let mut frames_since_stats = 0u64;
+    let first_frame_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut got_first_frame = false;
+
+    loop {
+        let timeout = if got_first_frame {
+            tokio::time::Instant::now() + Duration::from_secs(30)
+        } else {
+            first_frame_deadline
+        };
+
+        match tokio::time::timeout_at(timeout, reader.read()).await {
+            Ok(Ok(Some(data))) => {
+                frame_count += 1;
+                frames_since_stats += 1;
+
+                if !got_first_frame {
+                    eprintln!("ASSERT PASS: first frame received ({} bytes)", data.len());
+                    got_first_frame = true;
+                }
+
+                // Decode and print motor positions
+                let now = {
+                    let d = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap();
+                    let secs = d.as_secs() % 86400; // time-of-day
+                    let ms = d.subsec_millis();
+                    format!(
+                        "{:02}:{:02}:{:02}.{:03}",
+                        secs / 3600,
+                        (secs % 3600) / 60,
+                        secs % 60,
+                        ms
+                    )
+                };
+                let mut motors = Vec::new();
+                let mut offset = 0;
+                while offset < data.len() {
+                    if let Some((_can_id, frame_data, consumed)) =
+                        decode_can_wire_frame(&data[offset..])
+                    {
+                        if frame_data.len() >= 8 {
+                            let motor_id = frame_data[0];
+                            let p_raw = ((frame_data[1] as u16) << 8) | (frame_data[2] as u16);
+                            let v_raw =
+                                ((frame_data[3] as u16) << 4) | ((frame_data[4] as u16) >> 4);
+                            let t_raw =
+                                (((frame_data[4] & 0x0F) as u16) << 8) | (frame_data[5] as u16);
+                            let pos = -12.5 + (p_raw as f64 / 65535.0) * 25.0;
+                            let vel = -45.0 + (v_raw as f64 / 4095.0) * 90.0;
+                            let torque = -18.0 + (t_raw as f64 / 4095.0) * 36.0;
+                            motors.push((motor_id, pos, vel, torque));
+                        }
+                        offset += consumed;
+                    } else {
+                        break;
+                    }
+                }
+
+                eprint!("[{}] #{} ({} bytes)", now, frame_count, data.len());
+                if motors.is_empty() {
+                    eprintln!(" (no decodable motor frames)");
+                } else {
+                    for (id, pos, vel, torque) in &motors {
+                        eprint!("  m{}: {:.3}rad {:.2}v {:.2}t", id, pos, vel, torque);
+                    }
+                    eprintln!();
+                }
+
+                // Print stats every 5s
+                if last_stats.elapsed() >= Duration::from_secs(5) {
+                    let fps = frames_since_stats as f64 / last_stats.elapsed().as_secs_f64();
+                    eprintln!("[stats] {:.1} frames/sec, {} total", fps, frame_count);
+                    last_stats = std::time::Instant::now();
+                    frames_since_stats = 0;
+                }
+            }
+            Ok(Ok(None)) => {
+                eprintln!("[watch] Track ended after {} frames", frame_count);
+                break;
+            }
+            Ok(Err(e)) => {
+                eprintln!("[watch] Read error after {} frames: {}", frame_count, e);
+                break;
+            }
+            Err(_) => {
+                if !got_first_frame {
+                    eprintln!(
+                        "ASSERT FAIL: no data within 10s — CAN server publishing but track empty?"
+                    );
+                } else {
+                    eprintln!(
+                        "[watch] No data for 30s, stopping. {} frames total",
+                        frame_count
+                    );
+                }
+                break;
+            }
+        }
     }
 
     Ok(())

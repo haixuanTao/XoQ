@@ -377,7 +377,7 @@ impl CanServer {
 
         // Channels between CAN threads and BridgeServer (Vec<u8> wire-encoded)
         let (read_tx, read_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
-        let (write_tx, write_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
+        let (write_tx, write_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
         let write_count = Arc::new(AtomicU64::new(0));
 
         let (moq_tx, moq_rx) = if moq_relay.is_some() {

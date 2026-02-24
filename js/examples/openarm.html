@@ -99,7 +99,7 @@
     import { loadConfig, saveConfig, flattenArmPairs } from "./openarm-config.js";
     import { initLog, log, setStatus } from "./openarm-log.js";
     import { makeJointState } from "./openarm-can.js";
-    import { subscribeArm, connectRealSense, disconnectRealSense, connectCameras, disconnectCameras, startQueryLoopForPair, stopQueryLoopForPair, stopAllQueryLoops, enableArmTorque, disableArmTorque, disconnectAllCmdArms } from "./openarm-moq.js";
+    import { subscribeArm, connectRealSense, disconnectRealSense, connectCameras, disconnectCameras, enableArmTorque, disableArmTorque, disconnectAllCmdArms } from "./openarm-moq.js";
     import { createAudioState, connectAudio, disconnectAudio } from "./openarm-audio.js";
     import { createChatState, connectChat, disconnectChat, sendChatMessage } from "./openarm-chat.js";
     import { initScene, buildJointRows, updatePanel, startRenderLoop, setupDumpDepth, applyCamPoseFromConfig, makeTextSprite, labelWithTags } from "./openarm-scene.js";
@@ -136,8 +136,6 @@
     // Command publishing state (per arm)
     const cmdState = {};
     armConfigs.forEach(arm => { cmdState[arm.id] = { conn: null, broadcast: null, track: null, group: null }; });
-    const queryIntervals = {}; // pairIdx → intervalId
-
     // Audio + chat state
     const audioState = createAudioState();
     const chatState = createChatState();
@@ -248,7 +246,6 @@
     // ─── Build arm panels with per-pair query + per-arm torque buttons ─
     const armJointEls = [];
     const armPanelEls = [];
-    const queryBtns = {}; // pairIdx → button element
     const torqueBtns = {}; // armId → button element
     const armPanelsContainer = document.getElementById("armPanelsContainer");
 
@@ -258,19 +255,11 @@
       const pair = config.armPairs[pairIdx];
       const pairArms = armConfigs.filter(a => a.pairIdx === pairIdx);
 
-      // Pair header with query button
+      // Pair header
       const header = document.createElement("div");
       header.style.cssText = "display:flex; align-items:center; gap:0.5rem; padding:0.5rem 0.75rem 0; border-bottom:none;";
-      header.innerHTML = `<span style="font-size:0.8rem; color:#888; text-transform:uppercase; font-weight:bold;">${pair.label || ("Arm Pair " + (pairIdx + 1))}</span>
-        <span style="font-size:0.65rem; color:#555;">${pair.queryRate || 200}Hz</span>`;
-      const qBtn = document.createElement("button");
-      qBtn.className = "query-btn";
-      qBtn.textContent = "Query";
-      qBtn.disabled = true;
-      qBtn.dataset.pair = pairIdx;
-      header.appendChild(qBtn);
+      header.innerHTML = `<span style="font-size:0.8rem; color:#888; text-transform:uppercase; font-weight:bold;">${pair.label || ("Arm Pair " + (pairIdx + 1))}</span>`;
       armPanelsContainer.appendChild(header);
-      queryBtns[pairIdx] = qBtn;
 
       // Per-arm sections within this pair
       pairArms.forEach(arm => {
@@ -303,37 +292,6 @@
         armJointEls.push(buildJointRows(section.querySelector(`#armJointRows${idx}`), "arm" + idx));
       });
     });
-
-    // Query button click handlers (per pair)
-    for (const [pairIdx, btn] of Object.entries(queryBtns)) {
-      const pi = parseInt(pairIdx);
-      btn.addEventListener("click", async () => {
-        if (!queryIntervals[pi]) {
-          btn.disabled = true;
-          btn.textContent = "Starting...";
-          try {
-            const interval = await startQueryLoopForPair(config, pi, armConfigs, cmdState);
-            if (interval) {
-              queryIntervals[pi] = interval;
-              btn.classList.add("active");
-              btn.textContent = "Stop";
-            } else {
-              btn.textContent = "Query";
-            }
-            btn.disabled = false;
-          } catch (e) {
-            log(`Query start error: ${e.message}`, "error");
-            btn.textContent = "Query";
-            btn.disabled = false;
-          }
-        } else {
-          stopQueryLoopForPair(queryIntervals[pi], pi, armConfigs, cmdState);
-          delete queryIntervals[pi];
-          btn.classList.remove("active");
-          btn.textContent = "Query";
-        }
-      });
-    }
 
     // Torque button click handlers (per arm)
     for (const [armId, btn] of Object.entries(torqueBtns)) {
@@ -435,33 +393,11 @@
           subs.push(connectChat(config, chatState, getUsername, toastsEl).catch(e => log(`[chat] ${e.message}`, "error")));
         }
 
-        // Enable audio button (if audio enabled in config) + query buttons + torque buttons
+        // Enable audio button (if audio enabled in config) + torque buttons
         if (config.audio.enabled !== false) audioBtn.disabled = false;
-        for (const [pi, btn] of Object.entries(queryBtns)) {
-          const pairArms = armConfigs.filter(a => a.pairIdx === parseInt(pi));
-          if (pairArms.some(a => a.enabled && (a.path || "").trim())) btn.disabled = false;
-        }
         for (const [armId, btn] of Object.entries(torqueBtns)) {
           const arm = armConfigs.find(a => a.id === armId);
           if (arm && arm.enabled && (arm.path || "").trim()) btn.disabled = false;
-        }
-
-        // Auto-start query for enabled pairs with autoQuery
-        for (const [pi, btn] of Object.entries(queryBtns)) {
-          const pairIdx = parseInt(pi);
-          const pair = config.armPairs[pairIdx];
-          if (pair && pair.enabled !== false && pair.autoQuery) {
-            const pairArms = armConfigs.filter(a => a.pairIdx === pairIdx);
-            if (pairArms.some(a => a.enabled && (a.path || "").trim())) {
-              startQueryLoopForPair(config, pairIdx, armConfigs, cmdState).then(interval => {
-                if (interval) {
-                  queryIntervals[pairIdx] = interval;
-                  btn.classList.add("active");
-                  btn.textContent = "Stop";
-                }
-              }).catch(e => log(`Query auto-start error: ${e.message}`, "error"));
-            }
-          }
         }
 
         // Connect audio if enabled (user previously toggled it on)
@@ -483,15 +419,8 @@
         console.error(e);
         setStatus("Error");
       } finally {
-        // Stop all query loops + disconnect command channels
-        stopAllQueryLoops(queryIntervals);
-        for (const k of Object.keys(queryIntervals)) delete queryIntervals[k];
+        // Disconnect command channels
         disconnectAllCmdArms(armConfigs, cmdState);
-        for (const btn of Object.values(queryBtns)) {
-          btn.classList.remove("active");
-          btn.textContent = "Query";
-          btn.disabled = true;
-        }
         for (const btn of Object.values(torqueBtns)) {
           btn.classList.remove("active");
           btn.textContent = "Torque";
@@ -509,15 +438,8 @@
 
     stopBtn.addEventListener("click", async () => {
       appState.running = false;
-      // Stop all query loops + disconnect command channels
-      stopAllQueryLoops(queryIntervals);
-      for (const k of Object.keys(queryIntervals)) delete queryIntervals[k];
+      // Disconnect command channels
       disconnectAllCmdArms(armConfigs, cmdState);
-      for (const btn of Object.values(queryBtns)) {
-        btn.classList.remove("active");
-        btn.textContent = "Query";
-        btn.disabled = true;
-      }
       for (const btn of Object.values(torqueBtns)) {
         btn.classList.remove("active");
         btn.textContent = "Torque";

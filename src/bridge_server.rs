@@ -354,6 +354,11 @@ async fn handle_connection(
 
 /// Publish backend data to MoQ relay for browser monitoring.
 /// Automatically reconnects with exponential backoff.
+///
+/// Creates a single MoQ client (QUIC endpoint) and reuses it across reconnects
+/// to avoid leaking UDP sockets. Each `moq_native::Client` binds a UDP socket;
+/// creating a new one per retry leaked ~1 socket/retry, hitting the 1024 FD limit
+/// after ~20h.
 async fn moq_state_publisher(
     relay: &str,
     path: &str,
@@ -363,27 +368,62 @@ async fn moq_state_publisher(
     mut rx: mpsc::Receiver<Vec<u8>>,
 ) -> Result<()> {
     use crate::moq::MoqBuilder;
+    use moq_native::moq_lite::{Broadcast, Origin, Track};
 
-    let mut builder = MoqBuilder::new().relay(relay);
-    if insecure {
-        builder = builder.disable_tls_verify();
-    }
+    let builder = MoqBuilder::new().relay(relay);
+    let builder = if insecure {
+        builder.disable_tls_verify()
+    } else {
+        builder
+    };
 
     let pub_path = format!("{}/{}", path, state_subpath);
+
+    // Create client once — reuse across reconnects to avoid UDP socket leak.
+    // Cloning shares the underlying quinn::Endpoint (Arc), no new socket.
+    let client = builder.create_client_public()?;
 
     loop {
         // Connect with backoff
         let mut delay = Duration::from_secs(1);
-        let (publisher, mut writer) = loop {
-            match builder
-                .clone()
-                .path(&pub_path)
-                .connect_publisher_with_track(track_name)
-                .await
+        let (publisher, mut writer, _broadcast_producer) = loop {
+            let url = builder.build_url_for_path(&pub_path)?;
+            let origin = Origin::produce();
+            let mut broadcast = Broadcast::produce();
+
+            // Create track BEFORE connecting (same as connect_publisher_with_track)
+            let track_producer = broadcast.producer.create_track(Track::new(track_name));
+
+            origin
+                .producer
+                .publish_broadcast("", broadcast.consumer.clone());
+
+            match tokio::time::timeout(Duration::from_secs(15), {
+                let c = client.clone();
+                async move {
+                    let session = c.with_publish(origin.consumer).connect(url).await?;
+                    Ok::<_, anyhow::Error>(session)
+                }
+            })
+            .await
             {
-                Ok(result) => break result,
-                Err(e) => {
+                Ok(Ok(session)) => {
+                    // Keep broadcast.producer alive — dropping it signals the relay
+                    // that the broadcast is finished, making the track invisible.
+                    break (
+                        session,
+                        crate::moq::MoqTrackWriter::from_producer(track_producer),
+                        broadcast.producer,
+                    );
+                }
+                Ok(Err(e)) => {
                     tracing::warn!("MoQ connect failed: {}, retrying in {:?}...", e, delay);
+                    while rx.try_recv().is_ok() {}
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(Duration::from_secs(30));
+                }
+                Err(_) => {
+                    tracing::warn!("MoQ connect timed out (15s), retrying in {:?}...", delay);
                     while rx.try_recv().is_ok() {}
                     tokio::time::sleep(delay).await;
                     delay = (delay * 2).min(Duration::from_secs(30));
@@ -393,10 +433,12 @@ async fn moq_state_publisher(
         tracing::info!("MoQ state publisher connected on {}", pub_path);
 
         let mut batch_buf = Vec::with_capacity(1024);
+        let mut write_count = 0u64;
+        let mut last_heartbeat = tokio::time::Instant::now();
         let disconnected = loop {
             tokio::select! {
                 result = publisher.closed() => {
-                    tracing::warn!("MoQ session closed: {:?}, reconnecting...", result.err());
+                    tracing::warn!("MoQ session closed after {} writes: {:?}, reconnecting...", write_count, result.err());
                     break false;
                 }
                 data = rx.recv() => {
@@ -413,6 +455,12 @@ async fn moq_state_publisher(
                     }
 
                     writer.write(batch_buf.clone());
+                    write_count += 1;
+
+                    if last_heartbeat.elapsed() >= Duration::from_secs(10) {
+                        tracing::info!("MoQ state publisher: {} writes, {} bytes last batch", write_count, batch_buf.len());
+                        last_heartbeat = tokio::time::Instant::now();
+                    }
                 }
             }
         };
@@ -455,32 +503,36 @@ async fn moq_command_subscriber(
 
     let cmd_path = format!("{}/{}", path, command_subpath);
 
+    // Create client once — reuse across reconnects to avoid UDP socket leak.
+    let client = builder.create_client_public()?;
+
     loop {
         tracing::info!("MoQ command subscriber connecting on {}...", cmd_path);
 
         // Connect at low level, retaining origin_consumer for reannounce handling
-        let (mut origin_consumer, _session) =
-            match tokio::time::timeout(Duration::from_secs(5), async {
-                let url = builder.build_url_for_path(&cmd_path)?;
-                let client = builder.create_client_public()?;
+        let (mut origin_consumer, _session) = match tokio::time::timeout(Duration::from_secs(5), {
+            let url = builder.build_url_for_path(&cmd_path)?;
+            let c = client.clone();
+            async move {
                 let origin = Origin::produce();
-                let session = client.with_consume(origin.producer).connect(url).await?;
+                let session = c.with_consume(origin.producer).connect(url).await?;
                 Ok::<_, anyhow::Error>((origin.consumer, session))
-            })
-            .await
-            {
-                Ok(Ok(r)) => r,
-                Ok(Err(e)) => {
-                    tracing::warn!("MoQ command subscriber connect error: {}, retrying...", e);
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                    continue;
-                }
-                Err(_) => {
-                    tracing::info!("MoQ command subscriber connect timeout, retrying...");
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                    continue;
-                }
-            };
+            }
+        })
+        .await
+        {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
+                tracing::warn!("MoQ command subscriber connect error: {}, retrying...", e);
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+            Err(_) => {
+                tracing::info!("MoQ command subscriber connect timeout, retrying...");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+        };
 
         // Wait for initial broadcast announcement
         let broadcast = match tokio::time::timeout(Duration::from_secs(10), async {

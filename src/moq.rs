@@ -320,6 +320,11 @@ pub struct MoqTrackWriter {
 }
 
 impl MoqTrackWriter {
+    /// Create a writer from an existing TrackProducer (for low-level usage).
+    pub fn from_producer(track: moq_lite::TrackProducer) -> Self {
+        Self { track, group: None }
+    }
+
     /// Write a frame as an independent group (suitable for state/broadcast).
     ///
     /// Each call creates a new group. Slow consumers will skip to the latest
@@ -373,7 +378,11 @@ impl MoqTrackReader {
                         // Group exhausted, move to next
                         self.group = None;
                     }
-                    Err(e) => return Err(anyhow::anyhow!("Read error: {}", e)),
+                    Err(_) => {
+                        // Group cancelled (e.g., superseded by newer group or
+                        // publisher disconnected). Skip to the next group.
+                        self.group = None;
+                    }
                 }
             }
 

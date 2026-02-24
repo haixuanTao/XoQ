@@ -321,7 +321,7 @@ async fn main() -> Result<()> {
     let motors: Motors = Arc::new(Mutex::new(Default::default()));
 
     // Create channels between motor sim backend and BridgeServer
-    let (write_tx, write_rx) = mpsc::channel::<Vec<u8>>(1);
+    let (write_tx, write_rx) = mpsc::channel::<Vec<u8>>(16);
     let (read_tx, read_rx) = mpsc::channel::<Vec<u8>>(16);
 
     let (moq_read_tx, moq_read_rx) = if args.moq_relay.is_some() {
