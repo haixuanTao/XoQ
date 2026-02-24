@@ -99,7 +99,7 @@
     import { loadConfig, saveConfig, flattenArmPairs } from "./openarm-config.js";
     import { initLog, log, setStatus } from "./openarm-log.js";
     import { makeJointState } from "./openarm-can.js";
-    import { subscribeArm, connectRealSense, disconnectRealSense, connectCameras, disconnectCameras, enableArmTorque, disableArmTorque, disconnectAllCmdArms } from "./openarm-moq.js";
+    import { subscribeArm, connectRealSense, disconnectRealSense, connectCameras, disconnectCameras } from "./openarm-moq.js";
     import { createAudioState, connectAudio, disconnectAudio } from "./openarm-audio.js";
     import { createChatState, connectChat, disconnectChat, sendChatMessage } from "./openarm-chat.js";
     import { initScene, buildJointRows, updatePanel, startRenderLoop, setupDumpDepth, applyCamPoseFromConfig, makeTextSprite, labelWithTags } from "./openarm-scene.js";
@@ -133,9 +133,6 @@
 
     const armStates = armConfigs.map(() => makeJointState());
 
-    // Command publishing state (per arm)
-    const cmdState = {};
-    armConfigs.forEach(arm => { cmdState[arm.id] = { conn: null, broadcast: null, track: null, group: null }; });
     // Audio + chat state
     const audioState = createAudioState();
     const chatState = createChatState();
@@ -243,10 +240,9 @@
 
     settingsToggle.addEventListener("click", toggleSettings);
 
-    // ─── Build arm panels with per-pair query + per-arm torque buttons ─
+    // ─── Build arm panels ─
     const armJointEls = [];
     const armPanelEls = [];
-    const torqueBtns = {}; // armId → button element
     const armPanelsContainer = document.getElementById("armPanelsContainer");
 
     // Group arms by pair
@@ -271,14 +267,7 @@
         const armHeader = document.createElement("div");
         armHeader.style.cssText = "display:flex; align-items:center; gap:0.5rem; margin-bottom:0.4rem;";
         armHeader.innerHTML = `<h3 style="margin:0;">${arm.label || ("Arm " + (idx + 1))}</h3>`;
-        const tBtn = document.createElement("button");
-        tBtn.className = "torque-btn";
-        tBtn.textContent = "Torque";
-        tBtn.disabled = true;
-        tBtn.dataset.armId = arm.id;
-        armHeader.appendChild(tBtn);
         section.appendChild(armHeader);
-        torqueBtns[arm.id] = tBtn;
 
         const rows = document.createElement("div");
         rows.innerHTML = `<div class="joint-row" style="font-size:0.65rem; color:#666;">
@@ -292,34 +281,6 @@
         armJointEls.push(buildJointRows(section.querySelector(`#armJointRows${idx}`), "arm" + idx));
       });
     });
-
-    // Torque button click handlers (per arm)
-    for (const [armId, btn] of Object.entries(torqueBtns)) {
-      const arm = armConfigs.find(a => a.id === armId);
-      if (!arm) continue;
-      btn.addEventListener("click", async () => {
-        const isActive = btn.classList.contains("active");
-        btn.disabled = true;
-        try {
-          if (!isActive) {
-            btn.textContent = "Enabling...";
-            await enableArmTorque(config, armId, arm.path, cmdState);
-            btn.classList.add("active");
-            btn.textContent = "Torque ON";
-          } else {
-            btn.textContent = "Disabling...";
-            await disableArmTorque(config, armId, arm.path, cmdState);
-            btn.classList.remove("active");
-            btn.textContent = "Torque";
-          }
-        } catch (e) {
-          log(`[${armId}] Torque error: ${e.message}`, "error");
-          btn.classList.remove("active");
-          btn.textContent = "Torque";
-        }
-        btn.disabled = false;
-      });
-    }
 
     // ─── DOM refs ────────────────────────────────────
     const startBtn = document.getElementById("startBtn");
@@ -393,12 +354,8 @@
           subs.push(connectChat(config, chatState, getUsername, toastsEl).catch(e => log(`[chat] ${e.message}`, "error")));
         }
 
-        // Enable audio button (if audio enabled in config) + torque buttons
+        // Enable audio button (if audio enabled in config)
         if (config.audio.enabled !== false) audioBtn.disabled = false;
-        for (const [armId, btn] of Object.entries(torqueBtns)) {
-          const arm = armConfigs.find(a => a.id === armId);
-          if (arm && arm.enabled && (arm.path || "").trim()) btn.disabled = false;
-        }
 
         // Connect audio if enabled (user previously toggled it on)
         if (audioState.enabled) {
@@ -419,13 +376,6 @@
         console.error(e);
         setStatus("Error");
       } finally {
-        // Disconnect command channels
-        disconnectAllCmdArms(armConfigs, cmdState);
-        for (const btn of Object.values(torqueBtns)) {
-          btn.classList.remove("active");
-          btn.textContent = "Torque";
-          btn.disabled = true;
-        }
         disconnectRealSense(rsCams, pointClouds);
         disconnectCameras(camState);
         disconnectChat(chatState);
@@ -438,13 +388,6 @@
 
     stopBtn.addEventListener("click", async () => {
       appState.running = false;
-      // Disconnect command channels
-      disconnectAllCmdArms(armConfigs, cmdState);
-      for (const btn of Object.values(torqueBtns)) {
-        btn.classList.remove("active");
-        btn.textContent = "Torque";
-        btn.disabled = true;
-      }
       setStatus("Stopping...");
       disconnectRealSense(rsCams, pointClouds);
       disconnectCameras(camState);

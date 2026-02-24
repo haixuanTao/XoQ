@@ -169,8 +169,6 @@ export function initSettings(containerEl, config, callbacks = {}) {
           pitch: parseFloat(card.querySelector(".pair-rp").value) || 0,
           yaw: parseFloat(card.querySelector(".pair-ry").value) || 0,
         },
-        queryRate: parseInt(card.querySelector(".pair-qrate").value) || 100,
-        autoQuery: card.querySelector(".pair-autoquery").checked,
       });
     });
 
@@ -270,16 +268,6 @@ export function initSettings(containerEl, config, callbacks = {}) {
           <label>Yaw</label><input type="number" class="pair-ry" value="${r.yaw}" step="1" />
         </div>
       </div>
-      <div class="field">
-        <label>Query Rate</label>
-        <input type="number" class="pair-qrate" value="${pair.queryRate || 100}" min="10" max="1000" step="10" />
-        <span style="font-size:0.75rem; color:#666;">Hz</span>
-      </div>
-      <div class="field">
-        <label>Auto Query</label>
-        <input type="checkbox" class="pair-autoquery" ${pair.autoQuery ? "checked" : ""} />
-        <span style="font-size:0.75rem; color:#666;">Send zero-torque queries on connect</span>
-      </div>
     `;
     // Tags
     renderTagsField(card, pair.tags || [], () => autoSave({ type: 'armPair', index: idx }));
@@ -299,10 +287,6 @@ export function initSettings(containerEl, config, callbacks = {}) {
     card.querySelector('.pair-enabled').addEventListener('change', () => structuralChange());
     card.querySelectorAll('.pair-left, .pair-right').forEach(el => {
       el.addEventListener('input', () => structuralChange());
-    });
-    card.querySelectorAll('.pair-qrate, .pair-autoquery').forEach(el => {
-      el.addEventListener('input', () => autoSave(null));
-      el.addEventListener('change', () => autoSave(null));
     });
     return card;
   }
@@ -469,8 +453,6 @@ export function initSettings(containerEl, config, callbacks = {}) {
       rightPath: "",
       position: {x: (n - 1) * 2, y: 0, z: 0},
       rotation: {roll:0, pitch:0, yaw:0},
-      queryRate: 100,
-      autoQuery: false,
     });
     saveConfig(config);
     renderArmPairs();
@@ -577,7 +559,6 @@ export function initSettings(containerEl, config, callbacks = {}) {
           rightPath: right ? right.moq_path : "",
           position: { x: (n - 1) * 2, y: 0, z: 0 },
           rotation: { roll: 0, pitch: 0, yaw: 0 },
-          queryRate: 100, autoQuery: false,
         });
         added.push("arm pair: " + (left ? left.interface : "?") + " + " + (right ? right.interface : "none"));
       }
@@ -593,7 +574,6 @@ export function initSettings(containerEl, config, callbacks = {}) {
           rightPath: right ? right.moq_path : "",
           position: { x: (n - 1) * 2, y: 0, z: 0 },
           rotation: { roll: 0, pitch: 0, yaw: 0 },
-          queryRate: 100, autoQuery: false,
         });
         added.push("fake arm pair: " + (left ? left.interface : "?") + " + " + (right ? right.interface : "none"));
       }
