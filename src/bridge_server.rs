@@ -436,46 +436,36 @@ async fn moq_state_publisher(
         let mut write_count = 0u64;
         let mut last_heartbeat = tokio::time::Instant::now();
         // Publish at a fixed 100Hz rate so the subscriber can always keep up.
-        // All CAN frames arriving between ticks are batched into one group.
+        // Only drain on tick — no rx.recv() branch, which would starve the tick.
         let mut tick = tokio::time::interval(Duration::from_millis(10));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut has_data = false;
         let disconnected = loop {
             tokio::select! {
                 result = publisher.closed() => {
                     tracing::warn!("MoQ session closed after {} writes: {:?}, reconnecting...", write_count, result.err());
                     break false;
                 }
-                data = rx.recv() => {
-                    match data {
-                        Some(d) => {
-                            batch_buf.extend_from_slice(&d);
-                            has_data = true;
-                            // Drain everything already queued
-                            while let Ok(d) = rx.try_recv() {
-                                batch_buf.extend_from_slice(&d);
-                            }
-                        }
-                        None => break true,
-                    };
-                }
                 _ = tick.tick() => {
-                    if has_data {
-                        // Count CAN frames in batch (wire format: 6+data_len per frame)
-                        let mut n_frames = 0u32;
-                        let mut off = 0usize;
-                        while off + 6 <= batch_buf.len() {
-                            let dlen = batch_buf[off + 5] as usize;
-                            if off + 6 + dlen > batch_buf.len() { break; }
-                            n_frames += 1;
-                            off += 6 + dlen;
+                    // Drain all queued CAN frames
+                    let mut got_data = false;
+                    loop {
+                        match rx.try_recv() {
+                            Ok(d) => {
+                                batch_buf.extend_from_slice(&d);
+                                got_data = true;
+                            }
+                            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
                         }
-                        tracing::info!("MoQ publish: {} bytes, {} CAN frames", batch_buf.len(), n_frames);
+                    }
+                    if rx.is_closed() && !got_data {
+                        break true;
+                    }
 
+                    if !batch_buf.is_empty() {
                         writer.write(batch_buf.clone());
                         write_count += 1;
                         batch_buf.clear();
-                        has_data = false;
 
                         if last_heartbeat.elapsed() >= Duration::from_secs(10) {
                             tracing::info!("MoQ state publisher: {} writes", write_count);
