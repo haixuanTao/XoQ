@@ -470,7 +470,7 @@ async fn moq_state_publisher(
                             n_frames += 1;
                             off += 6 + dlen;
                         }
-                        tracing::debug!("MoQ publish: {} bytes, {} CAN frames", batch_buf.len(), n_frames);
+                        tracing::info!("MoQ publish: {} bytes, {} CAN frames", batch_buf.len(), n_frames);
 
                         writer.write(batch_buf.clone());
                         write_count += 1;

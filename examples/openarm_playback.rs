@@ -24,7 +24,7 @@
 //! ```
 //!
 //! Usage:
-//!   openarm_playback <json-file> [--loop [N]] [--step] [<arm-name> <server-id> ...]
+//!   openarm_playback <json-file> [--loop [N]] [--step] [--interp] [<arm-name> <server-id> ...]
 //!
 //! Examples:
 //!   # Play to champagne arms (default)
@@ -42,7 +42,10 @@
 //!   # Loop 5 times
 //!   openarm_playback recording.json --loop 5 right <id>
 //!
-//!   # Slowly interpolate between each waypoint (~1s per transition)
+//!   # Continuous slow interpolation between waypoints
+//!   openarm_playback recording.json --interp left <id>
+//!
+//!   # Manual step: press Enter before each waypoint interpolation
 //!   openarm_playback recording.json --step left <id>
 
 use anyhow::Result;
@@ -424,14 +427,17 @@ fn main() -> Result<()> {
 
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        println!("Usage: openarm_playback <json-file> [--loop [N]] [--step] [<arm-name> <server-id> ...]");
+        println!("Usage: openarm_playback <json-file> [--loop [N]] [--step] [--interp] [<arm-name> <server-id> ...]");
         println!();
         println!("Supports v1 (wire-encoded bundles) and v2 (per-motor frames) JSON formats.");
         println!("Default arms: champagne left + right");
         println!();
         println!("Options:");
         println!("  --loop [N]   Loop playback N times (0 or omitted = infinite, Ctrl-C to stop)");
-        println!("  --step       Step mode: slowly interpolate between each waypoint (~1s per transition)");
+        println!(
+            "  --interp     Interpolation mode: slowly move between waypoints (constant speed)"
+        );
+        println!("  --step       Step mode: like --interp but press Enter before each waypoint");
         return Ok(());
     }
 
@@ -440,6 +446,7 @@ fn main() -> Result<()> {
     // Parse --loop, --step, and arm configs from remaining args
     let mut loop_count: Option<u64> = None; // None = no loop, Some(0) = infinite, Some(n) = n times
     let mut step_mode = false;
+    let mut interp_mode = false;
     let mut rest_args: Vec<String> = Vec::new();
     let mut i = 2;
     while i < args.len() {
@@ -456,6 +463,10 @@ fn main() -> Result<()> {
             i += 1;
         } else if args[i] == "--step" || args[i] == "-s" {
             step_mode = true;
+            interp_mode = true;
+            i += 1;
+        } else if args[i] == "--interp" || args[i] == "-i" {
+            interp_mode = true;
             i += 1;
         } else {
             rest_args.push(args[i].clone());
@@ -692,10 +703,24 @@ fn main() -> Result<()> {
         println!("  Motors within tolerance of start position.");
     }
 
-    // For step mode: track previous positions to interpolate between waypoints.
+    // Hold motors at expected position with kp/kd so there's no stiffness gap
+    for (arm_name, motor_id, current, target, kp, kd) in &mismatches {
+        let pos = if needs_slow_move { *target } else { *current };
+        if let Some(socket) = arms.get_mut(arm_name) {
+            let cmd_data = encode_damiao_cmd(pos, 0.0, *kp, *kd, 0.0);
+            if let Ok(frame) = socketcan::CanFrame::new(*motor_id, &cmd_data) {
+                let _ = socket.write_frame(&frame);
+            }
+        }
+    }
+    for (_name, socket) in &mut arms {
+        while socket.read_frame().ok().flatten().is_some() {}
+    }
+
+    // For interp/step mode: track previous positions to interpolate between waypoints.
     // Built from safety-check data (no extra zero-torque query that would drop stiffness).
     let mut prev_positions: HashMap<String, HashMap<u32, f64>> = HashMap::new();
-    if step_mode {
+    if interp_mode {
         for (arm_name, motor_id, current, target, _, _) in &mismatches {
             let pos = if needs_slow_move { *target } else { *current };
             prev_positions
@@ -745,7 +770,7 @@ fn main() -> Result<()> {
                 break;
             }
 
-            if step_mode {
+            if interp_mode {
                 // Decode current waypoint targets: (arm_name, motor_id, pos, kp, kd)
                 let mut curr_targets: Vec<(String, u32, f64, f64, f64)> = Vec::new();
                 for (arm_name, can_cmds) in &timestep.commands {
@@ -757,55 +782,58 @@ fn main() -> Result<()> {
                     }
                 }
 
-                // Read buffered responses from previous interpolation (no new commands sent)
                 use std::io::Write;
-                let mut actual_positions: HashMap<String, HashMap<u32, f64>> = HashMap::new();
-                for (arm_name, socket) in arms.iter_mut() {
-                    let mut arm_pos = HashMap::new();
-                    while let Ok(Some(frame)) = socket.read_frame() {
-                        let can_id = frame.id();
-                        if (0x11..=0x18).contains(&can_id) && frame.data().len() >= 8 {
-                            arm_pos.insert(can_id - 0x10, decode_response_pos(frame.data()));
-                        }
-                    }
-                    actual_positions.insert(arm_name.clone(), arm_pos);
-                }
 
-                println!("[Step {}/{}]", step_i + 1, timesteps.len());
-                for &(ref arm_name, motor_id, target_pos, _, _) in &curr_targets {
-                    let curr_pos = actual_positions
-                        .get(arm_name.as_str())
-                        .and_then(|m| m.get(&motor_id))
-                        .copied()
-                        .or_else(|| {
-                            prev_positions
-                                .get(arm_name.as_str())
-                                .and_then(|m| m.get(&motor_id))
-                                .copied()
-                        });
-                    let delta_str = match curr_pos {
-                        Some(cp) => format!("{:>+6.1}°", (target_pos - cp).to_degrees()),
-                        None => "   n/a".to_string(),
-                    };
-                    let curr_str = match curr_pos {
-                        Some(cp) => format!("{:>7.1}°", cp.to_degrees()),
-                        None => "    n/a".to_string(),
-                    };
-                    println!(
-                        "  {} 0x{:02X}: {} -> {:>7.1}° ({})",
-                        arm_name,
-                        motor_id,
-                        curr_str,
-                        target_pos.to_degrees(),
-                        delta_str,
-                    );
-                }
-                print!("  Press Enter to move (q to quit)...");
-                std::io::stdout().flush()?;
-                let mut input = String::new();
-                std::io::stdin().read_line(&mut input)?;
-                if input.trim() == "q" {
-                    break;
+                if step_mode {
+                    // Read buffered responses from previous interpolation
+                    let mut actual_positions: HashMap<String, HashMap<u32, f64>> = HashMap::new();
+                    for (arm_name, socket) in arms.iter_mut() {
+                        let mut arm_pos = HashMap::new();
+                        while let Ok(Some(frame)) = socket.read_frame() {
+                            let can_id = frame.id();
+                            if (0x11..=0x18).contains(&can_id) && frame.data().len() >= 8 {
+                                arm_pos.insert(can_id - 0x10, decode_response_pos(frame.data()));
+                            }
+                        }
+                        actual_positions.insert(arm_name.clone(), arm_pos);
+                    }
+
+                    println!("[Step {}/{}]", step_i + 1, timesteps.len());
+                    for &(ref arm_name, motor_id, target_pos, _, _) in &curr_targets {
+                        let curr_pos = actual_positions
+                            .get(arm_name.as_str())
+                            .and_then(|m| m.get(&motor_id))
+                            .copied()
+                            .or_else(|| {
+                                prev_positions
+                                    .get(arm_name.as_str())
+                                    .and_then(|m| m.get(&motor_id))
+                                    .copied()
+                            });
+                        let delta_str = match curr_pos {
+                            Some(cp) => format!("{:>+6.1}°", (target_pos - cp).to_degrees()),
+                            None => "   n/a".to_string(),
+                        };
+                        let curr_str = match curr_pos {
+                            Some(cp) => format!("{:>7.1}°", cp.to_degrees()),
+                            None => "    n/a".to_string(),
+                        };
+                        println!(
+                            "  {} 0x{:02X}: {} -> {:>7.1}° ({})",
+                            arm_name,
+                            motor_id,
+                            curr_str,
+                            target_pos.to_degrees(),
+                            delta_str,
+                        );
+                    }
+                    print!("  Press Enter to move (q to quit)...");
+                    std::io::stdout().flush()?;
+                    let mut input = String::new();
+                    std::io::stdin().read_line(&mut input)?;
+                    if input.trim() == "q" {
+                        break;
+                    }
                 }
 
                 // Compute substep count from max motor delta so speed is constant
