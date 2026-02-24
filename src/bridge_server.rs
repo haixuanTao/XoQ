@@ -435,9 +435,9 @@ async fn moq_state_publisher(
         let mut batch_buf = Vec::with_capacity(1024);
         let mut write_count = 0u64;
         let mut last_heartbeat = tokio::time::Instant::now();
-        // Publish at a fixed 100Hz rate so the subscriber can always keep up.
-        // Only drain on tick — no rx.recv() branch, which would starve the tick.
-        let mut tick = tokio::time::interval(Duration::from_millis(10));
+        // Publish at 50Hz — fast enough for smooth UI, slow enough that
+        // the browser subscriber over WebSocket can keep up without group resets.
+        let mut tick = tokio::time::interval(Duration::from_millis(20));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let disconnected = loop {
             tokio::select! {
