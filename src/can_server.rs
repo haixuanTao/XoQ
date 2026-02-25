@@ -55,6 +55,8 @@ fn can_reader_thread_fd(
     let mut would_blocks: u32 = 0;
     let mut timed_outs: u32 = 0;
     let mut writes_at_gap_start: u64 = 0;
+    // MoQ batch buffer: accumulate frames, flush on CAN bus gap (timeout/wouldblock)
+    let mut moq_batch = Vec::with_capacity(256);
     loop {
         match socket.read_frame() {
             Ok(frame) => {
@@ -94,10 +96,9 @@ fn can_reader_thread_fd(
                     }
                 };
                 let bytes = wire::encode(&any_frame);
-                if let Some(ref moq) = moq_tx {
-                    if moq.try_send(bytes.clone()).is_err() {
-                        tracing::debug!("MoQ channel full, dropping CAN frame");
-                    }
+                // Accumulate for MoQ batch (flushed on bus gap)
+                if moq_tx.is_some() {
+                    moq_batch.extend_from_slice(&bytes);
                 }
                 if tx.blocking_send(bytes).is_err() {
                     break;
@@ -105,10 +106,28 @@ fn can_reader_thread_fd(
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 would_blocks += 1;
+                // Bus gap — flush MoQ batch if any frames accumulated
+                if !moq_batch.is_empty() {
+                    if let Some(ref moq) = moq_tx {
+                        if moq.try_send(moq_batch.clone()).is_err() {
+                            tracing::debug!("MoQ channel full, dropping batch");
+                        }
+                        moq_batch.clear();
+                    }
+                }
                 continue;
             }
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
                 timed_outs += 1;
+                // Bus gap — flush MoQ batch if any frames accumulated
+                if !moq_batch.is_empty() {
+                    if let Some(ref moq) = moq_tx {
+                        if moq.try_send(moq_batch.clone()).is_err() {
+                            tracing::debug!("MoQ channel full, dropping batch");
+                        }
+                        moq_batch.clear();
+                    }
+                }
                 continue;
             }
             Err(e) => {
@@ -130,6 +149,8 @@ fn can_reader_thread_std(
     let mut would_blocks: u32 = 0;
     let mut timed_outs: u32 = 0;
     let mut writes_at_gap_start: u64 = 0;
+    // MoQ batch buffer: accumulate frames, flush on CAN bus gap (timeout/wouldblock)
+    let mut moq_batch = Vec::with_capacity(256);
     loop {
         match socket.read_frame() {
             Ok(frame) => {
@@ -157,10 +178,9 @@ fn can_reader_thread_std(
                     }
                 };
                 let bytes = wire::encode(&any_frame);
-                if let Some(ref moq) = moq_tx {
-                    if moq.try_send(bytes.clone()).is_err() {
-                        tracing::debug!("MoQ channel full, dropping CAN frame");
-                    }
+                // Accumulate for MoQ batch (flushed on bus gap)
+                if moq_tx.is_some() {
+                    moq_batch.extend_from_slice(&bytes);
                 }
                 if tx.blocking_send(bytes).is_err() {
                     break;
@@ -168,10 +188,28 @@ fn can_reader_thread_std(
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 would_blocks += 1;
+                // Bus gap — flush MoQ batch if any frames accumulated
+                if !moq_batch.is_empty() {
+                    if let Some(ref moq) = moq_tx {
+                        if moq.try_send(moq_batch.clone()).is_err() {
+                            tracing::debug!("MoQ channel full, dropping batch");
+                        }
+                        moq_batch.clear();
+                    }
+                }
                 continue;
             }
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
                 timed_outs += 1;
+                // Bus gap — flush MoQ batch if any frames accumulated
+                if !moq_batch.is_empty() {
+                    if let Some(ref moq) = moq_tx {
+                        if moq.try_send(moq_batch.clone()).is_err() {
+                            tracing::debug!("MoQ channel full, dropping batch");
+                        }
+                        moq_batch.clear();
+                    }
+                }
                 continue;
             }
             Err(e) => {
