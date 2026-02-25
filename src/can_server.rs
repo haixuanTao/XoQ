@@ -57,6 +57,10 @@ fn can_reader_thread_fd(
     let mut writes_at_gap_start: u64 = 0;
     // MoQ batch buffer: accumulate frames, flush on CAN bus gap (timeout/wouldblock)
     let mut moq_batch = Vec::with_capacity(256);
+    let mut moq_batch_frames = 0u32;
+    let mut moq_flush_count = 0u64;
+    let mut moq_total_frames = 0u64;
+    let mut moq_last_log = Instant::now();
     loop {
         match socket.read_frame() {
             Ok(frame) => {
@@ -99,6 +103,7 @@ fn can_reader_thread_fd(
                 // Accumulate for MoQ batch (flushed on bus gap)
                 if moq_tx.is_some() {
                     moq_batch.extend_from_slice(&bytes);
+                    moq_batch_frames += 1;
                 }
                 if tx.blocking_send(bytes).is_err() {
                     break;
@@ -109,10 +114,22 @@ fn can_reader_thread_fd(
                 // Bus gap — flush MoQ batch if any frames accumulated
                 if !moq_batch.is_empty() {
                     if let Some(ref moq) = moq_tx {
+                        moq_flush_count += 1;
+                        moq_total_frames += moq_batch_frames as u64;
                         if moq.try_send(moq_batch.clone()).is_err() {
                             tracing::debug!("MoQ channel full, dropping batch");
                         }
+                        if moq_last_log.elapsed() >= Duration::from_secs(10) {
+                            tracing::info!(
+                                "CAN reader MoQ: {} flushes, {} frames, {:.1} frames/flush, {} bytes last",
+                                moq_flush_count, moq_total_frames,
+                                moq_total_frames as f64 / moq_flush_count.max(1) as f64,
+                                moq_batch.len(),
+                            );
+                            moq_last_log = Instant::now();
+                        }
                         moq_batch.clear();
+                        moq_batch_frames = 0;
                     }
                 }
                 continue;
@@ -122,10 +139,22 @@ fn can_reader_thread_fd(
                 // Bus gap — flush MoQ batch if any frames accumulated
                 if !moq_batch.is_empty() {
                     if let Some(ref moq) = moq_tx {
+                        moq_flush_count += 1;
+                        moq_total_frames += moq_batch_frames as u64;
                         if moq.try_send(moq_batch.clone()).is_err() {
                             tracing::debug!("MoQ channel full, dropping batch");
                         }
+                        if moq_last_log.elapsed() >= Duration::from_secs(10) {
+                            tracing::info!(
+                                "CAN reader MoQ: {} flushes, {} frames, {:.1} frames/flush, {} bytes last",
+                                moq_flush_count, moq_total_frames,
+                                moq_total_frames as f64 / moq_flush_count.max(1) as f64,
+                                moq_batch.len(),
+                            );
+                            moq_last_log = Instant::now();
+                        }
                         moq_batch.clear();
+                        moq_batch_frames = 0;
                     }
                 }
                 continue;
@@ -151,6 +180,10 @@ fn can_reader_thread_std(
     let mut writes_at_gap_start: u64 = 0;
     // MoQ batch buffer: accumulate frames, flush on CAN bus gap (timeout/wouldblock)
     let mut moq_batch = Vec::with_capacity(256);
+    let mut moq_batch_frames = 0u32;
+    let mut moq_flush_count = 0u64;
+    let mut moq_total_frames = 0u64;
+    let mut moq_last_log = Instant::now();
     loop {
         match socket.read_frame() {
             Ok(frame) => {
@@ -181,6 +214,7 @@ fn can_reader_thread_std(
                 // Accumulate for MoQ batch (flushed on bus gap)
                 if moq_tx.is_some() {
                     moq_batch.extend_from_slice(&bytes);
+                    moq_batch_frames += 1;
                 }
                 if tx.blocking_send(bytes).is_err() {
                     break;
@@ -191,10 +225,22 @@ fn can_reader_thread_std(
                 // Bus gap — flush MoQ batch if any frames accumulated
                 if !moq_batch.is_empty() {
                     if let Some(ref moq) = moq_tx {
+                        moq_flush_count += 1;
+                        moq_total_frames += moq_batch_frames as u64;
                         if moq.try_send(moq_batch.clone()).is_err() {
                             tracing::debug!("MoQ channel full, dropping batch");
                         }
+                        if moq_last_log.elapsed() >= Duration::from_secs(10) {
+                            tracing::info!(
+                                "CAN reader MoQ: {} flushes, {} frames, {:.1} frames/flush, {} bytes last",
+                                moq_flush_count, moq_total_frames,
+                                moq_total_frames as f64 / moq_flush_count.max(1) as f64,
+                                moq_batch.len(),
+                            );
+                            moq_last_log = Instant::now();
+                        }
                         moq_batch.clear();
+                        moq_batch_frames = 0;
                     }
                 }
                 continue;
@@ -204,10 +250,22 @@ fn can_reader_thread_std(
                 // Bus gap — flush MoQ batch if any frames accumulated
                 if !moq_batch.is_empty() {
                     if let Some(ref moq) = moq_tx {
+                        moq_flush_count += 1;
+                        moq_total_frames += moq_batch_frames as u64;
                         if moq.try_send(moq_batch.clone()).is_err() {
                             tracing::debug!("MoQ channel full, dropping batch");
                         }
+                        if moq_last_log.elapsed() >= Duration::from_secs(10) {
+                            tracing::info!(
+                                "CAN reader MoQ: {} flushes, {} frames, {:.1} frames/flush, {} bytes last",
+                                moq_flush_count, moq_total_frames,
+                                moq_total_frames as f64 / moq_flush_count.max(1) as f64,
+                                moq_batch.len(),
+                            );
+                            moq_last_log = Instant::now();
+                        }
                         moq_batch.clear();
+                        moq_batch_frames = 0;
                     }
                 }
                 continue;
