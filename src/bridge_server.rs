@@ -143,15 +143,71 @@ impl BridgeServer {
         )> = None;
 
         loop {
-            let conn = match self.endpoint.accept().await? {
-                Some(c) => c,
-                None => continue,
+            // Wait for next iroh connection.
+            // When no connection is active, drain read_rx so the backend
+            // writer (CAN reader thread) never blocks on a full channel.
+            // Without this drain, blocking_send fills the channel (cap 16)
+            // and blocks the reader thread, starving the MoQ publisher.
+            let conn = 'accept: loop {
+                match current_conn.take() {
+                    Some((cancel, mut handle)) => {
+                        // Connection active — wait for new connection or disconnect
+                        tokio::select! {
+                            result = self.endpoint.accept() => {
+                                // Connection still running, put it back
+                                current_conn = Some((cancel, handle));
+                                match result? {
+                                    Some(c) => break 'accept c,
+                                    None => continue,
+                                }
+                            }
+                            join_result = &mut handle => {
+                                // Connection ended naturally
+                                tracing::info!("Client disconnected");
+                                match join_result {
+                                    Ok(rx) => {
+                                        self.read_rx.lock().unwrap().replace(rx);
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("Connection task panicked: {}", e);
+                                    }
+                                }
+                                // current_conn stays None → next iteration drains
+                            }
+                        }
+                    }
+                    None => {
+                        // No active connection — drain read_rx while waiting
+                        let mut rx = self
+                            .read_rx
+                            .lock()
+                            .unwrap()
+                            .take()
+                            .expect("read receiver should be available");
+                        let result = loop {
+                            tokio::select! {
+                                result = self.endpoint.accept() => {
+                                    break result;
+                                }
+                                _ = rx.recv() => {
+                                    // Discard — no iroh client to forward to
+                                }
+                            }
+                        };
+                        self.read_rx.lock().unwrap().replace(rx);
+                        match result? {
+                            Some(c) => break 'accept c,
+                            None => continue,
+                        }
+                    }
+                }
             };
 
             tracing::info!("Client connected: {}", conn.remote_id());
 
+            // Cancel previous connection if still active (new client takes over)
             if let Some((cancel, handle)) = current_conn.take() {
-                tracing::info!("New client connected, closing previous connection");
+                tracing::info!("Replacing previous connection");
                 cancel.cancel();
                 match handle.await {
                     Ok(rx) => {
@@ -434,43 +490,42 @@ async fn moq_state_publisher(
 
         let mut batch_buf = Vec::with_capacity(1024);
         let mut write_count = 0u64;
+        let mut total_frames = 0u64;
         let mut last_heartbeat = tokio::time::Instant::now();
-        // Publish at 50Hz — fast enough for smooth UI, slow enough that
-        // the browser subscriber over WebSocket can keep up without group resets.
-        let mut tick = tokio::time::interval(Duration::from_millis(20));
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let disconnected = loop {
             tokio::select! {
                 result = publisher.closed() => {
                     tracing::warn!("MoQ session closed after {} writes: {:?}, reconnecting...", write_count, result.err());
                     break false;
                 }
-                _ = tick.tick() => {
-                    // Drain all queued CAN frames
-                    let mut got_data = false;
-                    loop {
-                        match rx.try_recv() {
-                            Ok(d) => {
-                                batch_buf.extend_from_slice(&d);
-                                got_data = true;
-                            }
-                            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
-                        }
-                    }
-                    if rx.is_closed() && !got_data {
-                        break true;
+                data = rx.recv() => {
+                    let first = match data {
+                        Some(d) => d,
+                        None => break true,
+                    };
+
+                    batch_buf.clear();
+                    batch_buf.extend_from_slice(&first);
+                    let mut frame_count = 1u32;
+
+                    // Greedily collect any other queued frames (rest of motor burst)
+                    while let Ok(d) = rx.try_recv() {
+                        batch_buf.extend_from_slice(&d);
+                        frame_count += 1;
                     }
 
-                    if !batch_buf.is_empty() {
-                        writer.write(batch_buf.clone());
-                        write_count += 1;
-                        batch_buf.clear();
+                    writer.write(batch_buf.clone());
+                    write_count += 1;
+                    total_frames += frame_count as u64;
 
-                        if last_heartbeat.elapsed() >= Duration::from_secs(10) {
-                            tracing::info!("MoQ state publisher: {} writes", write_count);
-                            last_heartbeat = tokio::time::Instant::now();
-                        }
+                    if last_heartbeat.elapsed() >= Duration::from_secs(10) {
+                        tracing::info!(
+                            "MoQ state: {} groups, {} frames total, {:.1} frames/group avg, {} bytes last batch",
+                            write_count, total_frames,
+                            total_frames as f64 / write_count.max(1) as f64,
+                            batch_buf.len(),
+                        );
+                        last_heartbeat = tokio::time::Instant::now();
                     }
                 }
             }

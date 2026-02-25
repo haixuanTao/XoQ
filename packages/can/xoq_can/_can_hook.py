@@ -13,9 +13,13 @@ import importlib
 import importlib.abc
 import importlib.machinery
 import importlib.util
+import os
 import re
 import sys
 import types
+from concurrent.futures import ThreadPoolExecutor
+
+_XOQ_TIMEOUT = float(os.environ.get("XOQ_CAN_TIMEOUT", "10"))
 
 
 # Pattern for iroh node IDs (64-char hex-encoded ed25519 public keys)
@@ -52,9 +56,21 @@ class _XoqBusType(type):
             # Strip args that xoq doesn't need but python-can passes
             kwargs.pop("interface", None)
             # Keep relay and insecure for MoQ paths, pass through to xoq_can.Bus
-            if args:
-                return cls._xoq(*args, **kwargs)
-            return cls._xoq(**kwargs)
+            def _create():
+                if args:
+                    return cls._xoq(*args, **kwargs)
+                return cls._xoq(**kwargs)
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(_create)
+                try:
+                    return future.result(timeout=_XOQ_TIMEOUT)
+                except TimeoutError:
+                    future.cancel()
+                    raise TimeoutError(
+                        f"xoq_can: Bus(channel={channel!r}) timed out after {_XOQ_TIMEOUT}s. "
+                        f"Is the remote relay running? "
+                        f"Set XOQ_CAN_TIMEOUT to adjust (current: {_XOQ_TIMEOUT}s)."
+                    )
 
         # Strip MoQ-specific kwargs before passing to python-can
         kwargs.pop("relay", None)

@@ -176,7 +176,6 @@ fn parse_args() -> Args {
         match args[i].as_str() {
             "--relay" if i + 1 < args.len() => {
                 result.relay = args[i + 1].clone();
-                result.insecure = true; // self-hosted relays typically use self-signed certs
                 i += 2;
             }
             "--path" if i + 1 < args.len() => {
@@ -356,80 +355,21 @@ async fn main() -> Result<()> {
     // Outer reconnect loop — camera stays open, only MoQ reconnects
     let mut moq_delay = std::time::Duration::from_secs(1);
     loop {
-        // Connect to MoQ relay — try :4443 (QUIC-only) first, fall back to default port
-        let parsed_relay = url::Url::parse(&args.relay)?;
-        let relay_4443 = if parsed_relay.port().is_none() {
-            format!(
-                "{}://{}:4443{}",
-                parsed_relay.scheme(),
-                parsed_relay.host_str().unwrap_or("localhost"),
-                parsed_relay.path()
-            )
-        } else {
-            args.relay.clone()
-        };
-
-        tracing::info!(
-            "Connecting to MoQ relay: {} (trying :4443 first)",
-            args.relay
-        );
-        let mut builder_4443 = MoqBuilder::new().relay(&relay_4443).path(&args.path);
+        tracing::info!("Connecting to MoQ relay: {}", args.relay);
+        let mut builder = MoqBuilder::new().relay(&args.relay).path(&args.path);
         if args.insecure {
-            builder_4443 = builder_4443.disable_tls_verify();
+            builder = builder.disable_tls_verify();
         }
 
-        let publisher = match tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            builder_4443.connect_publisher(),
-        )
-        .await
-        {
-            Ok(Ok(pub_)) => {
-                tracing::info!("Connected to MoQ relay on :4443");
-                Some(pub_)
-            }
-            Ok(Err(e)) => {
-                tracing::warn!("MoQ :4443 failed: {}, falling back to {}", e, args.relay);
-                let mut builder = MoqBuilder::new().relay(&args.relay).path(&args.path);
-                if args.insecure {
-                    builder = builder.disable_tls_verify();
-                }
-                match builder.connect_publisher().await {
-                    Ok(pub_) => Some(pub_),
-                    Err(e) => {
-                        tracing::error!(
-                            "MoQ connect failed: {}, retrying in {:?}...",
-                            e,
-                            moq_delay
-                        );
-                        tokio::time::sleep(moq_delay).await;
-                        moq_delay = (moq_delay * 2).min(std::time::Duration::from_secs(30));
-                        continue;
-                    }
-                }
-            }
-            Err(_) => {
-                tracing::warn!("MoQ :4443 timed out, falling back to {}", args.relay);
-                let mut builder = MoqBuilder::new().relay(&args.relay).path(&args.path);
-                if args.insecure {
-                    builder = builder.disable_tls_verify();
-                }
-                match builder.connect_publisher().await {
-                    Ok(pub_) => Some(pub_),
-                    Err(e) => {
-                        tracing::error!(
-                            "MoQ connect failed: {}, retrying in {:?}...",
-                            e,
-                            moq_delay
-                        );
-                        tokio::time::sleep(moq_delay).await;
-                        moq_delay = (moq_delay * 2).min(std::time::Duration::from_secs(30));
-                        continue;
-                    }
-                }
+        let mut publisher = match builder.connect_publisher().await {
+            Ok(pub_) => pub_,
+            Err(e) => {
+                tracing::error!("MoQ connect failed: {}, retrying in {:?}...", e, moq_delay);
+                tokio::time::sleep(moq_delay).await;
+                moq_delay = (moq_delay * 2).min(std::time::Duration::from_secs(30));
+                continue;
             }
         };
-        let mut publisher = publisher.unwrap();
         let mut video_track = publisher.create_track("video");
         let mut depth_track = publisher.create_track("depth");
         let mut metadata_track = publisher.create_track("metadata");

@@ -612,6 +612,20 @@ fn main() -> Result<()> {
         }
     }
 
+    // Immediately hold motors at queried position with kp/kd so they don't drift
+    // while the user reads the screen or presses Enter
+    for (arm_name, motor_id, current, _target, kp, kd) in &mismatches {
+        if let Some(socket) = arms.get_mut(arm_name) {
+            let cmd_data = encode_damiao_cmd(*current, 0.0, *kp, *kd, 0.0);
+            if let Ok(frame) = socketcan::CanFrame::new(*motor_id, &cmd_data) {
+                let _ = socket.write_frame(&frame);
+            }
+        }
+    }
+    for (_name, socket) in &mut arms {
+        while socket.read_frame().ok().flatten().is_some() {}
+    }
+
     if needs_slow_move {
         println!("\n  Motors far from start position:");
         println!(
@@ -701,20 +715,6 @@ fn main() -> Result<()> {
         }
     } else {
         println!("  Motors within tolerance of start position.");
-    }
-
-    // Hold motors at expected position with kp/kd so there's no stiffness gap
-    for (arm_name, motor_id, current, target, kp, kd) in &mismatches {
-        let pos = if needs_slow_move { *target } else { *current };
-        if let Some(socket) = arms.get_mut(arm_name) {
-            let cmd_data = encode_damiao_cmd(pos, 0.0, *kp, *kd, 0.0);
-            if let Ok(frame) = socketcan::CanFrame::new(*motor_id, &cmd_data) {
-                let _ = socket.write_frame(&frame);
-            }
-        }
-    }
-    for (_name, socket) in &mut arms {
-        while socket.read_frame().ok().flatten().is_some() {}
     }
 
     // For interp/step mode: track previous positions to interpolate between waypoints.

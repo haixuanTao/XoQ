@@ -1594,12 +1594,29 @@ impl Av1CmafMuxer {
         let reduced_still_picture_header = (payload[0] >> 3) & 1;
 
         if reduced_still_picture_header == 1 && payload.len() > 1 {
-            // seq_level_idx[0] is next 5 bits
+            // seq_level_idx[0] is next 5 bits (bits 5-9)
             seq_level_idx = ((payload[0] & 0x07) << 2) | (payload[1] >> 6);
-        } else if payload.len() > 1 {
-            // For non-reduced headers, parse timing_info_present(1) + more complex structure
-            // For our use case, just use safe defaults based on profile
-            seq_level_idx = 8; // Level 4.0
+        } else if payload.len() > 2 {
+            // Non-reduced header: bits 5-6 are timing_info_present(1) + initial_display_delay_present(1),
+            // bits 7-11 are operating_points_cnt_minus_1(5), bits 12-23 are operating_point_idc[0](12),
+            // bits 24-28 are seq_level_idx[0](5).
+            // Bit 5 = timing_info_present_flag
+            let timing_info_present = (payload[0] >> 2) & 1;
+            if timing_info_present == 0 {
+                // Bit 6 = initial_display_delay_present_flag
+                // Bits 7-11 = operating_points_cnt_minus_1 (5 bits)
+                // Bits 12-23 = operating_point_idc[0] (12 bits)
+                // Bits 24-28 = seq_level_idx[0] (5 bits)
+                // Byte layout: payload[0] bits [2:0] + payload[1] bits [7:0] + payload[2] bits [7:0] + payload[3] bits [7:0]
+                // Bit 5 (timing) is payload[0] bit 2, bit 6 (iddp) is payload[0] bit 1,
+                // bits 7-11 (op_cnt) = payload[0] bit 0 + payload[1] bits [7:4]
+                // bits 12-23 (op_idc) = payload[1] bits [3:0] + payload[2] bits [7:0]
+                // bits 24-28 (level) = payload[3] bits [7:3]
+                if payload.len() > 3 {
+                    seq_level_idx = (payload[3] >> 3) & 0x1F;
+                }
+            }
+            // If timing_info is present, we can't easily skip it; fall back to default
         }
 
         // Set bitdepth fields based on profile
@@ -1735,6 +1752,825 @@ impl Av1CmafMuxer {
         buf.extend_from_slice(b"mdat");
         for frame in &self.pending_frames {
             buf.extend_from_slice(&frame.data);
+        }
+    }
+}
+
+// ============================================================================
+// fMP4 Box Parser — for parsing incoming CMAF init/media segments
+// ============================================================================
+
+/// Parsed box header from an fMP4 byte stream.
+#[derive(Debug, Clone)]
+pub struct BoxHeader {
+    pub box_type: [u8; 4],
+    pub offset: usize,
+    pub size: usize,
+    pub header_size: usize,
+}
+
+impl BoxHeader {
+    /// Returns the content bytes (after the header) within the given data slice.
+    pub fn content<'a>(&self, data: &'a [u8]) -> &'a [u8] {
+        let start = self.offset + self.header_size;
+        let end = (self.offset + self.size).min(data.len());
+        if start >= end {
+            &[]
+        } else {
+            &data[start..end]
+        }
+    }
+}
+
+/// Iterate over top-level boxes in a byte slice.
+pub fn iter_boxes(data: &[u8]) -> Vec<BoxHeader> {
+    let mut boxes = Vec::new();
+    let mut offset = 0;
+    while offset + 8 <= data.len() {
+        let size = u32::from_be_bytes([
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+        ]) as usize;
+        let box_type: [u8; 4] = [
+            data[offset + 4],
+            data[offset + 5],
+            data[offset + 6],
+            data[offset + 7],
+        ];
+        if size < 8 {
+            break;
+        }
+        boxes.push(BoxHeader {
+            box_type,
+            offset,
+            size: size.min(data.len() - offset),
+            header_size: 8,
+        });
+        offset += size;
+    }
+    boxes
+}
+
+/// Find a specific box by type (non-recursive, searches top-level only).
+pub fn find_box(data: &[u8], box_type: &[u8; 4]) -> Option<BoxHeader> {
+    iter_boxes(data)
+        .into_iter()
+        .find(|b| &b.box_type == box_type)
+}
+
+/// Find a box by navigating a path of nested container boxes.
+/// Returns the content bytes of the final box in the path.
+pub fn find_box_path<'a>(data: &'a [u8], path: &[&[u8; 4]]) -> Option<&'a [u8]> {
+    if path.is_empty() {
+        return Some(data);
+    }
+    let header = find_box(data, path[0])?;
+    let content = header.content(data);
+    if path.len() == 1 {
+        Some(content)
+    } else {
+        find_box_path(content, &path[1..])
+    }
+}
+
+/// Parsed information from a CMAF init segment (ftyp + moov).
+#[derive(Debug, Clone)]
+pub struct ParsedInitSegment {
+    pub av1c_config: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub timescale: u32,
+}
+
+/// Parse a CMAF init segment to extract codec config, dimensions, and timescale.
+pub fn parse_cmaf_init(data: &[u8]) -> anyhow::Result<ParsedInitSegment> {
+    // Navigate: moov → trak → mdia → minf → stbl → stsd → av01 → av1C
+    let stsd_content = find_box_path(
+        data,
+        &[b"moov", b"trak", b"mdia", b"minf", b"stbl", b"stsd"],
+    )
+    .ok_or_else(|| anyhow::anyhow!("Could not find stsd box in init segment"))?;
+
+    // stsd has 8 bytes of version/flags + entry_count before the sample entry
+    if stsd_content.len() < 8 {
+        anyhow::bail!("stsd content too short");
+    }
+    let sample_entry_data = &stsd_content[8..]; // skip version(4) + entry_count(4)
+
+    // The sample entry (av01) is a box itself
+    let av01_header = find_box(sample_entry_data, b"av01")
+        .ok_or_else(|| anyhow::anyhow!("Could not find av01 sample entry"))?;
+    let av01_content = av01_header.content(sample_entry_data);
+
+    // av01 sample entry structure:
+    //   6B reserved + 2B data_ref_idx + 2B pre_defined + 2B reserved + 12B pre_defined
+    //   + 2B width + 2B height + 4B h_res + 4B v_res + 4B reserved + 2B frame_count
+    //   + 32B compressor + 2B depth + 2B pre_defined = 78 bytes
+    // Then child boxes (av1C, etc.)
+    if av01_content.len() < 78 {
+        anyhow::bail!("av01 content too short: {} bytes", av01_content.len());
+    }
+    let width = u16::from_be_bytes([av01_content[24], av01_content[25]]) as u32;
+    let height = u16::from_be_bytes([av01_content[26], av01_content[27]]) as u32;
+
+    // Find av1C in the remaining data after the fixed fields
+    let av1c_area = &av01_content[78..];
+    let av1c_header =
+        find_box(av1c_area, b"av1C").ok_or_else(|| anyhow::anyhow!("Could not find av1C box"))?;
+    let av1c_config = av1c_header.content(av1c_area).to_vec();
+
+    // Navigate: moov → trak → mdia → mdhd for timescale
+    let mdhd_content = find_box_path(data, &[b"moov", b"trak", b"mdia", b"mdhd"])
+        .ok_or_else(|| anyhow::anyhow!("Could not find mdhd box"))?;
+    // mdhd v0: version(1) + flags(3) + creation(4) + modification(4) + timescale(4)
+    let timescale = if mdhd_content.len() >= 16 {
+        u32::from_be_bytes([
+            mdhd_content[12],
+            mdhd_content[13],
+            mdhd_content[14],
+            mdhd_content[15],
+        ])
+    } else {
+        90000
+    };
+
+    Ok(ParsedInitSegment {
+        av1c_config,
+        width,
+        height,
+        timescale,
+    })
+}
+
+/// A single sample entry from a trun box.
+#[derive(Debug, Clone)]
+pub struct SampleEntry {
+    pub duration: u32,
+    pub size: u32,
+    pub flags: u32,
+    pub composition_offset: i32,
+}
+
+/// Parsed information from a CMAF media segment (styp + moof + mdat).
+#[derive(Debug, Clone)]
+pub struct ParsedMediaSegment {
+    pub sequence_number: u32,
+    pub base_decode_time: u64,
+    pub samples: Vec<SampleEntry>,
+    pub mdat_payload: Vec<u8>,
+}
+
+/// Parse a CMAF media segment to extract fragment info and raw mdat payload.
+pub fn parse_cmaf_media_segment(data: &[u8]) -> anyhow::Result<ParsedMediaSegment> {
+    // Find moof box
+    let moof_header =
+        find_box(data, b"moof").ok_or_else(|| anyhow::anyhow!("Could not find moof box"))?;
+    let moof_content = moof_header.content(data);
+
+    // Parse mfhd for sequence_number
+    let mfhd_content = find_box(moof_content, b"mfhd")
+        .ok_or_else(|| anyhow::anyhow!("Could not find mfhd box"))?;
+    let mfhd = mfhd_content.content(moof_content);
+    let sequence_number = if mfhd.len() >= 8 {
+        u32::from_be_bytes([mfhd[4], mfhd[5], mfhd[6], mfhd[7]])
+    } else {
+        0
+    };
+
+    // Parse traf
+    let traf_header = find_box(moof_content, b"traf")
+        .ok_or_else(|| anyhow::anyhow!("Could not find traf box"))?;
+    let traf_content = traf_header.content(moof_content);
+
+    // Parse tfdt for base_decode_time
+    let tfdt_header = find_box(traf_content, b"tfdt")
+        .ok_or_else(|| anyhow::anyhow!("Could not find tfdt box"))?;
+    let tfdt = tfdt_header.content(traf_content);
+    let base_decode_time = if !tfdt.is_empty() && tfdt[0] == 1 {
+        // version 1: 64-bit
+        if tfdt.len() >= 12 {
+            u64::from_be_bytes([
+                tfdt[4], tfdt[5], tfdt[6], tfdt[7], tfdt[8], tfdt[9], tfdt[10], tfdt[11],
+            ])
+        } else {
+            0
+        }
+    } else {
+        // version 0: 32-bit
+        if tfdt.len() >= 8 {
+            u32::from_be_bytes([tfdt[4], tfdt[5], tfdt[6], tfdt[7]]) as u64
+        } else {
+            0
+        }
+    };
+
+    // Parse trun for samples
+    let trun_header = find_box(traf_content, b"trun")
+        .ok_or_else(|| anyhow::anyhow!("Could not find trun box"))?;
+    let trun = trun_header.content(traf_content);
+    // trun: version(1) + flags(3) + sample_count(4) + [data_offset(4)] + per-sample entries
+    if trun.len() < 8 {
+        anyhow::bail!("trun content too short");
+    }
+    let trun_flags = u32::from_be_bytes([0, trun[1], trun[2], trun[3]]);
+    let sample_count = u32::from_be_bytes([trun[4], trun[5], trun[6], trun[7]]);
+
+    let mut offset = 8;
+    if trun_flags & 0x01 != 0 {
+        offset += 4; // data_offset present
+    }
+    if trun_flags & 0x04 != 0 {
+        offset += 4; // first_sample_flags present
+    }
+
+    let has_duration = trun_flags & 0x100 != 0;
+    let has_size = trun_flags & 0x200 != 0;
+    let has_flags = trun_flags & 0x400 != 0;
+    let has_cts_offset = trun_flags & 0x800 != 0;
+
+    let mut samples = Vec::with_capacity(sample_count as usize);
+    for _ in 0..sample_count {
+        let duration = if has_duration && offset + 4 <= trun.len() {
+            let v = u32::from_be_bytes([
+                trun[offset],
+                trun[offset + 1],
+                trun[offset + 2],
+                trun[offset + 3],
+            ]);
+            offset += 4;
+            v
+        } else {
+            0
+        };
+        let size = if has_size && offset + 4 <= trun.len() {
+            let v = u32::from_be_bytes([
+                trun[offset],
+                trun[offset + 1],
+                trun[offset + 2],
+                trun[offset + 3],
+            ]);
+            offset += 4;
+            v
+        } else {
+            0
+        };
+        let flags = if has_flags && offset + 4 <= trun.len() {
+            let v = u32::from_be_bytes([
+                trun[offset],
+                trun[offset + 1],
+                trun[offset + 2],
+                trun[offset + 3],
+            ]);
+            offset += 4;
+            v
+        } else {
+            0
+        };
+        let composition_offset = if has_cts_offset && offset + 4 <= trun.len() {
+            let v = i32::from_be_bytes([
+                trun[offset],
+                trun[offset + 1],
+                trun[offset + 2],
+                trun[offset + 3],
+            ]);
+            offset += 4;
+            v
+        } else {
+            0
+        };
+        samples.push(SampleEntry {
+            duration,
+            size,
+            flags,
+            composition_offset,
+        });
+    }
+
+    // Find mdat box and extract payload
+    let mdat_header =
+        find_box(data, b"mdat").ok_or_else(|| anyhow::anyhow!("Could not find mdat box"))?;
+    let mdat_payload = mdat_header.content(data).to_vec();
+
+    Ok(ParsedMediaSegment {
+        sequence_number,
+        base_decode_time,
+        samples,
+        mdat_payload,
+    })
+}
+
+// ============================================================================
+// Multi-Track fMP4 Writer — for recording multiple tracks into one file
+// ============================================================================
+
+/// Configuration for a single track in a multi-track recording.
+#[derive(Debug, Clone)]
+pub struct TrackConfig {
+    pub track_id: u32,
+    pub timescale: u32,
+    /// Handler type: b"vide" for video, b"meta" for metadata
+    pub handler: [u8; 4],
+    /// For video: av1C config bytes. For metadata: empty.
+    pub codec_config: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    /// Whether this is a high-bitdepth (10-bit) track
+    pub high_bitdepth: bool,
+}
+
+/// Fragment data for one track within a multi-track moof.
+#[derive(Debug, Clone)]
+pub struct TrackFragment {
+    pub track_id: u32,
+    pub base_decode_time: u64,
+    pub samples: Vec<SampleEntry>,
+    pub data: Vec<u8>,
+}
+
+/// Multi-track fMP4 writer for recording.
+pub struct MultiTrackRecorder {
+    sequence_number: u32,
+    tracks: Vec<TrackConfig>,
+}
+
+impl MultiTrackRecorder {
+    pub fn new(tracks: Vec<TrackConfig>) -> Self {
+        Self {
+            sequence_number: 1,
+            tracks,
+        }
+    }
+
+    /// Write the init segment (ftyp + multi-track moov).
+    pub fn write_init_segment(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        self.write_ftyp(&mut buf);
+        self.write_moov(&mut buf);
+        buf
+    }
+
+    /// Write a fragment containing data for one or more tracks.
+    pub fn write_fragment(&mut self, fragments: &[TrackFragment]) -> Vec<u8> {
+        if fragments.is_empty() {
+            return Vec::new();
+        }
+        let mut buf = Vec::new();
+        self.write_multi_moof_mdat(&mut buf, fragments);
+        self.sequence_number += 1;
+        buf
+    }
+
+    fn write_ftyp(&self, buf: &mut Vec<u8>) {
+        let brands: &[&[u8; 4]] = &[b"isom", b"iso6", b"cmfc", b"av01", b"mp41"];
+        let size = 8 + 4 + 4 + (brands.len() * 4);
+        buf.extend_from_slice(&(size as u32).to_be_bytes());
+        buf.extend_from_slice(b"ftyp");
+        buf.extend_from_slice(b"isom");
+        buf.extend_from_slice(&0u32.to_be_bytes());
+        for brand in brands {
+            buf.extend_from_slice(*brand);
+        }
+    }
+
+    fn write_moov(&self, buf: &mut Vec<u8>) {
+        let mut moov_content = Vec::new();
+
+        // mvhd
+        self.write_mvhd(&mut moov_content);
+
+        // One trak per track
+        for track in &self.tracks {
+            self.write_trak(&mut moov_content, track);
+        }
+
+        // mvex with one trex per track
+        self.write_mvex(&mut moov_content);
+
+        let size = 8 + moov_content.len();
+        buf.extend_from_slice(&(size as u32).to_be_bytes());
+        buf.extend_from_slice(b"moov");
+        buf.extend_from_slice(&moov_content);
+    }
+
+    fn write_mvhd(&self, buf: &mut Vec<u8>) {
+        let mut c = Vec::new();
+        c.push(0); // version
+        c.extend_from_slice(&[0, 0, 0]); // flags
+        c.extend_from_slice(&0u32.to_be_bytes()); // creation_time
+        c.extend_from_slice(&0u32.to_be_bytes()); // modification_time
+                                                  // Use the first track's timescale for the movie header
+        let ts = self.tracks.first().map(|t| t.timescale).unwrap_or(90000);
+        c.extend_from_slice(&ts.to_be_bytes());
+        c.extend_from_slice(&0u32.to_be_bytes()); // duration
+        c.extend_from_slice(&0x00010000u32.to_be_bytes()); // rate 1.0
+        c.extend_from_slice(&0x0100u16.to_be_bytes()); // volume 1.0
+        c.extend_from_slice(&[0; 2]); // reserved
+        c.extend_from_slice(&[0; 8]); // reserved
+        let matrix: [u32; 9] = [0x00010000, 0, 0, 0, 0x00010000, 0, 0, 0, 0x40000000];
+        for m in &matrix {
+            c.extend_from_slice(&m.to_be_bytes());
+        }
+        c.extend_from_slice(&[0; 24]); // pre_defined
+        let next_track_id = self.tracks.len() as u32 + 1;
+        c.extend_from_slice(&next_track_id.to_be_bytes());
+        let size = 8 + c.len();
+        buf.extend_from_slice(&(size as u32).to_be_bytes());
+        buf.extend_from_slice(b"mvhd");
+        buf.extend_from_slice(&c);
+    }
+
+    fn write_trak(&self, buf: &mut Vec<u8>, track: &TrackConfig) {
+        let mut trak_content = Vec::new();
+        self.write_tkhd(&mut trak_content, track);
+        self.write_mdia(&mut trak_content, track);
+        let size = 8 + trak_content.len();
+        buf.extend_from_slice(&(size as u32).to_be_bytes());
+        buf.extend_from_slice(b"trak");
+        buf.extend_from_slice(&trak_content);
+    }
+
+    fn write_tkhd(&self, buf: &mut Vec<u8>, track: &TrackConfig) {
+        let mut c = Vec::new();
+        c.push(0); // version
+        c.extend_from_slice(&[0, 0, 3]); // flags (enabled, in movie)
+        c.extend_from_slice(&0u32.to_be_bytes()); // creation_time
+        c.extend_from_slice(&0u32.to_be_bytes()); // modification_time
+        c.extend_from_slice(&track.track_id.to_be_bytes());
+        c.extend_from_slice(&0u32.to_be_bytes()); // reserved
+        c.extend_from_slice(&0u32.to_be_bytes()); // duration
+        c.extend_from_slice(&[0; 8]); // reserved
+        c.extend_from_slice(&0i16.to_be_bytes()); // layer
+        c.extend_from_slice(&0i16.to_be_bytes()); // alternate_group
+                                                  // volume: 0 for video, 0 for metadata
+        c.extend_from_slice(&0i16.to_be_bytes());
+        c.extend_from_slice(&0u16.to_be_bytes()); // reserved
+        let matrix: [u32; 9] = [0x00010000, 0, 0, 0, 0x00010000, 0, 0, 0, 0x40000000];
+        for m in &matrix {
+            c.extend_from_slice(&m.to_be_bytes());
+        }
+        c.extend_from_slice(&(track.width << 16).to_be_bytes());
+        c.extend_from_slice(&(track.height << 16).to_be_bytes());
+        let size = 8 + c.len();
+        buf.extend_from_slice(&(size as u32).to_be_bytes());
+        buf.extend_from_slice(b"tkhd");
+        buf.extend_from_slice(&c);
+    }
+
+    fn write_mdia(&self, buf: &mut Vec<u8>, track: &TrackConfig) {
+        let mut mdia_content = Vec::new();
+
+        // mdhd
+        {
+            let mut c = Vec::new();
+            c.push(0); // version
+            c.extend_from_slice(&[0, 0, 0]);
+            c.extend_from_slice(&0u32.to_be_bytes());
+            c.extend_from_slice(&0u32.to_be_bytes());
+            c.extend_from_slice(&track.timescale.to_be_bytes());
+            c.extend_from_slice(&0u32.to_be_bytes());
+            c.extend_from_slice(&0x55c4u16.to_be_bytes()); // language: und
+            c.extend_from_slice(&0u16.to_be_bytes());
+            let s = 8 + c.len();
+            mdia_content.extend_from_slice(&(s as u32).to_be_bytes());
+            mdia_content.extend_from_slice(b"mdhd");
+            mdia_content.extend_from_slice(&c);
+        }
+
+        // hdlr
+        {
+            let mut c = Vec::new();
+            c.push(0);
+            c.extend_from_slice(&[0, 0, 0]);
+            c.extend_from_slice(&0u32.to_be_bytes()); // pre_defined
+            c.extend_from_slice(&track.handler);
+            c.extend_from_slice(&[0; 12]); // reserved
+            let name = if &track.handler == b"vide" {
+                b"VideoHandler\0"
+            } else {
+                b"MetaHandler\0\0"
+            };
+            c.extend_from_slice(name);
+            let s = 8 + c.len();
+            mdia_content.extend_from_slice(&(s as u32).to_be_bytes());
+            mdia_content.extend_from_slice(b"hdlr");
+            mdia_content.extend_from_slice(&c);
+        }
+
+        // minf
+        {
+            let mut minf_content = Vec::new();
+
+            // vmhd or nmhd
+            if &track.handler == b"vide" {
+                let mut c = Vec::new();
+                c.push(0);
+                c.extend_from_slice(&[0, 0, 1]);
+                c.extend_from_slice(&0u16.to_be_bytes());
+                c.extend_from_slice(&[0; 6]);
+                let s = 8 + c.len();
+                minf_content.extend_from_slice(&(s as u32).to_be_bytes());
+                minf_content.extend_from_slice(b"vmhd");
+                minf_content.extend_from_slice(&c);
+            } else {
+                // nmhd (null media header) for metadata tracks
+                let mut c = Vec::new();
+                c.push(0);
+                c.extend_from_slice(&[0, 0, 0]);
+                let s = 8 + c.len();
+                minf_content.extend_from_slice(&(s as u32).to_be_bytes());
+                minf_content.extend_from_slice(b"nmhd");
+                minf_content.extend_from_slice(&c);
+            }
+
+            // dinf
+            {
+                let mut dinf_content = Vec::new();
+                let mut dref_content = Vec::new();
+                dref_content.push(0);
+                dref_content.extend_from_slice(&[0, 0, 0]);
+                dref_content.extend_from_slice(&1u32.to_be_bytes());
+                dref_content.extend_from_slice(&12u32.to_be_bytes());
+                dref_content.extend_from_slice(b"url ");
+                dref_content.push(0);
+                dref_content.extend_from_slice(&[0, 0, 1]);
+                let dref_s = 8 + dref_content.len();
+                dinf_content.extend_from_slice(&(dref_s as u32).to_be_bytes());
+                dinf_content.extend_from_slice(b"dref");
+                dinf_content.extend_from_slice(&dref_content);
+                let s = 8 + dinf_content.len();
+                minf_content.extend_from_slice(&(s as u32).to_be_bytes());
+                minf_content.extend_from_slice(b"dinf");
+                minf_content.extend_from_slice(&dinf_content);
+            }
+
+            // stbl
+            {
+                let mut stbl_content = Vec::new();
+                self.write_stsd(&mut stbl_content, track);
+                // Empty required boxes
+                for box_type in [b"stts", b"stsc", b"stsz", b"stco"] {
+                    let mut c = Vec::new();
+                    c.push(0);
+                    c.extend_from_slice(&[0, 0, 0]);
+                    c.extend_from_slice(&0u32.to_be_bytes());
+                    if *box_type == *b"stsz" {
+                        c.extend_from_slice(&0u32.to_be_bytes());
+                    }
+                    let s = 8 + c.len();
+                    stbl_content.extend_from_slice(&(s as u32).to_be_bytes());
+                    stbl_content.extend_from_slice(box_type);
+                    stbl_content.extend_from_slice(&c);
+                }
+                let s = 8 + stbl_content.len();
+                minf_content.extend_from_slice(&(s as u32).to_be_bytes());
+                minf_content.extend_from_slice(b"stbl");
+                minf_content.extend_from_slice(&stbl_content);
+            }
+
+            let s = 8 + minf_content.len();
+            mdia_content.extend_from_slice(&(s as u32).to_be_bytes());
+            mdia_content.extend_from_slice(b"minf");
+            mdia_content.extend_from_slice(&minf_content);
+        }
+
+        let size = 8 + mdia_content.len();
+        buf.extend_from_slice(&(size as u32).to_be_bytes());
+        buf.extend_from_slice(b"mdia");
+        buf.extend_from_slice(&mdia_content);
+    }
+
+    fn write_stsd(&self, buf: &mut Vec<u8>, track: &TrackConfig) {
+        let mut stsd_content = Vec::new();
+        stsd_content.push(0); // version
+        stsd_content.extend_from_slice(&[0, 0, 0]); // flags
+        stsd_content.extend_from_slice(&1u32.to_be_bytes()); // entry_count
+
+        if &track.handler == b"vide" {
+            self.write_av01_entry(&mut stsd_content, track);
+        } else {
+            self.write_mett_entry(&mut stsd_content, track);
+        }
+
+        let size = 8 + stsd_content.len();
+        buf.extend_from_slice(&(size as u32).to_be_bytes());
+        buf.extend_from_slice(b"stsd");
+        buf.extend_from_slice(&stsd_content);
+    }
+
+    fn write_av01_entry(&self, buf: &mut Vec<u8>, track: &TrackConfig) {
+        let mut av01_content = Vec::new();
+        av01_content.extend_from_slice(&[0; 6]); // reserved
+        av01_content.extend_from_slice(&1u16.to_be_bytes()); // data_reference_index
+        av01_content.extend_from_slice(&0u16.to_be_bytes()); // pre_defined
+        av01_content.extend_from_slice(&0u16.to_be_bytes()); // reserved
+        av01_content.extend_from_slice(&[0; 12]); // pre_defined
+        av01_content.extend_from_slice(&(track.width as u16).to_be_bytes());
+        av01_content.extend_from_slice(&(track.height as u16).to_be_bytes());
+        av01_content.extend_from_slice(&0x00480000u32.to_be_bytes()); // h res 72dpi
+        av01_content.extend_from_slice(&0x00480000u32.to_be_bytes()); // v res 72dpi
+        av01_content.extend_from_slice(&0u32.to_be_bytes()); // reserved
+        av01_content.extend_from_slice(&1u16.to_be_bytes()); // frame_count
+        let mut compressor = [0u8; 32];
+        let name = b"xoq-rec";
+        compressor[0] = name.len() as u8;
+        compressor[1..1 + name.len()].copy_from_slice(name);
+        av01_content.extend_from_slice(&compressor);
+        av01_content.extend_from_slice(&0x0018u16.to_be_bytes()); // depth
+        av01_content.extend_from_slice(&(-1i16).to_be_bytes()); // pre_defined
+
+        // av1C box — write raw config bytes from parsed init segment
+        let mut av1c_box = Vec::new();
+        av1c_box.extend_from_slice(&track.codec_config);
+        let av1c_size = 8 + av1c_box.len();
+        av01_content.extend_from_slice(&(av1c_size as u32).to_be_bytes());
+        av01_content.extend_from_slice(b"av1C");
+        av01_content.extend_from_slice(&av1c_box);
+
+        let size = 8 + av01_content.len();
+        buf.extend_from_slice(&(size as u32).to_be_bytes());
+        buf.extend_from_slice(b"av01");
+        buf.extend_from_slice(&av01_content);
+    }
+
+    fn write_mett_entry(&self, buf: &mut Vec<u8>, _track: &TrackConfig) {
+        // mett (text metadata sample entry)
+        let mut mett_content = Vec::new();
+        mett_content.extend_from_slice(&[0; 6]); // reserved
+        mett_content.extend_from_slice(&1u16.to_be_bytes()); // data_reference_index
+                                                             // MIME type (null-terminated)
+        mett_content.extend_from_slice(b"application/octet-stream\0");
+
+        let size = 8 + mett_content.len();
+        buf.extend_from_slice(&(size as u32).to_be_bytes());
+        buf.extend_from_slice(b"mett");
+        buf.extend_from_slice(&mett_content);
+    }
+
+    fn write_mvex(&self, buf: &mut Vec<u8>) {
+        let mut mvex_content = Vec::new();
+        for track in &self.tracks {
+            let mut c = Vec::new();
+            c.push(0); // version
+            c.extend_from_slice(&[0, 0, 0]); // flags
+            c.extend_from_slice(&track.track_id.to_be_bytes());
+            c.extend_from_slice(&1u32.to_be_bytes()); // default_sample_description_index
+            c.extend_from_slice(&0u32.to_be_bytes()); // default_sample_duration
+            c.extend_from_slice(&0u32.to_be_bytes()); // default_sample_size
+            c.extend_from_slice(&0u32.to_be_bytes()); // default_sample_flags
+            let s = 8 + c.len();
+            mvex_content.extend_from_slice(&(s as u32).to_be_bytes());
+            mvex_content.extend_from_slice(b"trex");
+            mvex_content.extend_from_slice(&c);
+        }
+        let size = 8 + mvex_content.len();
+        buf.extend_from_slice(&(size as u32).to_be_bytes());
+        buf.extend_from_slice(b"mvex");
+        buf.extend_from_slice(&mvex_content);
+    }
+
+    fn write_multi_moof_mdat(&self, buf: &mut Vec<u8>, fragments: &[TrackFragment]) {
+        // First, build all traf contents to calculate total moof size for data_offset
+        let mut traf_bufs: Vec<Vec<u8>> = Vec::new();
+
+        // mfhd size
+        let mfhd_size = 8 + 8; // box header + version/flags(4) + seq_number(4)
+
+        // Build each traf (without data_offset fixup yet — we need total moof size first)
+        // We'll build trafs in two passes: first to measure, then to fixup data_offset.
+
+        // Calculate the total mdat payload
+        let total_mdat_data: usize = fragments.iter().map(|f| f.data.len()).sum();
+        let mdat_header_size = 8;
+
+        // Build traf buffers — each traf's trun data_offset is relative to moof start
+        // We need to compute: data_offset = moof_size + mdat_header_size + data_offset_within_mdat
+        // So we first build all trafs with placeholder data_offset, then fixup.
+
+        let mut data_offsets: Vec<usize> = Vec::new();
+        let mut running_data_offset = 0usize;
+        for frag in fragments {
+            data_offsets.push(running_data_offset);
+            running_data_offset += frag.data.len();
+        }
+
+        // Build trafs with placeholder data_offset (0)
+        for frag in fragments {
+            let mut traf_content = Vec::new();
+
+            // tfhd
+            {
+                let mut c = Vec::new();
+                c.push(0); // version
+                c.extend_from_slice(&[0x02, 0x00, 0x00]); // default-base-is-moof
+                c.extend_from_slice(&frag.track_id.to_be_bytes());
+                let s = 8 + c.len();
+                traf_content.extend_from_slice(&(s as u32).to_be_bytes());
+                traf_content.extend_from_slice(b"tfhd");
+                traf_content.extend_from_slice(&c);
+            }
+
+            // tfdt
+            {
+                let mut c = Vec::new();
+                c.push(1); // version 1 (64-bit)
+                c.extend_from_slice(&[0, 0, 0]);
+                c.extend_from_slice(&frag.base_decode_time.to_be_bytes());
+                let s = 8 + c.len();
+                traf_content.extend_from_slice(&(s as u32).to_be_bytes());
+                traf_content.extend_from_slice(b"tfdt");
+                traf_content.extend_from_slice(&c);
+            }
+
+            // trun (with placeholder data_offset = 0, will be fixed up)
+            {
+                let sample_count = frag.samples.len() as u32;
+                let mut c = Vec::new();
+                c.push(0); // version
+                c.extend_from_slice(&[0x00, 0x0F, 0x01]); // flags: data-offset + duration + size + flags + cts
+                c.extend_from_slice(&sample_count.to_be_bytes());
+                c.extend_from_slice(&0u32.to_be_bytes()); // placeholder data_offset
+
+                for sample in &frag.samples {
+                    c.extend_from_slice(&sample.duration.to_be_bytes());
+                    c.extend_from_slice(&sample.size.to_be_bytes());
+                    c.extend_from_slice(&sample.flags.to_be_bytes());
+                    c.extend_from_slice(&sample.composition_offset.to_be_bytes());
+                }
+
+                let s = 8 + c.len();
+                traf_content.extend_from_slice(&(s as u32).to_be_bytes());
+                traf_content.extend_from_slice(b"trun");
+                traf_content.extend_from_slice(&c);
+            }
+
+            let mut traf_buf = Vec::new();
+            let s = 8 + traf_content.len();
+            traf_buf.extend_from_slice(&(s as u32).to_be_bytes());
+            traf_buf.extend_from_slice(b"traf");
+            traf_buf.extend_from_slice(&traf_content);
+            traf_bufs.push(traf_buf);
+        }
+
+        // Calculate total moof size
+        let total_traf_size: usize = traf_bufs.iter().map(|t| t.len()).sum();
+        let moof_size = 8 + mfhd_size + total_traf_size;
+
+        // Fix up data_offset in each traf's trun
+        // data_offset = moof_size + mdat_header_size + offset_within_mdat
+        for (i, traf_buf) in traf_bufs.iter_mut().enumerate() {
+            let data_offset = (moof_size + mdat_header_size + data_offsets[i]) as u32;
+            // Find the trun box within this traf and patch data_offset
+            // traf structure: [8B traf header][tfhd][tfdt][trun]
+            // trun data_offset is at: trun_box_start + 8 (box header) + 4 (version+flags) + 4 (sample_count)
+            // = trun_box_start + 16
+            let mut pos = 8; // skip traf header
+            while pos + 8 <= traf_buf.len() {
+                let box_size = u32::from_be_bytes([
+                    traf_buf[pos],
+                    traf_buf[pos + 1],
+                    traf_buf[pos + 2],
+                    traf_buf[pos + 3],
+                ]) as usize;
+                let box_type = &traf_buf[pos + 4..pos + 8];
+                if box_type == b"trun" {
+                    // data_offset is at pos + 8 + 4 + 4 = pos + 16
+                    let do_pos = pos + 16;
+                    traf_buf[do_pos..do_pos + 4].copy_from_slice(&data_offset.to_be_bytes());
+                    break;
+                }
+                pos += box_size;
+            }
+        }
+
+        // Write moof
+        buf.extend_from_slice(&(moof_size as u32).to_be_bytes());
+        buf.extend_from_slice(b"moof");
+
+        // mfhd
+        {
+            let mut c = Vec::new();
+            c.push(0);
+            c.extend_from_slice(&[0, 0, 0]);
+            c.extend_from_slice(&self.sequence_number.to_be_bytes());
+            let s = 8 + c.len();
+            buf.extend_from_slice(&(s as u32).to_be_bytes());
+            buf.extend_from_slice(b"mfhd");
+            buf.extend_from_slice(&c);
+        }
+
+        // trafs
+        for traf_buf in &traf_bufs {
+            buf.extend_from_slice(traf_buf);
+        }
+
+        // mdat
+        let mdat_size = mdat_header_size + total_mdat_data;
+        buf.extend_from_slice(&(mdat_size as u32).to_be_bytes());
+        buf.extend_from_slice(b"mdat");
+        for frag in fragments {
+            buf.extend_from_slice(&frag.data);
         }
     }
 }

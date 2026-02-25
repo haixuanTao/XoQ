@@ -90,6 +90,7 @@ core-media-sys = { version = "0.1.0", optional = true }
 [dev-dependencies]
 rustypot = "1.4.2"
 ctrlc = "3"
+serde_json = "1"
 
 [[bin]]
 name = "serial-server"
@@ -134,6 +135,11 @@ required-features = ["can-remote"]
 [[example]]
 name = "openarm_playback"
 path = "examples/openarm_playback.rs"
+required-features = ["can-remote"]
+
+[[example]]
+name = "openarm_disable"
+path = "examples/openarm_disable.rs"
 required-features = ["can-remote"]
 
 [[example]]
@@ -184,4 +190,8 @@ required-features = ["iroh"]
 name = "realsense-server"
 path = "src/bin/realsense_server.rs"
 required-features = ["realsense"]
+
+[[bin]]
+name = "recorder"
+path = "src/bin/recorder.rs"
 

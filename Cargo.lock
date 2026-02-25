@@ -7292,6 +7292,7 @@ dependencies = [
  "realsense-rust",
  "rustls",
  "rustypot",
+ "serde_json",
  "serialport",
  "socketcan",
  "tokio",

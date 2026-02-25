@@ -14,9 +14,13 @@ import importlib
 import importlib.abc
 import importlib.machinery
 import importlib.util
+import os
 import re
 import sys
 import types
+from concurrent.futures import ThreadPoolExecutor
+
+_XOQ_TIMEOUT = float(os.environ.get("XOQ_REALSENSE_TIMEOUT", "15"))
 
 
 def _is_remote_serial(serial):
@@ -102,7 +106,7 @@ class _XoqPipeline:
             self._remote = True
             if self._xoq_cls is not None:
                 self._xoq = self._xoq_cls()
-                return self._xoq.start(cfg._xoq)
+                return self._xoq_call(self._xoq.start, cfg._xoq)
         else:
             self._remote = False
             try:
@@ -116,18 +120,33 @@ class _XoqPipeline:
             elif self._xoq_cls is not None:
                 self._xoq = self._xoq_cls()
                 if cfg is not None and isinstance(cfg, _XoqConfig):
-                    return self._xoq.start(cfg._active)
-                return self._xoq.start(cfg)
+                    return self._xoq_call(self._xoq.start, cfg._active)
+                return self._xoq_call(self._xoq.start, cfg)
             raise ImportError("No RealSense backend available")
 
     def wait_for_frames(self):
         if self._remote and self._xoq is not None:
-            return self._xoq.wait_for_frames()
+            return self._xoq_call(self._xoq.wait_for_frames)
         elif self._real is not None:
             return self._real.wait_for_frames()
         elif self._xoq is not None:
-            return self._xoq.wait_for_frames()
+            return self._xoq_call(self._xoq.wait_for_frames)
         raise RuntimeError("Pipeline not started")
+
+    @staticmethod
+    def _xoq_call(fn, *args, **kwargs):
+        """Call *fn* with a timeout so remote operations don't block forever."""
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(fn, *args, **kwargs)
+            try:
+                return future.result(timeout=_XOQ_TIMEOUT)
+            except TimeoutError:
+                future.cancel()
+                raise TimeoutError(
+                    f"xoq_realsense: {fn.__name__}() timed out after {_XOQ_TIMEOUT}s. "
+                    f"Is the remote relay running? "
+                    f"Set XOQ_REALSENSE_TIMEOUT to adjust (current: {_XOQ_TIMEOUT}s)."
+                )
 
     def stop(self):
         if self._xoq is not None:
