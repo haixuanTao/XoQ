@@ -528,6 +528,16 @@ async fn main() -> Result<()> {
             if parsed.is_keyframe {
                 let gravity_json = match frames.accel {
                     Some([ax, ay, az]) => {
+                        if frame_count < 3 {
+                            let len = (ax * ax + ay * ay + az * az).sqrt();
+                            tracing::info!(
+                                "IMU accel=[{:.3}, {:.3}, {:.3}] |a|={:.2}",
+                                ax,
+                                ay,
+                                az,
+                                len
+                            );
+                        }
                         format!(r#","gravity":[{:.3},{:.3},{:.3}]"#, ax, ay, az)
                     }
                     None => String::new(),
