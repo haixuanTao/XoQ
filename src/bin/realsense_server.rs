@@ -530,7 +530,7 @@ async fn main() -> Result<()> {
                     Some([ax, ay, az]) => {
                         if frame_count < 3 {
                             let len = (ax * ax + ay * ay + az * az).sqrt();
-                            tracing::info!(
+                            tracing::warn!(
                                 "IMU accel=[{:.3}, {:.3}, {:.3}] |a|={:.2}",
                                 ax,
                                 ay,
