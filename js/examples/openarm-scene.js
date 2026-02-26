@@ -411,9 +411,38 @@ export function updatePanel(armStates, armJointEls, appState) {
   }
 }
 
+// ─── Update settings UI with gravity-derived roll/pitch ──
+function updateGravitySettingsUI(rsCams) {
+  const cards = document.querySelectorAll('[data-s="realsenseList"] .item-card');
+  cards.forEach((card, i) => {
+    const rollInput = card.querySelector('.rs-rr');
+    const pitchInput = card.querySelector('.rs-rp');
+    if (!rollInput || !pitchInput) return;
+
+    const hasGravity = rsCams[i] && rsCams[i].gravity;
+    if (hasGravity) {
+      const [ax, ay, az] = rsCams[i].gravity;
+      const rollDeg = Math.atan2(ay, az) * 180 / Math.PI;
+      const pitchDeg = Math.atan2(-ax, Math.sqrt(ay * ay + az * az)) * 180 / Math.PI;
+      rollInput.value = rollDeg.toFixed(1);
+      pitchInput.value = pitchDeg.toFixed(1);
+      rollInput.disabled = true;
+      pitchInput.disabled = true;
+      rollInput.title = 'Auto (IMU gravity)';
+      pitchInput.title = 'Auto (IMU gravity)';
+    } else {
+      rollInput.disabled = false;
+      pitchInput.disabled = false;
+      rollInput.title = '';
+      pitchInput.title = '';
+    }
+  });
+}
+
 // ─── Render loop ────────────────────────────────────
 export function startRenderLoop(sceneHandle, armStates, config) {
   const { renderer, scene, camera, controls, pointClouds, rsVideoEls, rsCams, rsCamGroups } = sceneHandle;
+  let gravityUICounter = 0;
 
   function animate() {
     requestAnimationFrame(animate);
@@ -434,6 +463,10 @@ export function startRenderLoop(sceneHandle, armStates, config) {
         }
       }
     });
+    // Update settings UI with gravity values (~4 Hz, not every frame)
+    if (++gravityUICounter % 15 === 0) {
+      updateGravitySettingsUI(rsCams);
+    }
     renderer.render(scene, camera);
   }
   animate();
