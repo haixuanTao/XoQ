@@ -81,37 +81,63 @@ impl RealSenseCamera {
     /// If `serial` is Some, opens the device with that serial number.
     pub fn open(width: u32, height: u32, fps: u32, serial: Option<&str>) -> Result<Self> {
         let context = Context::new()?;
-        let pipeline = InactivePipeline::try_from(&context)?;
 
-        let mut config = Config::new();
-        if let Some(sn) = serial {
-            let c_serial = CString::new(sn)?;
-            config.enable_device_from_serial(&c_serial)?;
-        }
-        config.enable_stream(
-            Rs2StreamKind::Color,
-            None,
-            width as usize,
-            height as usize,
-            Rs2Format::Rgb8,
-            fps as usize,
-        )?;
-        config.enable_stream(
-            Rs2StreamKind::Depth,
-            None,
-            width as usize,
-            height as usize,
-            Rs2Format::Z16,
-            fps as usize,
-        )?;
+        // Try with accel stream first (D435i IMU), fall back without it (D435).
+        // config.enable_stream(Accel) can succeed even on non-IMU cameras,
+        // but pipeline.start() will fail when it can't resolve the config.
+        let (pipeline, has_accel) = {
+            let pipeline = InactivePipeline::try_from(&context)?;
+            let mut config = Config::new();
+            if let Some(sn) = serial {
+                config.enable_device_from_serial(&CString::new(sn)?)?;
+            }
+            config.enable_stream(
+                Rs2StreamKind::Color,
+                None,
+                width as usize,
+                height as usize,
+                Rs2Format::Rgb8,
+                fps as usize,
+            )?;
+            config.enable_stream(
+                Rs2StreamKind::Depth,
+                None,
+                width as usize,
+                height as usize,
+                Rs2Format::Z16,
+                fps as usize,
+            )?;
+            let _ = config.enable_stream(Rs2StreamKind::Accel, None, 0, 0, Rs2Format::Any, 0);
 
-        // Try to enable accelerometer stream (D435i and other IMU-equipped cameras).
-        // Non-IMU cameras (D435, D455 without 'i') will fail here — that's fine.
-        let has_accel = config
-            .enable_stream(Rs2StreamKind::Accel, None, 0, 0, Rs2Format::Any, 0)
-            .is_ok();
-
-        let pipeline = pipeline.start(Some(config))?;
+            match pipeline.start(Some(config)) {
+                Ok(p) => (p, true),
+                Err(_) => {
+                    // Accel not supported — retry without it
+                    let pipeline = InactivePipeline::try_from(&context)?;
+                    let mut config = Config::new();
+                    if let Some(sn) = serial {
+                        config.enable_device_from_serial(&CString::new(sn)?)?;
+                    }
+                    config.enable_stream(
+                        Rs2StreamKind::Color,
+                        None,
+                        width as usize,
+                        height as usize,
+                        Rs2Format::Rgb8,
+                        fps as usize,
+                    )?;
+                    config.enable_stream(
+                        Rs2StreamKind::Depth,
+                        None,
+                        width as usize,
+                        height as usize,
+                        Rs2Format::Z16,
+                        fps as usize,
+                    )?;
+                    (pipeline.start(Some(config))?, false)
+                }
+            }
+        };
 
         // Query depth scale from the depth sensor
         let mut depth_scale = 0.001f32; // default: 1mm per unit
