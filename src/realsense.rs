@@ -51,8 +51,8 @@ pub struct RealSenseCamera {
     depth_scale: f32,
     /// Color stream intrinsics (depth is aligned to color).
     intrinsics: Intrinsics,
-    /// Latest accelerometer reading [ax, ay, az] in m/s^2 (D435i IMU).
-    last_accel: Option<[f32; 3]>,
+    /// EMA-filtered accelerometer reading [ax, ay, az] in m/s^2 (D435i IMU).
+    filtered_accel: Option<[f32; 3]>,
 }
 
 impl RealSenseCamera {
@@ -184,7 +184,7 @@ impl RealSenseCamera {
             height,
             depth_scale,
             intrinsics,
-            last_accel: None,
+            filtered_accel: None,
         })
     }
 
@@ -195,9 +195,19 @@ impl RealSenseCamera {
         // Extract accel frames before alignment (IMU frames are independent of depth/color).
         // The accel stream runs at 100-200 Hz vs 15 fps for depth/color, so not every
         // composite will contain an accel frame — we keep the last known value.
+        // Apply EMA low-pass filter (alpha=0.1) to smooth out accelerometer noise.
         let accel_frames: Vec<AccelFrame> = composite.frames_of_type();
         if let Some(af) = accel_frames.first() {
-            self.last_accel = Some(*af.acceleration());
+            let raw = *af.acceleration();
+            const ALPHA: f32 = 0.1;
+            self.filtered_accel = Some(match self.filtered_accel {
+                Some(prev) => [
+                    prev[0] + ALPHA * (raw[0] - prev[0]),
+                    prev[1] + ALPHA * (raw[1] - prev[1]),
+                    prev[2] + ALPHA * (raw[2] - prev[2]),
+                ],
+                None => raw,
+            });
         }
         drop(accel_frames);
 
@@ -246,7 +256,7 @@ impl RealSenseCamera {
             width: color_width,
             height: color_height,
             timestamp_us,
-            accel: self.last_accel,
+            accel: self.filtered_accel,
         })
     }
 

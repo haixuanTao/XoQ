@@ -563,15 +563,20 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
+                let accel_str = match frames.accel {
+                    Some([ax, ay, az]) => format!(" | accel: [{:.3}, {:.3}, {:.3}]", ax, ay, az),
+                    None => String::new(),
+                };
                 tracing::info!(
-                    "Frame {}: color {}B, depth {}B | depth: {}–{}mm, {}/{} valid",
+                    "Frame {}: color {}B, depth {}B | depth: {}–{}mm, {}/{} valid{}",
                     frame_count,
                     av1_data.len(),
                     depth_av1.len(),
                     dmin,
                     dmax,
                     nonzero,
-                    frames.depth_mm.len()
+                    frames.depth_mm.len(),
+                    accel_str,
                 );
             }
 

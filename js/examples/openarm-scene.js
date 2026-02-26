@@ -34,24 +34,34 @@ export function buildJointRows(container, prefix) {
 
 // ─── Camera XYZRPY transform ────────────────────────
 const _rx = new THREE.Matrix4(), _ry = new THREE.Matrix4(), _rz = new THREE.Matrix4(), _tmp = new THREE.Matrix4();
+const _gravQ = new THREE.Quaternion(), _yawQ = new THREE.Quaternion(), _yawAxis = new THREE.Vector3(0, 1, 0);
+const _downCam = new THREE.Vector3(), _downWorld = new THREE.Vector3(0, -1, 0);
 export function applyCamPoseFromConfig(group, camCfg, gravity) {
   const p = camCfg.position || {}, r = camCfg.rotation || {};
   group.position.set(p.x || 0, p.y || 0, p.z || 0);
 
-  let roll, pitch;
   if (gravity) {
-    // D435i IMU coords: +X right, +Y down, +Z forward.
-    // Derive roll/pitch from accelerometer gravity vector.
+    // D435i accelerometer reports specific force (opposite of gravity).
+    // At rest: accel ≈ [0, -9.8, 0] (sensor pushes up against gravity).
+    // "Down" in camera frame = normalize(-accel) = normalize([0, 9.8, 0]).
     const [ax, ay, az] = gravity;
-    pitch = Math.atan2(-ax, Math.sqrt(ay * ay + az * az));
-    roll  = Math.atan2(ay, az);
-  } else {
-    // Fallback: manual config (degrees → radians)
-    roll  = (r.roll  || 0) * Math.PI / 180;
-    pitch = (r.pitch || 0) * Math.PI / 180;
+    const len = Math.sqrt(ax * ax + ay * ay + az * az);
+    if (len > 0.5) {
+      _downCam.set(-ax / len, -ay / len, -az / len);
+      // Rotate camera so its "down" aligns with world "down" (-Y in Three.js)
+      _gravQ.setFromUnitVectors(_downCam, _downWorld);
+      // Apply manual yaw on top (accelerometer can't determine heading)
+      const yaw = (r.yaw || 0) * Math.PI / 180;
+      _yawQ.setFromAxisAngle(_yawAxis, yaw);
+      group.quaternion.multiplyQuaternions(_yawQ, _gravQ);
+      return;
+    }
   }
-  // Yaw is always from manual config (accelerometer can't determine heading)
-  const yaw = (r.yaw || 0) * Math.PI / 180;
+
+  // Fallback: manual config (degrees → radians)
+  const roll  = (r.roll  || 0) * Math.PI / 180;
+  const pitch = (r.pitch || 0) * Math.PI / 180;
+  const yaw   = (r.yaw   || 0) * Math.PI / 180;
 
   _rx.makeRotationX(roll);
   _ry.makeRotationY(pitch);
@@ -412,6 +422,8 @@ export function updatePanel(armStates, armJointEls, appState) {
 }
 
 // ─── Update settings UI with gravity-derived roll/pitch ──
+const _uiEuler = new THREE.Euler();
+const _uiDownCam = new THREE.Vector3(), _uiGravQ = new THREE.Quaternion();
 function updateGravitySettingsUI(rsCams) {
   const cards = document.querySelectorAll('[data-s="realsenseList"] .item-card');
   cards.forEach((card, i) => {
@@ -422,10 +434,14 @@ function updateGravitySettingsUI(rsCams) {
     const hasGravity = rsCams[i] && rsCams[i].gravity;
     if (hasGravity) {
       const [ax, ay, az] = rsCams[i].gravity;
-      const rollDeg = Math.atan2(ay, az) * 180 / Math.PI;
-      const pitchDeg = Math.atan2(-ax, Math.sqrt(ay * ay + az * az)) * 180 / Math.PI;
-      rollInput.value = rollDeg.toFixed(1);
-      pitchInput.value = pitchDeg.toFixed(1);
+      const len = Math.sqrt(ax * ax + ay * ay + az * az);
+      if (len > 0.5) {
+        _uiDownCam.set(-ax / len, -ay / len, -az / len);
+        _uiGravQ.setFromUnitVectors(_uiDownCam, _downWorld);
+        _uiEuler.setFromQuaternion(_uiGravQ, 'ZYX');
+        rollInput.value = (_uiEuler.x * 180 / Math.PI).toFixed(1);
+        pitchInput.value = (_uiEuler.y * 180 / Math.PI).toFixed(1);
+      }
       rollInput.disabled = true;
       pitchInput.disabled = true;
       rollInput.title = 'Auto (IMU gravity)';
@@ -443,6 +459,7 @@ function updateGravitySettingsUI(rsCams) {
 export function startRenderLoop(sceneHandle, armStates, config) {
   const { renderer, scene, camera, controls, pointClouds, rsVideoEls, rsCams, rsCamGroups } = sceneHandle;
   let gravityUICounter = 0;
+  let gravityLogOnce = false;
 
   function animate() {
     requestAnimationFrame(animate);
@@ -459,6 +476,13 @@ export function startRenderLoop(sceneHandle, armStates, config) {
         }
         // Apply gravity-derived roll/pitch when IMU data is available
         if (rsCams[i].gravity && config && config.realsense[i]) {
+          if (!gravityLogOnce) {
+            const [ax, ay, az] = rsCams[i].gravity;
+            const len = Math.sqrt(ax*ax + ay*ay + az*az);
+            console.log(`[gravity] raw accel=[${ax.toFixed(3)}, ${ay.toFixed(3)}, ${az.toFixed(3)}] |a|=${len.toFixed(2)}`);
+            console.log(`[gravity] downCam (=-accel/|a|) = [${(-ax/len).toFixed(3)}, ${(-ay/len).toFixed(3)}, ${(-az/len).toFixed(3)}]`);
+            gravityLogOnce = true;
+          }
           applyCamPoseFromConfig(rsCamGroups[i], config.realsense[i], rsCams[i].gravity);
         }
       }
