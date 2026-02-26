@@ -226,6 +226,9 @@ async function connectRealSenseOnce(config, appState, cam, path, videoEl, label)
             cam._intrinsicsLogged = true;
           }
         }
+        if (meta.gravity) {
+          cam.gravity = meta.gravity;
+        }
       } catch (e) { console.warn('metadata parse error:', e); }
     }, 'metadata', false));
     trackNames.push('metadata');
@@ -240,6 +243,7 @@ function cleanupRealSense(cam) {
   if (cam.colorPlayer) { cam.colorPlayer.destroy(); cam.colorPlayer = null; }
   if (cam.depthDecoder) { cam.depthDecoder.destroy(); cam.depthDecoder = null; }
   cam.intrinsics = null;
+  cam.gravity = null;
   cam._intrinsicsLogged = false;
   cam._frustumUpdated = false;
 }

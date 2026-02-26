@@ -7,7 +7,7 @@ use anyhow::Result;
 use realsense_rust::{
     config::Config,
     context::Context,
-    frame::{ColorFrame, CompositeFrame, DepthFrame, FrameEx},
+    frame::{AccelFrame, ColorFrame, CompositeFrame, DepthFrame, FrameEx},
     kind::{Rs2CameraInfo, Rs2Format, Rs2ProductLine, Rs2StreamKind},
     pipeline::InactivePipeline,
     processing_blocks::align::Align,
@@ -28,6 +28,8 @@ pub struct RealSenseFrames {
     pub height: u32,
     /// Frame timestamp in microseconds.
     pub timestamp_us: u64,
+    /// Latest accelerometer reading [ax, ay, az] in m/s^2, if available (D435i IMU).
+    pub accel: Option<[f32; 3]>,
 }
 
 /// Camera intrinsics for depth-to-3D projection.
@@ -49,6 +51,8 @@ pub struct RealSenseCamera {
     depth_scale: f32,
     /// Color stream intrinsics (depth is aligned to color).
     intrinsics: Intrinsics,
+    /// Latest accelerometer reading [ax, ay, az] in m/s^2 (D435i IMU).
+    last_accel: Option<[f32; 3]>,
 }
 
 impl RealSenseCamera {
@@ -101,6 +105,12 @@ impl RealSenseCamera {
             fps as usize,
         )?;
 
+        // Try to enable accelerometer stream (D435i and other IMU-equipped cameras).
+        // Non-IMU cameras (D435, D455 without 'i') will fail here — that's fine.
+        let has_accel = config
+            .enable_stream(Rs2StreamKind::Accel, None, 0, 0, Rs2Format::Any, 0)
+            .is_ok();
+
         let pipeline = pipeline.start(Some(config))?;
 
         // Query depth scale from the depth sensor
@@ -137,6 +147,10 @@ impl RealSenseCamera {
         // Align depth frames to color coordinate space
         let align = Align::new(Rs2StreamKind::Color, 1)?;
 
+        if has_accel {
+            tracing::info!("IMU accelerometer stream enabled (gravity correction available)");
+        }
+
         Ok(Self {
             pipeline,
             align,
@@ -144,12 +158,22 @@ impl RealSenseCamera {
             height,
             depth_scale,
             intrinsics,
+            last_accel: None,
         })
     }
 
-    /// Capture aligned color + depth frames.
+    /// Capture aligned color + depth frames (+ accelerometer if available).
     pub fn capture(&mut self) -> Result<RealSenseFrames> {
         let composite: CompositeFrame = self.pipeline.wait(Some(Duration::from_secs(5)))?;
+
+        // Extract accel frames before alignment (IMU frames are independent of depth/color).
+        // The accel stream runs at 100-200 Hz vs 15 fps for depth/color, so not every
+        // composite will contain an accel frame — we keep the last known value.
+        let accel_frames: Vec<AccelFrame> = composite.frames_of_type();
+        if let Some(af) = accel_frames.first() {
+            self.last_accel = Some(*af.acceleration());
+        }
+        drop(accel_frames);
 
         // Align depth to color
         self.align.queue(composite)?;
@@ -196,6 +220,7 @@ impl RealSenseCamera {
             width: color_width,
             height: color_height,
             timestamp_us,
+            accel: self.last_accel,
         })
     }
 

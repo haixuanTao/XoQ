@@ -524,10 +524,16 @@ async fn main() -> Result<()> {
                 }
             }
 
-            // Publish metadata (intrinsics JSON) on keyframes
+            // Publish metadata (intrinsics JSON + gravity) on keyframes
             if parsed.is_keyframe {
+                let gravity_json = match frames.accel {
+                    Some([ax, ay, az]) => {
+                        format!(r#","gravity":[{:.3},{:.3},{:.3}]"#, ax, ay, az)
+                    }
+                    None => String::new(),
+                };
                 let metadata_json = format!(
-                    r#"{{"fx":{:.1},"fy":{:.1},"ppx":{:.1},"ppy":{:.1},"width":{},"height":{},"depth_shift":{}}}"#,
+                    r#"{{"fx":{:.1},"fy":{:.1},"ppx":{:.1},"ppy":{:.1},"width":{},"height":{},"depth_shift":{}{}}}"#,
                     intr.fx,
                     intr.fy,
                     intr.ppx,
@@ -535,6 +541,7 @@ async fn main() -> Result<()> {
                     camera.width(),
                     camera.height(),
                     DEPTH_SHIFT,
+                    gravity_json,
                 );
                 metadata_track.write(metadata_json.into_bytes());
             }

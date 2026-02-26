@@ -34,12 +34,25 @@ export function buildJointRows(container, prefix) {
 
 // ─── Camera XYZRPY transform ────────────────────────
 const _rx = new THREE.Matrix4(), _ry = new THREE.Matrix4(), _rz = new THREE.Matrix4(), _tmp = new THREE.Matrix4();
-export function applyCamPoseFromConfig(group, camCfg) {
+export function applyCamPoseFromConfig(group, camCfg, gravity) {
   const p = camCfg.position || {}, r = camCfg.rotation || {};
   group.position.set(p.x || 0, p.y || 0, p.z || 0);
-  const roll  = (r.roll  || 0) * Math.PI / 180;
-  const pitch = (r.pitch || 0) * Math.PI / 180;
-  const yaw   = (r.yaw   || 0) * Math.PI / 180;
+
+  let roll, pitch;
+  if (gravity) {
+    // D435i IMU coords: +X right, +Y down, +Z forward.
+    // Derive roll/pitch from accelerometer gravity vector.
+    const [ax, ay, az] = gravity;
+    pitch = Math.atan2(-ax, Math.sqrt(ay * ay + az * az));
+    roll  = Math.atan2(ay, az);
+  } else {
+    // Fallback: manual config (degrees → radians)
+    roll  = (r.roll  || 0) * Math.PI / 180;
+    pitch = (r.pitch || 0) * Math.PI / 180;
+  }
+  // Yaw is always from manual config (accelerometer can't determine heading)
+  const yaw = (r.yaw || 0) * Math.PI / 180;
+
   _rx.makeRotationX(roll);
   _ry.makeRotationY(pitch);
   _rz.makeRotationZ(yaw);
@@ -399,8 +412,8 @@ export function updatePanel(armStates, armJointEls, appState) {
 }
 
 // ─── Render loop ────────────────────────────────────
-export function startRenderLoop(sceneHandle, armStates) {
-  const { renderer, scene, camera, controls, pointClouds, rsVideoEls, rsCams } = sceneHandle;
+export function startRenderLoop(sceneHandle, armStates, config) {
+  const { renderer, scene, camera, controls, pointClouds, rsVideoEls, rsCams, rsCamGroups } = sceneHandle;
 
   function animate() {
     requestAnimationFrame(animate);
@@ -414,6 +427,10 @@ export function startRenderLoop(sceneHandle, armStates) {
         if (rsCams[i].intrinsics && !rsCams[i]._frustumUpdated) {
           updateFrustumFromIntrinsics(pc.group, rsCams[i].intrinsics, i);
           rsCams[i]._frustumUpdated = true;
+        }
+        // Apply gravity-derived roll/pitch when IMU data is available
+        if (rsCams[i].gravity && config && config.realsense[i]) {
+          applyCamPoseFromConfig(rsCamGroups[i], config.realsense[i], rsCams[i].gravity);
         }
       }
     });
