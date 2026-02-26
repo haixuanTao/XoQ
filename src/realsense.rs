@@ -53,6 +53,8 @@ pub struct RealSenseCamera {
     intrinsics: Intrinsics,
     /// EMA-filtered accelerometer reading [ax, ay, az] in m/s^2 (D435i IMU).
     filtered_accel: Option<[f32; 3]>,
+    /// IMU-to-color rotation matrix (column-major 3x3) for extrinsic correction.
+    imu_rotation: Option<[f32; 9]>,
 }
 
 impl RealSenseCamera {
@@ -173,6 +175,33 @@ impl RealSenseCamera {
         // Align depth frames to color coordinate space
         let align = Align::new(Rs2StreamKind::Color, 1)?;
 
+        // Query IMU-to-color extrinsic rotation (accel sensor is mounted at a
+        // slightly different angle than the cameras inside the D435i).
+        let imu_rotation = if has_accel {
+            let streams = pipeline.profile().streams();
+            let accel_stream = streams.iter().find(|s| s.kind() == Rs2StreamKind::Accel);
+            let color_stream = streams.iter().find(|s| s.kind() == Rs2StreamKind::Color);
+            match (accel_stream, color_stream) {
+                (Some(a), Some(c)) => match a.extrinsics(c) {
+                    Ok(extr) => {
+                        let r = extr.rotation();
+                        tracing::info!(
+                            "IMU→Color extrinsic rotation: [{:.4},{:.4},{:.4}; {:.4},{:.4},{:.4}; {:.4},{:.4},{:.4}]",
+                            r[0], r[3], r[6], r[1], r[4], r[7], r[2], r[5], r[8]
+                        );
+                        Some(r)
+                    }
+                    Err(e) => {
+                        tracing::warn!("Could not get IMU→Color extrinsic: {}", e);
+                        None
+                    }
+                },
+                _ => None,
+            }
+        } else {
+            None
+        };
+
         if has_accel {
             tracing::info!("IMU accelerometer stream enabled (gravity correction available)");
         }
@@ -185,6 +214,7 @@ impl RealSenseCamera {
             depth_scale,
             intrinsics,
             filtered_accel: None,
+            imu_rotation,
         })
     }
 
@@ -198,7 +228,16 @@ impl RealSenseCamera {
         // Apply EMA low-pass filter (alpha=0.1) to smooth out accelerometer noise.
         let accel_frames: Vec<AccelFrame> = composite.frames_of_type();
         if let Some(af) = accel_frames.first() {
-            let raw = *af.acceleration();
+            let a = *af.acceleration();
+            // Apply IMU-to-color extrinsic rotation (column-major 3x3)
+            let raw = match self.imu_rotation {
+                Some(r) => [
+                    r[0] * a[0] + r[3] * a[1] + r[6] * a[2],
+                    r[1] * a[0] + r[4] * a[1] + r[7] * a[2],
+                    r[2] * a[0] + r[5] * a[1] + r[8] * a[2],
+                ],
+                None => a,
+            };
             const ALPHA: f32 = 0.1;
             self.filtered_accel = Some(match self.filtered_accel {
                 Some(prev) => [
