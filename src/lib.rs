@@ -130,8 +130,19 @@ pub mod dav1d_decoder;
 #[cfg(feature = "nvenc")]
 pub mod nvdec_av1_decoder;
 
-// Remote RealSense client (MoQ + NVDEC)
-#[cfg(feature = "realsense-remote")]
+// VideoToolbox AV1 decoder (macOS hardware decode)
+#[cfg(feature = "videotoolbox")]
+pub mod vtdec_av1_decoder;
+
+// Pluggable AV1 decoder (nvdec, videotoolbox, or dav1d)
+#[cfg(any(feature = "nvenc", feature = "videotoolbox", feature = "dav1d"))]
+pub mod av1_decoder;
+
+// Remote RealSense client (MoQ + AV1 decode)
+#[cfg(all(
+    feature = "realsense-remote",
+    any(feature = "nvenc", feature = "videotoolbox", feature = "dav1d")
+))]
 pub mod realsense_client;
 
 // Audio device abstraction (cpal)
@@ -317,7 +328,10 @@ pub use audio_client::SyncAudioClient;
 pub use sounddevice::{AudioStreamBuilder, RemoteAudioStream};
 
 // Remote RealSense client
-#[cfg(feature = "realsense-remote")]
+#[cfg(all(
+    feature = "realsense-remote",
+    any(feature = "nvenc", feature = "videotoolbox", feature = "dav1d")
+))]
 pub use realsense_client::{RealSenseClient, SyncRealSenseClient};
 
 // Re-export token generation

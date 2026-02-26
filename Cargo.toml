@@ -39,7 +39,7 @@ audio-remote = ["iroh", "audio"]
 # dav1d AV1 decoder (cross-platform, for consuming AV1 streams)
 dav1d = ["dep:dav1d"]
 # Remote RealSense client (MoQ subscriber + NVDEC AV1 decode)
-realsense-remote = ["nvenc", "image"]
+realsense-remote = ["image"]
 
 [dependencies]
 moq-transport = "0.12"

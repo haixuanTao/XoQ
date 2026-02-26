@@ -6,8 +6,8 @@
 
 use anyhow::Result;
 
+use crate::av1_decoder::{self, Av1Decoder};
 use crate::moq::{MoqBuilder, MoqSubscriber, MoqTrackReader};
-use crate::nvdec_av1_decoder::{self, NvdecAv1Decoder};
 
 /// Camera intrinsics received from the metadata track.
 #[derive(Debug, Clone, Copy)]
@@ -40,8 +40,8 @@ pub struct RealSenseClient {
     video_reader: MoqTrackReader,
     depth_reader: MoqTrackReader,
     metadata_reader: Option<MoqTrackReader>,
-    video_decoder: Box<NvdecAv1Decoder>,
-    depth_decoder: Box<NvdecAv1Decoder>,
+    video_decoder: Box<Av1Decoder>,
+    depth_decoder: Box<Av1Decoder>,
     intrinsics: Option<Intrinsics>,
     _subscriber: MoqSubscriber,
 }
@@ -92,8 +92,8 @@ impl RealSenseClient {
         // metadata track is optional (server may not have it yet)
         let metadata_reader = subscriber.subscribe_track("metadata").await.ok().flatten();
 
-        let video_decoder = Box::new(NvdecAv1Decoder::new(false)?); // 8-bit NV12 for color
-        let depth_decoder = Box::new(NvdecAv1Decoder::new(true)?); // 10-bit P016 for depth
+        let video_decoder = Box::new(Av1Decoder::new(false)?); // 8-bit for color
+        let depth_decoder = Box::new(Av1Decoder::new(true)?); // 10-bit for depth
 
         Ok(Self {
             video_reader,
@@ -169,7 +169,7 @@ impl RealSenseClient {
 
         // Convert depth: P016 Y-plane → u16 mm
         let depth_shift = self.intrinsics.map(|i| i.depth_shift).unwrap_or(0);
-        let depth_mm = nvdec_av1_decoder::p016_y_to_depth_mm(&depth_frame.data, depth_shift);
+        let depth_mm = av1_decoder::p010_y_to_depth_mm(&depth_frame.data, depth_shift);
 
         Ok(RealSenseFrames {
             color_rgb: color_decoded.data,
