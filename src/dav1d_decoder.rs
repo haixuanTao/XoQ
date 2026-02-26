@@ -82,24 +82,30 @@ impl Dav1dDecoder {
     }
 }
 
-/// Extract the Y plane from a 10-bit picture as raw bytes.
+/// Extract the Y plane from a 10-bit picture as P010-formatted bytes.
 ///
-/// For P010-encoded depth, the Y plane contains the depth values.
-/// Each pixel is a u16 stored in the plane data (little-endian).
-/// Returns the raw bytes of the Y plane (2 bytes per pixel, LE).
+/// dav1d outputs 10-bit values as native u16 (right-aligned, range 0-1023).
+/// Downstream code (`p010_y_to_depth_mm`) expects P010 format where 10-bit
+/// values are MSB-aligned in u16 (val << 6). We left-shift here so the
+/// output matches P010 convention used by nvdec/videotoolbox backends.
 fn extract_y_plane_10bit(picture: &dav1d::Picture) -> Vec<u8> {
     let width = picture.width() as usize;
     let height = picture.height() as usize;
     let y_plane = picture.plane(PlanarImageComponent::Y);
     let stride = picture.stride(PlanarImageComponent::Y) as usize;
 
-    // Output: width * height * 2 bytes (u16 per pixel)
+    // Output: width * height * 2 bytes (u16 per pixel, P010 MSB-aligned)
     let mut out = Vec::with_capacity(width * height * 2);
     for row in 0..height {
         let row_start = row * stride;
-        let row_end = row_start + width * 2; // 2 bytes per pixel for 10-bit
-        if row_end <= y_plane.len() {
-            out.extend_from_slice(&y_plane[row_start..row_end]);
+        for col in 0..width {
+            let byte_offset = row_start + col * 2;
+            if byte_offset + 1 < y_plane.len() {
+                let native = u16::from_le_bytes([y_plane[byte_offset], y_plane[byte_offset + 1]]);
+                let p010 = (native << 6).to_le_bytes(); // MSB-align to match P010 convention
+                out.push(p010[0]);
+                out.push(p010[1]);
+            }
         }
     }
     out
