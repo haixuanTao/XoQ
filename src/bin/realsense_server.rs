@@ -155,6 +155,7 @@ struct Args {
     color_bitrate: u32,
     depth_qp: u32,
     insecure: bool,
+    tare_distance_mm: Option<f32>,
 }
 
 fn parse_args() -> Args {
@@ -169,6 +170,7 @@ fn parse_args() -> Args {
         color_bitrate: 2_000_000,
         depth_qp: 10,
         insecure: false,
+        tare_distance_mm: None,
     };
 
     let mut i = 1;
@@ -206,6 +208,10 @@ fn parse_args() -> Args {
                 result.depth_qp = args[i + 1].parse().unwrap_or(20);
                 i += 2;
             }
+            "--tare-distance" if i + 1 < args.len() => {
+                result.tare_distance_mm = Some(args[i + 1].parse().unwrap_or(0.0));
+                i += 2;
+            }
             "--insecure" => {
                 result.insecure = true;
                 i += 1;
@@ -237,6 +243,7 @@ fn print_usage() {
     println!("  --bitrate <bps>         AV1 color bitrate (default: 2000000)");
     println!("  --depth-qp <qp>        AV1 depth QP (0=lossless, 20=high quality, default: 20)");
     println!("  --serial <serial>       RealSense serial number (default: first device)");
+    println!("  --tare-distance <mm>    Run tare calibration with known distance (mm)");
     println!("  --insecure              Disable TLS verification");
     println!();
     println!("Tracks published:");
@@ -301,6 +308,48 @@ async fn main() -> Result<()> {
             println!();
         }
         Err(e) => tracing::warn!("Could not list devices: {}", e),
+    }
+
+    // Run calibration on a dedicated 256x144@90fps pipeline BEFORE opening the main pipeline
+    if let Some(tare_mm) = args.tare_distance_mm {
+        match RealSenseCamera::run_tare_calibration(args.serial.as_deref(), tare_mm) {
+            Ok((health, applied)) => {
+                if applied {
+                    tracing::info!(
+                        "Tare calibration applied (health: {:.3}, distance: {}mm)",
+                        health,
+                        tare_mm
+                    );
+                } else {
+                    tracing::warn!(
+                        "Tare calibration completed but not applied (health: {:.3})",
+                        health
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Tare calibration failed: {}, continuing with existing calibration",
+                    e
+                );
+            }
+        }
+    } else {
+        match RealSenseCamera::run_on_chip_calibration(args.serial.as_deref()) {
+            Ok((health, applied)) => {
+                if applied {
+                    tracing::info!("On-chip calibration applied (health: {:.3})", health);
+                } else {
+                    tracing::info!("Calibration already good (health: {:.3}), skipped", health);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "On-chip calibration failed: {}, continuing with existing calibration",
+                    e
+                );
+            }
+        }
     }
 
     // Open RealSense camera (fallback to 640x480 if requested resolution fails, e.g. USB 2)

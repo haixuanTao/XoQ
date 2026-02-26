@@ -89,7 +89,9 @@ impl pipeline {
             last_intrinsics: None,
         });
 
-        Ok(pipeline_profile {})
+        Ok(pipeline_profile {
+            inner: Arc::clone(&self.inner),
+        })
     }
 
     fn wait_for_frames(&self, py: Python<'_>) -> PyResult<frameset> {
@@ -157,11 +159,48 @@ impl pipeline {
 }
 
 // ============================================================================
-// Pipeline Profile (stub)
+// Pipeline Profile
 // ============================================================================
 
 #[pyclass]
-pub struct pipeline_profile {}
+pub struct pipeline_profile {
+    inner: Arc<Mutex<Option<PipelineInner>>>,
+}
+
+#[pymethods]
+impl pipeline_profile {
+    /// get_stream(stream_type) — returns a video_stream_profile.
+    /// Intrinsics are deferred until after the first `pipeline.wait_for_frames()`.
+    fn get_stream(&self, stream_type: i32) -> video_stream_profile {
+        let (intr, width, height) = self
+            .inner
+            .lock()
+            .ok()
+            .and_then(|guard| {
+                guard.as_ref().map(|pi| {
+                    let intr = pi.last_intrinsics.as_ref().map(|i| intrinsics {
+                        width: i.width as i32,
+                        height: i.height as i32,
+                        fx: i.fx,
+                        fy: i.fy,
+                        ppx: i.ppx,
+                        ppy: i.ppy,
+                    });
+                    let w = intr.as_ref().map(|i| i.width).unwrap_or(0);
+                    let h = intr.as_ref().map(|i| i.height).unwrap_or(0);
+                    (intr, w, h)
+                })
+            })
+            .unwrap_or((None, 0, 0));
+
+        video_stream_profile {
+            intrinsics: intr,
+            stream_type,
+            width,
+            height,
+        }
+    }
+}
 
 // ============================================================================
 // Frameset

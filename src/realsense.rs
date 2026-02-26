@@ -218,4 +218,249 @@ impl RealSenseCamera {
     pub fn intrinsics(&self) -> Intrinsics {
         self.intrinsics
     }
+
+    /// Run On-Chip Calibration (OCC) on a dedicated 256x144@90fps depth-only pipeline.
+    ///
+    /// Call this BEFORE `open()` — it creates and destroys its own pipeline.
+    /// Uses the calibration-specific resolution that the D400 ASIC requires.
+    ///
+    /// Returns `(health, applied)` where health is the calibration health metric
+    /// and applied indicates whether new calibration was written to EEPROM.
+    /// Health < 0.25 means calibration is already good; >= 0.25 triggers recalibration.
+    pub fn run_on_chip_calibration(serial: Option<&str>) -> Result<(f32, bool)> {
+        use realsense_sys::*;
+
+        tracing::info!("Starting OCC with dedicated calibration pipeline (256x144@90fps)...");
+
+        let mut pipeline = start_calibration_pipeline(serial)?;
+
+        // Wait for depth frames to flow + let firmware settle
+        tracing::info!("Warming up calibration pipeline (30 frames)...");
+        for _ in 0..30 {
+            let _ = pipeline.wait(Some(Duration::from_millis(500)));
+        }
+        std::thread::sleep(Duration::from_secs(1));
+
+        unsafe {
+            let mut err: *mut rs2_error = std::ptr::null_mut();
+            let device = raw_device_from_pipeline(&pipeline);
+            if device.is_null() {
+                return Err(anyhow::anyhow!("Pipeline device pointer is null"));
+            }
+
+            let json_config = b"{\"speed\": 2}";
+            let mut health: f32 = 0.0;
+
+            tracing::info!("Running on-chip calibration (speed=2, ~15s)...");
+
+            let calib_buf = rs2_run_on_chip_calibration(
+                device,
+                json_config.as_ptr() as *const std::ffi::c_void,
+                json_config.len() as i32,
+                &mut health,
+                None,
+                std::ptr::null_mut(),
+                30000,
+                &mut err,
+            );
+
+            if !err.is_null() {
+                let msg = get_rs2_error_message(err);
+                rs2_free_error(err);
+                return Err(anyhow::anyhow!("OCC failed: {}", msg));
+            }
+
+            tracing::info!("OCC completed, health: {:.3}", health);
+
+            let applied = if health >= 0.25 {
+                if !calib_buf.is_null() {
+                    if let Err(e) = apply_calibration(device, calib_buf) {
+                        tracing::warn!("Failed to apply OCC calibration: {}", e);
+                    }
+                }
+                true
+            } else {
+                false
+            };
+
+            if !calib_buf.is_null() {
+                rs2_delete_raw_data(calib_buf);
+            }
+
+            Ok((health, applied))
+        }
+        // pipeline drops here, releasing the calibration stream
+    }
+
+    /// Run Tare Calibration on a dedicated 256x144@90fps depth-only pipeline.
+    ///
+    /// Call this BEFORE `open()`. Point the camera at a flat surface at a known
+    /// distance and provide `ground_truth_mm` (the true distance in millimeters).
+    ///
+    /// Returns `(health, applied)` — calibration is always applied if successful.
+    pub fn run_tare_calibration(serial: Option<&str>, ground_truth_mm: f32) -> Result<(f32, bool)> {
+        use realsense_sys::*;
+
+        tracing::info!(
+            "Starting tare calibration with dedicated pipeline (256x144@90fps, target={}mm)...",
+            ground_truth_mm
+        );
+
+        let mut pipeline = start_calibration_pipeline(serial)?;
+
+        tracing::info!("Warming up calibration pipeline (30 frames)...");
+        for _ in 0..30 {
+            let _ = pipeline.wait(Some(Duration::from_millis(500)));
+        }
+        std::thread::sleep(Duration::from_secs(1));
+
+        unsafe {
+            let mut err: *mut rs2_error = std::ptr::null_mut();
+            let device = raw_device_from_pipeline(&pipeline);
+            if device.is_null() {
+                return Err(anyhow::anyhow!("Pipeline device pointer is null"));
+            }
+
+            let json_config = b"{\"speed\": 2}";
+            let mut health: f32 = 0.0;
+
+            tracing::info!(
+                "Running tare calibration (ground_truth={}mm, speed=2)...",
+                ground_truth_mm
+            );
+
+            let calib_buf = rs2_run_tare_calibration(
+                device,
+                ground_truth_mm,
+                json_config.as_ptr() as *const std::ffi::c_void,
+                json_config.len() as i32,
+                &mut health,
+                None,
+                std::ptr::null_mut(),
+                30000,
+                &mut err,
+            );
+
+            if !err.is_null() {
+                let msg = get_rs2_error_message(err);
+                rs2_free_error(err);
+                return Err(anyhow::anyhow!("Tare calibration failed: {}", msg));
+            }
+
+            tracing::info!("Tare calibration completed, health: {:.3}", health);
+
+            let mut applied = false;
+            if !calib_buf.is_null() {
+                match apply_calibration(device, calib_buf) {
+                    Ok(()) => {
+                        tracing::info!("Tare calibration applied and persisted to EEPROM");
+                        applied = true;
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to apply tare calibration: {}", e);
+                    }
+                }
+                rs2_delete_raw_data(calib_buf);
+            }
+
+            Ok((health, applied))
+        }
+    }
+}
+
+/// Start a dedicated calibration pipeline at 256x144@90fps depth-only.
+/// The D400 ASIC requires this specific configuration for OCC/tare calibration.
+fn start_calibration_pipeline(
+    serial: Option<&str>,
+) -> Result<realsense_rust::pipeline::ActivePipeline> {
+    let context = Context::new()?;
+    let pipeline = InactivePipeline::try_from(&context)?;
+
+    let mut config = Config::new();
+    if let Some(sn) = serial {
+        let c_serial = CString::new(sn)?;
+        config.enable_device_from_serial(&c_serial)?;
+    }
+    config.enable_stream(Rs2StreamKind::Depth, None, 256, 144, Rs2Format::Z16, 90)?;
+
+    let pipeline = pipeline.start(Some(config))?;
+    Ok(pipeline)
+}
+
+/// Extract the raw `*mut rs2_device` pointer from an active pipeline.
+/// The `Device` struct has a single `NonNull<rs2_device>` field.
+/// The returned pointer is borrowed — do NOT call `rs2_delete_device` on it.
+unsafe fn raw_device_from_pipeline(
+    pipeline: &realsense_rust::pipeline::ActivePipeline,
+) -> *mut realsense_sys::rs2_device {
+    let rs_device = pipeline.profile().device();
+    std::mem::transmute_copy::<realsense_rust::device::Device, *mut realsense_sys::rs2_device>(
+        rs_device,
+    )
+}
+
+/// Apply a calibration buffer: set the calibration table, then persist to EEPROM.
+unsafe fn apply_calibration(
+    device: *mut realsense_sys::rs2_device,
+    calib_buf: *const realsense_sys::rs2_raw_data_buffer,
+) -> Result<()> {
+    use realsense_sys::*;
+    let mut err: *mut rs2_error = std::ptr::null_mut();
+
+    let buf_size = rs2_get_raw_data_size(calib_buf, &mut err);
+    if !err.is_null() {
+        let msg = get_rs2_error_message(err);
+        rs2_free_error(err);
+        return Err(anyhow::anyhow!(
+            "Failed to get calibration data size: {}",
+            msg
+        ));
+    }
+    if buf_size == 0 {
+        return Err(anyhow::anyhow!("Calibration buffer is empty"));
+    }
+
+    let buf_ptr = rs2_get_raw_data(calib_buf, &mut err);
+    if !err.is_null() || buf_ptr.is_null() {
+        if !err.is_null() {
+            let msg = get_rs2_error_message(err);
+            rs2_free_error(err);
+            return Err(anyhow::anyhow!("Failed to get calibration data: {}", msg));
+        }
+        return Err(anyhow::anyhow!("Calibration data pointer is null"));
+    }
+
+    rs2_set_calibration_table(
+        device,
+        buf_ptr as *const std::ffi::c_void,
+        buf_size,
+        &mut err,
+    );
+    if !err.is_null() {
+        let msg = get_rs2_error_message(err);
+        rs2_free_error(err);
+        return Err(anyhow::anyhow!("Failed to set calibration table: {}", msg));
+    }
+
+    rs2_write_calibration(device, &mut err);
+    if !err.is_null() {
+        let msg = get_rs2_error_message(err);
+        rs2_free_error(err);
+        return Err(anyhow::anyhow!(
+            "Failed to write calibration to EEPROM: {}",
+            msg
+        ));
+    }
+
+    Ok(())
+}
+
+/// Extract error message string from an rs2_error pointer.
+unsafe fn get_rs2_error_message(err: *const realsense_sys::rs2_error) -> String {
+    let ptr = realsense_sys::rs2_get_error_message(err);
+    if ptr.is_null() {
+        "unknown error".to_string()
+    } else {
+        std::ffi::CStr::from_ptr(ptr).to_string_lossy().to_string()
+    }
 }
