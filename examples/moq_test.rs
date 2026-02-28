@@ -418,19 +418,14 @@ fn encode_can_wire_frame(can_id: u32, data: &[u8]) -> Vec<u8> {
     buf
 }
 
-/// Decode a CAN wire frame, returns (can_id, data, bytes_consumed)
+/// Decode a 72-byte canfd_frame, returns (can_id, data, bytes_consumed)
 fn decode_can_wire_frame(buf: &[u8]) -> Option<(u32, Vec<u8>, usize)> {
-    if buf.len() < 6 {
+    if buf.len() < 72 {
         return None;
     }
-    let _flags = buf[0];
-    let can_id = u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]);
-    let data_len = buf[5] as usize;
-    if buf.len() < 6 + data_len {
-        return None;
-    }
-    let data = buf[6..6 + data_len].to_vec();
-    Some((can_id, data, 6 + data_len))
+    let can_id = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+    let len = (buf[4] as usize).min(64);
+    Some((can_id, buf[8..8 + len].to_vec(), 72))
 }
 
 /// MIT zero-torque query command (p=0, v=0, kp=0, kd=0, t=0)

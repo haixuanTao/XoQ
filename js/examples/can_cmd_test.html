@@ -61,16 +61,15 @@
       ]);
     }
 
-    // Wire-encode CAN frame
+    // Wire-encode CAN frame as 72-byte canfd_frame
     function encodeCanFrame(canId, data) {
-      const buf = new Uint8Array(6 + data.length);
-      buf[0] = 0x00;
-      buf[1] = canId & 0xFF;
-      buf[2] = (canId >> 8) & 0xFF;
-      buf[3] = (canId >> 16) & 0xFF;
-      buf[4] = (canId >> 24) & 0xFF;
-      buf[5] = data.length;
-      buf.set(data, 6);
+      const buf = new Uint8Array(72);
+      buf[0] = canId & 0xFF;
+      buf[1] = (canId >> 8) & 0xFF;
+      buf[2] = (canId >> 16) & 0xFF;
+      buf[3] = (canId >> 24) & 0xFF;
+      buf[4] = data.length;
+      buf.set(data, 8);
       return buf;
     }
 

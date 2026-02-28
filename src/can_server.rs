@@ -330,30 +330,22 @@ fn can_writer_thread_fd(
         }
         pending.extend_from_slice(&data);
 
-        while pending.len() >= 6 {
-            match wire::encoded_size(&pending) {
-                Ok(frame_size) if pending.len() >= frame_size => match wire::decode(&pending) {
-                    Ok((frame, consumed)) => {
-                        let write_start = Instant::now();
-                        write_fn(&frame);
-                        let write_dur = write_start.elapsed();
-                        if write_dur > Duration::from_millis(5) {
-                            tracing::debug!(
-                                "CAN writer: write_frame took {:.1}ms",
-                                write_dur.as_secs_f64() * 1000.0,
-                            );
-                        }
-                        pending.drain(..consumed);
+        while pending.len() >= wire::FRAME_SIZE {
+            match wire::decode(&pending) {
+                Ok((frame, consumed)) => {
+                    let write_start = Instant::now();
+                    write_fn(&frame);
+                    let write_dur = write_start.elapsed();
+                    if write_dur > Duration::from_millis(5) {
+                        tracing::debug!(
+                            "CAN writer: write_frame took {:.1}ms",
+                            write_dur.as_secs_f64() * 1000.0,
+                        );
                     }
-                    Err(e) => {
-                        tracing::error!("CAN wire decode error: {}", e);
-                        pending.clear();
-                        break;
-                    }
-                },
-                Ok(_) => break,
+                    pending.drain(..consumed);
+                }
                 Err(e) => {
-                    tracing::error!("CAN wire frame size error: {}", e);
+                    tracing::error!("CAN wire decode error: {}", e);
                     pending.clear();
                     break;
                 }
@@ -411,30 +403,22 @@ fn can_writer_thread_std(
         }
         pending.extend_from_slice(&data);
 
-        while pending.len() >= 6 {
-            match wire::encoded_size(&pending) {
-                Ok(frame_size) if pending.len() >= frame_size => match wire::decode(&pending) {
-                    Ok((frame, consumed)) => {
-                        let write_start = Instant::now();
-                        write_fn(&frame);
-                        let write_dur = write_start.elapsed();
-                        if write_dur > Duration::from_millis(5) {
-                            tracing::debug!(
-                                "CAN writer: write_frame took {:.1}ms",
-                                write_dur.as_secs_f64() * 1000.0,
-                            );
-                        }
-                        pending.drain(..consumed);
+        while pending.len() >= wire::FRAME_SIZE {
+            match wire::decode(&pending) {
+                Ok((frame, consumed)) => {
+                    let write_start = Instant::now();
+                    write_fn(&frame);
+                    let write_dur = write_start.elapsed();
+                    if write_dur > Duration::from_millis(5) {
+                        tracing::debug!(
+                            "CAN writer: write_frame took {:.1}ms",
+                            write_dur.as_secs_f64() * 1000.0,
+                        );
                     }
-                    Err(e) => {
-                        tracing::error!("CAN wire decode error: {}", e);
-                        pending.clear();
-                        break;
-                    }
-                },
-                Ok(_) => break,
+                    pending.drain(..consumed);
+                }
                 Err(e) => {
-                    tracing::error!("CAN wire frame size error: {}", e);
+                    tracing::error!("CAN wire decode error: {}", e);
                     pending.clear();
                     break;
                 }

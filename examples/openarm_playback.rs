@@ -292,26 +292,23 @@ fn parse_v1_obj(s: &str) -> Result<Timestep> {
                 remaining = &remaining[comma + 1..];
             }
 
-            // Decode wire-encoded CAN frames
+            // Decode wire-encoded CAN frames (72-byte canfd_frame format)
             let wire = base64_decode(val)?;
             let mut can_frames = Vec::new();
             let mut offset = 0;
-            while offset + 6 <= wire.len() {
-                let data_len = wire[offset + 5] as usize;
-                if offset + 6 + data_len > wire.len() {
-                    break;
-                }
+            while offset + 72 <= wire.len() {
                 let can_id = u32::from_le_bytes([
+                    wire[offset],
                     wire[offset + 1],
                     wire[offset + 2],
                     wire[offset + 3],
-                    wire[offset + 4],
                 ]);
+                let len = (wire[offset + 4] as usize).min(64);
                 can_frames.push(CanCmd {
                     can_id,
-                    data: wire[offset + 6..offset + 6 + data_len].to_vec(),
+                    data: wire[offset + 8..offset + 8 + len].to_vec(),
                 });
-                offset += 6 + data_len;
+                offset += 72;
             }
             commands.insert(key.to_string(), can_frames);
         }
