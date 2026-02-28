@@ -36,12 +36,30 @@
       <button id="startBtn">Connect</button>
       <button id="stopBtn" disabled>Disconnect</button>
       <button id="audioBtn" disabled title="Toggle audio playback">&#128263; Audio</button>
+      <button id="recordBtn" disabled title="Record live streams to MP4 files"><span class="rec-dot"></span> Record</button>
+      <button id="replayBtn" title="Replay a recorded .mp4 file">Replay</button>
+      <input type="file" id="replayFile" accept=".mp4,.bin,.log" multiple style="display:none" />
       <span id="audioLevel" style="color:#555; font-size:0.65rem; font-family:monospace; letter-spacing:-1px; white-space:nowrap;" title="Audio level (RMS)">--</span>
       <span id="statusText" style="color:#888; font-size:0.8rem;">Idle</span>
       <span id="viewerCount" style="color:#888; font-size:0.8rem; margin-left:0.25rem;">0 viewers</span>
       <span style="font-size:0.8rem; margin-left:0.25rem;" title="Video stream latency and FPS"><span id="streamPing" style="color:#555; display:inline-block; width:5.5em; text-align:right;">--</span> <span id="streamFps" style="color:#555; display:inline-block; width:3.5em; text-align:right;">--</span></span>
       <button id="settingsToggle" class="settings-toggle" aria-label="Settings">&#9881;</button>
     </div>
+  </div>
+
+  <div class="replay-bar" id="replayBar">
+    <button id="replayPlayPause">Play</button>
+    <span class="replay-time" id="replayCurrentTime">0:00</span>
+    <input type="range" id="replayTimeline" min="0" max="1000" value="0" step="1" />
+    <span class="replay-time" id="replayDuration">0:00</span>
+    <select id="replaySpeed">
+      <option value="0.25">0.25x</option>
+      <option value="0.5">0.5x</option>
+      <option value="1" selected>1x</option>
+      <option value="2">2x</option>
+      <option value="4">4x</option>
+    </select>
+    <button id="replayClose">X</button>
   </div>
 
   <div class="main">
@@ -104,6 +122,8 @@
     import { createChatState, connectChat, disconnectChat, sendChatMessage } from "./openarm-chat.js";
     import { initScene, buildJointRows, updatePanel, startRenderLoop, setupDumpDepth, applyCamPoseFromConfig, makeTextSprite, labelWithTags } from "./openarm-scene.js";
     import { initSettings } from "./openarm-settings.js";
+    import { createReplayController } from "./openarm-replay.js";
+    import { RecordingController } from "./openarm-recorder.js";
 
     // ─── Config ──────────────────────────────────────
     const config = loadConfig({ urlOverrides: true });
@@ -142,6 +162,8 @@
     const cameraSplitEl = document.getElementById("cameraSplit");
     const sceneHandle = initScene(config, armConfigs, cameraSplitEl);
     const { robots, robotGroups, grids, pointClouds, rsVideoEls, rsCams, rsCamGroups, camVideoEls, camState, onResize } = sceneHandle;
+    window._rsCams = rsCams; // debug: expose for diagnostics
+    window._pointClouds = pointClouds;
 
     // Apply initial enabled/disabled visibility
     config.armPairs.forEach((pair, i) => {
@@ -286,6 +308,7 @@
     const startBtn = document.getElementById("startBtn");
     const stopBtn = document.getElementById("stopBtn");
     const audioBtn = document.getElementById("audioBtn");
+    const recordBtn = document.getElementById("recordBtn");
 
     // ─── Start render loop + debug ───────────────────
     startRenderLoop(sceneHandle, armStates, config);
@@ -311,6 +334,19 @@
       }
     });
 
+    // ─── Record toggle ─────────────────────────────────
+    recordBtn.addEventListener('click', () => {
+      if (appState.recorder?.recording) {
+        appState.recorder.stop();
+        recordBtn.innerHTML = '<span class="rec-dot"></span> Record';
+        recordBtn.classList.remove('recording');
+      } else if (appState.recorder) {
+        appState.recorder.start();
+        recordBtn.innerHTML = '<span class="rec-dot"></span> Stop';
+        recordBtn.classList.add('recording');
+      }
+    });
+
     // ─── Connect / Disconnect ────────────────────────
     startBtn.addEventListener("click", async () => {
       try {
@@ -324,6 +360,8 @@
 
         startBtn.disabled = true;
         stopBtn.disabled = false;
+        recordBtn.disabled = false;
+        appState.recorder = new RecordingController();
         appState.running = true;
         appState.frameCount = 0;
         appState.bytesTotal = 0;
@@ -350,7 +388,7 @@
         if (hasRsPaths) subs.push(connectRealSense(config, appState, rsCams, rsVideoEls).catch(e => log(`[realsense] ${e.message}`, "error")));
 
         // Connect plain cameras
-        if (hasCamPaths) subs.push(connectCameras(config, camState, camVideoEls).catch(e => log(`[camera] ${e.message}`, "error")));
+        if (hasCamPaths) subs.push(connectCameras(config, appState, camState, camVideoEls).catch(e => log(`[camera] ${e.message}`, "error")));
 
         // Connect chat (if enabled)
         if (config.chat.enabled !== false) {
@@ -383,7 +421,14 @@
         disconnectCameras(camState);
         disconnectChat(chatState);
         disconnectAudio(audioState);
+        if (appState.recorder?.recording) {
+          appState.recorder.stop();
+          recordBtn.innerHTML = '<span class="rec-dot"></span> Record';
+          recordBtn.classList.remove('recording');
+        }
+        appState.recorder = null;
         audioBtn.disabled = true;
+        recordBtn.disabled = true;
         startBtn.disabled = false;
         stopBtn.disabled = true;
       }
@@ -403,7 +448,14 @@
       appState.latency.display = null;
       appState.videoFps.count = 0;
       appState.videoFps.value = null;
+      if (appState.recorder?.recording) {
+        appState.recorder.stop();
+        recordBtn.innerHTML = '<span class="rec-dot"></span> Record';
+        recordBtn.classList.remove('recording');
+      }
+      appState.recorder = null;
       audioBtn.disabled = true;
+      recordBtn.disabled = true;
       for (const conn of appState.connections) { try { conn.close(); } catch (e) {} }
       appState.connections = [];
       startBtn.disabled = false;
@@ -423,6 +475,142 @@
 
     // Periodic panel update
     setInterval(() => updatePanel(armStates, armJointEls, appState), 100);
+
+    // ─── Replay ───────────────────────────────────────
+    let replayController = null;
+    const replayBtn = document.getElementById("replayBtn");
+    const replayFile = document.getElementById("replayFile");
+    const replayBar = document.getElementById("replayBar");
+    const replayPlayPause = document.getElementById("replayPlayPause");
+    const replayTimeline = document.getElementById("replayTimeline");
+    const replayCurrentTime = document.getElementById("replayCurrentTime");
+    const replayDuration = document.getElementById("replayDuration");
+    const replaySpeed = document.getElementById("replaySpeed");
+    const replayClose = document.getElementById("replayClose");
+
+    function formatReplayTime(ms) {
+      const s = Math.floor(ms / 1000);
+      const m = Math.floor(s / 60);
+      return `${m}:${(s % 60).toString().padStart(2, '0')}`;
+    }
+
+    replayBtn.addEventListener("click", () => {
+      if (replayController) return; // already in replay mode
+      replayFile.click();
+    });
+
+    replayFile.addEventListener("change", async () => {
+      const files = Array.from(replayFile.files);
+      if (files.length === 0) return;
+      replayFile.value = ""; // reset for re-selection
+
+      // Disconnect live streams if running
+      if (appState.running) {
+        appState.running = false;
+        disconnectRealSense(rsCams, pointClouds);
+        disconnectCameras(camState);
+        disconnectChat(chatState);
+        disconnectAudio(audioState);
+        if (appState.recorder?.recording) {
+          appState.recorder.stop();
+          recordBtn.innerHTML = '<span class="rec-dot"></span> Record';
+          recordBtn.classList.remove('recording');
+        }
+        appState.recorder = null;
+        for (const conn of appState.connections) { try { conn.close(); } catch (e) {} }
+        appState.connections = [];
+      }
+
+      // Disable live buttons
+      startBtn.disabled = true;
+      stopBtn.disabled = true;
+      audioBtn.disabled = true;
+      recordBtn.disabled = true;
+      replayBtn.classList.add("active");
+
+      // Create replay controller
+      replayController = createReplayController({
+        armStates, rsCams, rsVideoEls, pointClouds, appState, config,
+      });
+
+      try {
+        setStatus("Loading replay...");
+        if (files.length === 1) {
+          await replayController.loadFile(files[0]);
+        } else {
+          await replayController.loadFiles(files);
+        }
+
+        // Show replay bar
+        replayBar.classList.add("active");
+        replayDuration.textContent = formatReplayTime(replayController.durationMs);
+        replayCurrentTime.textContent = "0:00";
+        replayTimeline.value = 0;
+        replayPlayPause.textContent = "Play";
+
+        // Wire time update
+        replayController.onTimeUpdate = (timeMs) => {
+          replayCurrentTime.textContent = formatReplayTime(timeMs);
+          if (replayController.durationMs > 0) {
+            replayTimeline.value = Math.round((timeMs / replayController.durationMs) * 1000);
+          }
+        };
+
+        replayController.onEnded = () => {
+          replayPlayPause.textContent = "Play";
+        };
+
+        setStatus("Replay loaded");
+        log("Replay ready. Press Play.", "success");
+      } catch (e) {
+        log(`Replay error: ${e.message}`, "error");
+        console.error(e);
+        closeReplay();
+      }
+    });
+
+    replayPlayPause.addEventListener("click", () => {
+      if (!replayController) return;
+      if (replayController.playing) {
+        replayController.pause();
+        replayPlayPause.textContent = "Play";
+      } else {
+        replayController.play();
+        replayPlayPause.textContent = "Pause";
+      }
+    });
+
+    replayTimeline.addEventListener("input", () => {
+      if (!replayController) return;
+      const frac = parseInt(replayTimeline.value) / 1000;
+      const timeMs = frac * replayController.durationMs;
+      replayController.seek(timeMs);
+      replayCurrentTime.textContent = formatReplayTime(timeMs);
+    });
+
+    replaySpeed.addEventListener("change", () => {
+      if (!replayController) return;
+      replayController.setSpeed(parseFloat(replaySpeed.value));
+    });
+
+    function closeReplay() {
+      if (replayController) {
+        replayController.destroy();
+        replayController = null;
+      }
+      replayBar.classList.remove("active");
+      replayBtn.classList.remove("active");
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      audioBtn.disabled = true;
+      replayPlayPause.textContent = "Play";
+      replayTimeline.value = 0;
+      replayCurrentTime.textContent = "0:00";
+      replayDuration.textContent = "0:00";
+      setStatus("Idle");
+    }
+
+    replayClose.addEventListener("click", closeReplay);
 
     log("Ready. Click Connect to start.", "info");
 

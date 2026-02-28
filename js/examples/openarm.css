@@ -344,6 +344,92 @@ body {
   border-color: #00d4ff;
 }
 
+/* ─── Replay bar ──────────────────────────────────── */
+.replay-bar {
+  display: none;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 1rem;
+  background: #0d0d20;
+  border-bottom: 1px solid #333;
+}
+.replay-bar.active { display: flex; }
+.replay-bar button {
+  background: #2a2a4a;
+  color: #ccc;
+  border: 1px solid #444;
+  padding: 0.2rem 0.6rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+  border-radius: 4px;
+  min-width: 3rem;
+}
+.replay-bar button:hover { background: #444; }
+.replay-bar .replay-time {
+  font-family: 'Monaco', 'Menlo', monospace;
+  font-size: 0.75rem;
+  color: #888;
+  min-width: 3rem;
+  text-align: center;
+}
+.replay-bar input[type="range"] {
+  flex: 1;
+  min-width: 80px;
+  height: 4px;
+  -webkit-appearance: none;
+  appearance: none;
+  background: #2a2a4a;
+  border-radius: 2px;
+  outline: none;
+}
+.replay-bar input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #00d4ff;
+  cursor: pointer;
+}
+.replay-bar input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #00d4ff;
+  border: none;
+  cursor: pointer;
+}
+.replay-bar select {
+  background: #2a2a4a;
+  color: #ccc;
+  border: 1px solid #444;
+  padding: 0.15rem 0.3rem;
+  font-size: 0.75rem;
+  border-radius: 4px;
+}
+/* Record button */
+#recordBtn { background: #2a2a4a; color: #ccc; border: 1px solid #555; display: inline-flex; align-items: center; gap: 0.3rem; }
+#recordBtn:disabled { color: #666; }
+#recordBtn:hover:not(:disabled) { background: #444; }
+#recordBtn.recording { background: #dc2626; color: #fff; border-color: #dc2626; animation: recordPulse 1.5s ease-in-out infinite; }
+#recordBtn.recording:hover { background: #b91c1c; }
+.rec-dot {
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: #dc2626;
+  flex-shrink: 0;
+}
+#recordBtn:disabled .rec-dot { background: #666; }
+#recordBtn.recording .rec-dot { background: #fff; animation: recordPulse 1.5s ease-in-out infinite; }
+@keyframes recordPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+#replayBtn { background: #2a2a4a; color: #888; border: 1px solid #444; }
+#replayBtn:hover:not(:disabled) { background: #444; }
+#replayBtn.active { background: #f59e0b; color: #000; border-color: #f59e0b; }
+
 /* ─── Desktop: 3D + camera split view ─────────────── */
 @media (min-width: 1024px) {
   .camera-split {

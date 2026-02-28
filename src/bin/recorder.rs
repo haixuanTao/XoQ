@@ -1,7 +1,8 @@
-//! MoQ Data Recorder — subscribes to live MoQ broadcasts and saves to a single multi-track fMP4.
+//! MoQ Data Recorder — subscribes to live MoQ broadcasts and saves to separate files per track.
 //!
-//! Subscribes to video (AV1 8-bit), depth (AV1 10-bit), and CAN (raw binary) tracks,
-//! then re-muxes everything into one fMP4 file with independent per-track timestamps.
+//! Video/depth: streamed directly to per-track .mp4 files (raw fMP4, no re-muxing).
+//! CAN: raw binary dump (.bin) with timestamps.
+//! Metadata: raw binary dump (.bin) with timestamps.
 //!
 //! Usage:
 //!   recorder [options]
@@ -23,10 +24,7 @@ use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio_util::sync::CancellationToken;
-use xoq::cmaf::{
-    parse_cmaf_init, parse_cmaf_media_segment, MultiTrackRecorder, SampleEntry, TrackConfig,
-    TrackFragment,
-};
+use xoq::cmaf::parse_cmaf_init;
 use xoq::{MoqBuilder, MoqTrackReader};
 
 // ---------------------------------------------------------------------------
@@ -401,7 +399,7 @@ fn parse_args() -> Args {
 }
 
 fn print_usage() {
-    println!("MoQ Data Recorder — records video + depth + CAN to a single multi-track fMP4");
+    println!("MoQ Data Recorder — records video + depth + CAN to separate files per track");
     println!();
     println!("Usage: recorder [options]");
     println!();
@@ -429,12 +427,118 @@ fn print_usage() {
 
 struct TimestampedCanBatch {
     timestamp_ms: u64,
+    interface: String,
+    data: Vec<u8>,
+}
+
+struct TimestampedBlob {
+    timestamp_ms: u64,
     data: Vec<u8>,
 }
 
 type CanBuffer = Arc<Mutex<Vec<TimestampedCanBatch>>>;
+type MetadataBuffer = Arc<Mutex<Vec<TimestampedBlob>>>;
 
-async fn can_reader_task(mut reader: MoqTrackReader, buffer: CanBuffer, cancel: CancellationToken) {
+/// Extract CAN interface name from MoQ path, e.g. "anon/xoq-can-can0/state" → "can0"
+fn interface_from_path(path: &str) -> String {
+    let base = path.strip_suffix("/state").unwrap_or(path);
+    let last = base.rsplit('/').next().unwrap_or(base);
+    if let Some(iface) = last.strip_prefix("xoq-can-") {
+        iface.to_string()
+    } else {
+        last.to_string()
+    }
+}
+
+/// Format a batch of canfd_frame bytes as candump log lines.
+fn format_candump_batch(timestamp_ms: u64, interface: &str, data: &[u8]) -> String {
+    let mut output = String::new();
+    let mut offset = 0;
+    let secs = timestamp_ms / 1000;
+    let usecs = (timestamp_ms % 1000) * 1000;
+
+    while offset + 72 <= data.len() {
+        let frame = &data[offset..offset + 72];
+        let can_id_raw = u32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]]);
+        let len = (frame[4] as usize).min(64);
+        let fd_flags = frame[5];
+        let eff = (can_id_raw & 0x80000000) != 0;
+        let can_id = can_id_raw & 0x1FFFFFFF;
+
+        let id_str = if eff {
+            format!("{:08X}", can_id)
+        } else {
+            format!("{:03X}", can_id)
+        };
+
+        let mut hex = String::with_capacity(len * 2);
+        for i in 0..len {
+            hex.push_str(&format!("{:02X}", frame[8 + i]));
+        }
+
+        if fd_flags != 0 || len > 8 {
+            // CAN FD frame
+            output.push_str(&format!(
+                "({}.{:06}) {} {}##{}{}\n",
+                secs,
+                usecs,
+                interface,
+                id_str,
+                format_args!("{:X}", fd_flags),
+                hex
+            ));
+        } else {
+            // Classic CAN frame
+            output.push_str(&format!(
+                "({}.{:06}) {} {}#{}\n",
+                secs, usecs, interface, id_str, hex
+            ));
+        }
+
+        offset += 72;
+    }
+    output
+}
+
+async fn metadata_reader_task(
+    mut reader: MoqTrackReader,
+    buffer: MetadataBuffer,
+    cancel: CancellationToken,
+) {
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            result = reader.read() => {
+                match result {
+                    Ok(Some(data)) => {
+                        let ts = now_ms();
+                        let mut buf = buffer.lock().unwrap();
+                        buf.push(TimestampedBlob {
+                            timestamp_ms: ts,
+                            data: data.to_vec(),
+                        });
+                    }
+                    Ok(None) => {
+                        tracing::info!("Metadata track ended");
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!("Metadata read error: {}", e);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn can_reader_task(
+    mut reader: MoqTrackReader,
+    buffer: CanBuffer,
+    interface: String,
+    cancel: CancellationToken,
+) {
     loop {
         tokio::select! {
             biased;
@@ -446,6 +550,7 @@ async fn can_reader_task(mut reader: MoqTrackReader, buffer: CanBuffer, cancel: 
                         let mut buf = buffer.lock().unwrap();
                         buf.push(TimestampedCanBatch {
                             timestamp_ms: ts,
+                            interface: interface.clone(),
                             data: data.to_vec(),
                         });
                     }
@@ -471,8 +576,7 @@ struct RealsenseSource {
     label: String,
     video_reader: Option<MoqTrackReader>,
     depth_reader: Option<MoqTrackReader>,
-    video_track_id: u32,
-    depth_track_id: u32,
+    metadata_reader: Option<MoqTrackReader>,
 }
 
 // ---------------------------------------------------------------------------
@@ -629,8 +733,8 @@ async fn main() -> Result<()> {
             ""
         },
     );
-    let output_path = format!("{}/{}.mp4", args.output_dir, args.prefix);
-    println!("Output:     {}", output_path);
+    println!("Output dir: {}", args.output_dir);
+    println!("Prefix:     {}", args.prefix);
     if let Some(d) = args.duration_secs {
         println!("Duration:   {}s", d);
     } else {
@@ -666,6 +770,7 @@ async fn main() -> Result<()> {
 
             let mut video_reader = None;
             let mut depth_reader = None;
+            let mut metadata_reader = None;
 
             if args.record_video {
                 match sub.subscribe_track("video").await? {
@@ -687,6 +792,14 @@ async fn main() -> Result<()> {
                 }
             }
 
+            match sub.subscribe_track("metadata").await? {
+                Some(r) => {
+                    tracing::info!("[{}] Subscribed to metadata track", label);
+                    metadata_reader = Some(r);
+                }
+                None => tracing::warn!("[{}] Metadata track not found", label),
+            }
+
             // Keep subscriber alive
             std::mem::forget(sub);
 
@@ -694,8 +807,7 @@ async fn main() -> Result<()> {
                 label: label.clone(),
                 video_reader,
                 depth_reader,
-                video_track_id: 0, // assigned after init
-                depth_track_id: 0,
+                metadata_reader,
             });
         }
     }
@@ -711,11 +823,16 @@ async fn main() -> Result<()> {
         let mut can_sub = builder.clone().path(can_path).connect_subscriber().await?;
         match can_sub.subscribe_track("can").await? {
             Some(reader) => {
-                tracing::info!("Subscribed to CAN track at {}", can_path);
+                let iface = interface_from_path(can_path);
+                tracing::info!(
+                    "Subscribed to CAN track at {} (interface: {})",
+                    can_path,
+                    iface
+                );
                 let buf = Arc::clone(&can_buffer);
                 let token = cancel.clone();
                 can_tasks.push(tokio::spawn(async move {
-                    can_reader_task(reader, buf, token).await;
+                    can_reader_task(reader, buf, iface, token).await;
                 }));
                 std::mem::forget(can_sub);
             }
@@ -724,170 +841,195 @@ async fn main() -> Result<()> {
     }
 
     // -----------------------------------------------------------------------
-    // Wait for init segments from all sources
+    // Spawn metadata reader tasks (one per realsense source)
     // -----------------------------------------------------------------------
-    let mut track_configs: Vec<TrackConfig> = Vec::new();
-    let mut next_track_id = 1u32;
+    let mut metadata_buffers: Vec<MetadataBuffer> = Vec::new();
+    let mut has_metadata: Vec<bool> = Vec::new();
+    for source in &mut sources {
+        let buf: MetadataBuffer = Arc::new(Mutex::new(Vec::new()));
+        if let Some(reader) = source.metadata_reader.take() {
+            let b = Arc::clone(&buf);
+            let token = cancel.clone();
+            tokio::spawn(async move {
+                metadata_reader_task(reader, b, token).await;
+            });
+            tracing::info!("[{}] Metadata reader task spawned", source.label);
+            has_metadata.push(true);
+        } else {
+            has_metadata.push(false);
+        }
+        metadata_buffers.push(buf);
+    }
 
-    // Per-source first media data that arrived with the init segment
-    let mut first_media: Vec<(usize, u32, Vec<u8>)> = Vec::new(); // (source_idx, track_id, data)
+    // -----------------------------------------------------------------------
+    // Wait for init segments, create per-track output files
+    // -----------------------------------------------------------------------
+    fn sanitize_label(label: &str) -> String {
+        label
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect()
+    }
+
+    /// Write a timestamped binary entry: [u64_le ts_ms][u32_le len][data]
+    fn write_bin_entry(file: &mut std::fs::File, ts_ms: u64, data: &[u8]) -> std::io::Result<()> {
+        file.write_all(&ts_ms.to_le_bytes())?;
+        file.write_all(&(data.len() as u32).to_le_bytes())?;
+        file.write_all(data)?;
+        Ok(())
+    }
+
+    // Per-source output files
+    let mut color_files: Vec<Option<std::fs::File>> = Vec::new();
+    let mut depth_files: Vec<Option<std::fs::File>> = Vec::new();
+    let mut meta_files: Vec<Option<std::fs::File>> = Vec::new();
+    let mut color_paths: Vec<String> = Vec::new();
+    let mut depth_paths: Vec<String> = Vec::new();
+    let mut meta_paths: Vec<String> = Vec::new();
+    let mut color_bytes: Vec<u64> = Vec::new();
+    let mut depth_bytes: Vec<u64> = Vec::new();
+    let mut meta_bytes: Vec<u64> = Vec::new();
+
+    let mut any_track = false;
 
     for (src_idx, source) in sources.iter_mut().enumerate() {
+        let slabel = sanitize_label(&source.label);
+
+        // --- Video ---
         if let Some(ref mut vr) = source.video_reader {
             let name = format!("video[{}]", source.label);
             let (init_data, media) = wait_for_init(vr, &name).await?;
-            let parsed = parse_cmaf_init(&init_data)?;
-            source.video_track_id = next_track_id;
-            track_configs.push(TrackConfig {
-                track_id: next_track_id,
-                timescale: parsed.timescale,
-                handler: *b"vide",
-                codec_config: parsed.av1c_config,
-                width: parsed.width,
-                height: parsed.height,
-                high_bitdepth: false,
-            });
-            tracing::info!(
-                "[{}] Video track {}: {}x{}, timescale={}",
-                source.label,
-                next_track_id,
-                parsed.width,
-                parsed.height,
-                parsed.timescale
-            );
-            if let Some(m) = media {
-                first_media.push((src_idx, next_track_id, m));
+
+            // Log info from init segment
+            if let Ok(parsed) = parse_cmaf_init(&init_data) {
+                tracing::info!(
+                    "[{}] Video: {}x{}, timescale={}",
+                    source.label,
+                    parsed.width,
+                    parsed.height,
+                    parsed.timescale
+                );
             }
-            next_track_id += 1;
+
+            let path = format!("{}/{}_{}_color.mp4", args.output_dir, args.prefix, slabel);
+            let mut f = std::fs::File::create(&path)?;
+            f.write_all(&init_data)?;
+            let mut written = init_data.len() as u64;
+
+            if let Some(m) = media {
+                f.write_all(&m)?;
+                written += m.len() as u64;
+            }
+
+            tracing::info!("Created {}", path);
+            color_files.push(Some(f));
+            color_paths.push(path);
+            color_bytes.push(written);
+            any_track = true;
+        } else {
+            color_files.push(None);
+            color_paths.push(String::new());
+            color_bytes.push(0);
         }
 
+        // --- Depth ---
         if let Some(ref mut dr) = source.depth_reader {
             let name = format!("depth[{}]", source.label);
             let (init_data, media) = wait_for_init(dr, &name).await?;
-            let parsed = parse_cmaf_init(&init_data)?;
-            source.depth_track_id = next_track_id;
-            track_configs.push(TrackConfig {
-                track_id: next_track_id,
-                timescale: parsed.timescale,
-                handler: *b"vide",
-                codec_config: parsed.av1c_config,
-                width: parsed.width,
-                height: parsed.height,
-                high_bitdepth: true,
-            });
-            tracing::info!(
-                "[{}] Depth track {}: {}x{}, timescale={}",
-                source.label,
-                next_track_id,
-                parsed.width,
-                parsed.height,
-                parsed.timescale
-            );
-            if let Some(m) = media {
-                first_media.push((src_idx, next_track_id, m));
+
+            if let Ok(parsed) = parse_cmaf_init(&init_data) {
+                tracing::info!(
+                    "[{}] Depth: {}x{}, timescale={}",
+                    source.label,
+                    parsed.width,
+                    parsed.height,
+                    parsed.timescale
+                );
             }
-            next_track_id += 1;
+
+            let path = format!("{}/{}_{}_depth.mp4", args.output_dir, args.prefix, slabel);
+            let mut f = std::fs::File::create(&path)?;
+            f.write_all(&init_data)?;
+            let mut written = init_data.len() as u64;
+
+            if let Some(m) = media {
+                f.write_all(&m)?;
+                written += m.len() as u64;
+            }
+
+            tracing::info!("Created {}", path);
+            depth_files.push(Some(f));
+            depth_paths.push(path);
+            depth_bytes.push(written);
+            any_track = true;
+        } else {
+            depth_files.push(None);
+            depth_paths.push(String::new());
+            depth_bytes.push(0);
+        }
+
+        // --- Metadata ---
+        if has_metadata[src_idx] {
+            let path = format!("{}/{}_{}_meta.bin", args.output_dir, args.prefix, slabel);
+            let f = std::fs::File::create(&path)?;
+            tracing::info!("Created {}", path);
+            meta_files.push(Some(f));
+            meta_paths.push(path);
+            meta_bytes.push(0);
+            any_track = true;
+        } else {
+            meta_files.push(None);
+            meta_paths.push(String::new());
+            meta_bytes.push(0);
         }
     }
 
-    // CAN track (single merged track for all CAN sources)
-    let can_track_id;
+    // --- CAN file ---
+    let can_path;
+    let mut can_file: Option<std::fs::File>;
+    let mut can_bytes = 0u64;
     if !args.can_paths.is_empty() {
-        can_track_id = next_track_id;
-        track_configs.push(TrackConfig {
-            track_id: can_track_id,
-            timescale: 1000,
-            handler: *b"meta",
-            codec_config: Vec::new(),
-            width: 0,
-            height: 0,
-            high_bitdepth: false,
-        });
-        tracing::info!("CAN track {}: metadata, timescale=1000", can_track_id);
+        let p = format!("{}/{}_can.log", args.output_dir, args.prefix);
+        can_file = Some(std::fs::File::create(&p)?);
+        tracing::info!("Created {}", p);
+        can_path = p;
+        any_track = true;
     } else {
-        can_track_id = 0;
+        can_file = None;
+        can_path = String::new();
     }
 
-    if track_configs.is_empty() {
+    if !any_track {
         anyhow::bail!("No tracks configured — nothing to record");
     }
 
-    // -----------------------------------------------------------------------
-    // Create recorder and write init segment
-    // -----------------------------------------------------------------------
-    let mut recorder = MultiTrackRecorder::new(track_configs);
-    let mut file = std::fs::File::create(&output_path)?;
-    let init_segment = recorder.write_init_segment();
-    file.write_all(&init_segment)?;
-    tracing::info!("Wrote init segment ({} bytes)", init_segment.len());
-
     let recording_start_ms = now_ms();
-    let mut fragment_count = 0u32;
-    let mut total_bytes = init_segment.len();
+    let mut fragment_count = 0u64;
 
-    // Helpers
-    let flush_can = |can_buffer: &CanBuffer,
-                     can_track_id: u32,
-                     recording_start_ms: u64|
-     -> Option<TrackFragment> {
-        let mut buf = can_buffer.lock().unwrap();
-        if buf.is_empty() || can_track_id == 0 {
-            return None;
-        }
-        let batches: Vec<TimestampedCanBatch> = buf.drain(..).collect();
-        drop(buf);
-
-        let base_time_ms = batches[0].timestamp_ms.saturating_sub(recording_start_ms);
-        let mut samples = Vec::new();
-        let mut data = Vec::new();
-        let mut prev_ts = base_time_ms;
-
+    // Flush buffered CAN/metadata to files (accumulated during init waiting)
+    if let Some(ref mut f) = can_file {
+        let batches: Vec<TimestampedCanBatch> = can_buffer.lock().unwrap().drain(..).collect();
         for batch in &batches {
-            let ts = batch.timestamp_ms.saturating_sub(recording_start_ms);
-            let duration = if ts > prev_ts {
-                (ts - prev_ts) as u32
-            } else {
-                1
-            };
-            prev_ts = ts;
-            samples.push(SampleEntry {
-                duration,
-                size: batch.data.len() as u32,
-                flags: 0x02000000,
-                composition_offset: 0,
-            });
-            data.extend_from_slice(&batch.data);
+            let lines = format_candump_batch(batch.timestamp_ms, &batch.interface, &batch.data);
+            f.write_all(lines.as_bytes())?;
+            can_bytes += lines.len() as u64;
         }
-
-        Some(TrackFragment {
-            track_id: can_track_id,
-            base_decode_time: base_time_ms,
-            samples,
-            data,
-        })
-    };
-
-    let process_media = |raw: &[u8], track_id: u32| -> Result<TrackFragment> {
-        let parsed = parse_cmaf_media_segment(raw)?;
-        Ok(TrackFragment {
-            track_id,
-            base_decode_time: parsed.base_decode_time,
-            samples: parsed.samples,
-            data: parsed.mdat_payload,
-        })
-    };
-
-    // Process first media segments that arrived with init
-    for (_src_idx, track_id, media_data) in first_media {
-        let mut frags = Vec::new();
-        frags.push(process_media(&media_data, track_id)?);
-        if let Some(can_frag) = flush_can(&can_buffer, can_track_id, recording_start_ms) {
-            frags.push(can_frag);
+    }
+    for (i, buf) in metadata_buffers.iter().enumerate() {
+        if let Some(ref mut f) = meta_files[i] {
+            let batches: Vec<TimestampedBlob> = buf.lock().unwrap().drain(..).collect();
+            for batch in &batches {
+                let ts = batch.timestamp_ms.saturating_sub(recording_start_ms);
+                write_bin_entry(f, ts, &batch.data)?;
+                meta_bytes[i] += 12 + batch.data.len() as u64;
+            }
         }
-        let frag_data = recorder.write_fragment(&frags);
-        file.write_all(&frag_data)?;
-        total_bytes += frag_data.len();
-        fragment_count += 1;
     }
 
     // -----------------------------------------------------------------------
@@ -908,15 +1050,6 @@ async fn main() -> Result<()> {
             break;
         }
 
-        // We use tokio::select! over a dynamically-built set of futures.
-        // To handle N sources, we use a FuturesUnordered-like approach with indexed channels.
-        // For simplicity, we build futures for each active reader and select the first one.
-
-        // We'll use a macro-free approach: spawn each read into a oneshot and select on them.
-        // Actually, let's use a simpler approach: poll each source in order with biased select.
-        // With a small number of cameras (2-4), this is fine.
-
-        // Build a vec of boxed futures that return (source_idx, "video"|"depth", Result<Option<bytes>>)
         enum ReadResult {
             Cancelled,
             Video(usize, Result<Option<bytes::Bytes>, anyhow::Error>),
@@ -932,7 +1065,6 @@ async fn main() -> Result<()> {
             biased;
             _ = &mut cancel_fut => ReadResult::Cancelled,
             res = async {
-                // Create a future that resolves when ANY reader has data
                 std::future::poll_fn(|cx| {
                     for (idx, source) in sources.iter_mut().enumerate() {
                         if let Some(ref mut vr) = source.video_reader {
@@ -955,13 +1087,38 @@ async fn main() -> Result<()> {
             } => res,
         };
 
+        // Helper: flush CAN + metadata buffers to their files
+        macro_rules! flush_buffers {
+            () => {
+                if let Some(ref mut f) = can_file {
+                    let batches: Vec<TimestampedCanBatch> =
+                        can_buffer.lock().unwrap().drain(..).collect();
+                    for batch in &batches {
+                        let lines =
+                            format_candump_batch(batch.timestamp_ms, &batch.interface, &batch.data);
+                        f.write_all(lines.as_bytes())?;
+                        can_bytes += lines.len() as u64;
+                    }
+                }
+                for (i, buf) in metadata_buffers.iter().enumerate() {
+                    if let Some(ref mut f) = meta_files[i] {
+                        let batches: Vec<TimestampedBlob> = buf.lock().unwrap().drain(..).collect();
+                        for batch in &batches {
+                            let ts = batch.timestamp_ms.saturating_sub(recording_start_ms);
+                            write_bin_entry(f, ts, &batch.data)?;
+                            meta_bytes[i] += 12 + batch.data.len() as u64;
+                        }
+                    }
+                }
+            };
+        }
+
         match result {
             ReadResult::Cancelled => {
                 tracing::info!("Stopping recording...");
                 break;
             }
             ReadResult::Video(idx, Ok(Some(data))) => {
-                let track_id = sources[idx].video_track_id;
                 let raw = strip_timestamp(&data);
                 let media = if raw.len() > 8 && &raw[4..8] == b"ftyp" {
                     skip_init_boxes(raw)
@@ -971,19 +1128,13 @@ async fn main() -> Result<()> {
                     None
                 };
                 if let Some(media) = media {
-                    if let Ok(frag) = process_media(media, track_id) {
-                        let mut frags = vec![frag];
-                        if let Some(can_frag) =
-                            flush_can(&can_buffer, can_track_id, recording_start_ms)
-                        {
-                            frags.push(can_frag);
-                        }
-                        let frag_data = recorder.write_fragment(&frags);
-                        file.write_all(&frag_data)?;
-                        total_bytes += frag_data.len();
+                    if let Some(ref mut f) = color_files[idx] {
+                        f.write_all(media)?;
+                        color_bytes[idx] += media.len() as u64;
                         fragment_count += 1;
                     }
                 }
+                flush_buffers!();
             }
             ReadResult::Video(idx, Ok(None)) => {
                 tracing::info!("[{}] Video track ended", sources[idx].label);
@@ -994,7 +1145,6 @@ async fn main() -> Result<()> {
                 sources[idx].video_reader = None;
             }
             ReadResult::Depth(idx, Ok(Some(data))) => {
-                let track_id = sources[idx].depth_track_id;
                 let raw = strip_timestamp(&data);
                 let media = if raw.len() > 8 && &raw[4..8] == b"ftyp" {
                     skip_init_boxes(raw)
@@ -1004,19 +1154,13 @@ async fn main() -> Result<()> {
                     None
                 };
                 if let Some(media) = media {
-                    if let Ok(frag) = process_media(media, track_id) {
-                        let mut frags = vec![frag];
-                        if let Some(can_frag) =
-                            flush_can(&can_buffer, can_track_id, recording_start_ms)
-                        {
-                            frags.push(can_frag);
-                        }
-                        let frag_data = recorder.write_fragment(&frags);
-                        file.write_all(&frag_data)?;
-                        total_bytes += frag_data.len();
+                    if let Some(ref mut f) = depth_files[idx] {
+                        f.write_all(media)?;
+                        depth_bytes[idx] += media.len() as u64;
                         fragment_count += 1;
                     }
                 }
+                flush_buffers!();
             }
             ReadResult::Depth(idx, Ok(None)) => {
                 tracing::info!("[{}] Depth track ended", sources[idx].label);
@@ -1028,40 +1172,80 @@ async fn main() -> Result<()> {
             }
         }
 
-        // Progress logging every 10 fragments
-        if fragment_count.is_multiple_of(10) && fragment_count > 0 {
+        // Progress logging every 100 fragments
+        if fragment_count.is_multiple_of(100) && fragment_count > 0 {
             let elapsed = (now_ms() - recording_start_ms) / 1000;
+            let total: u64 = color_bytes.iter().sum::<u64>()
+                + depth_bytes.iter().sum::<u64>()
+                + meta_bytes.iter().sum::<u64>()
+                + can_bytes;
             tracing::info!(
-                "Recorded {} fragments, {} bytes, {}s elapsed",
+                "{} frames, {:.1} MB, {}s elapsed",
                 fragment_count,
-                total_bytes,
+                total as f64 / 1_048_576.0,
                 elapsed
             );
         }
     }
 
-    // Flush remaining CAN data
-    if let Some(can_frag) = flush_can(&can_buffer, can_track_id, recording_start_ms) {
-        let frag_data = recorder.write_fragment(&[can_frag]);
-        file.write_all(&frag_data)?;
-        total_bytes += frag_data.len();
-        fragment_count += 1;
+    // Flush remaining CAN + metadata
+    if let Some(ref mut f) = can_file {
+        let batches: Vec<TimestampedCanBatch> = can_buffer.lock().unwrap().drain(..).collect();
+        for batch in &batches {
+            let lines = format_candump_batch(batch.timestamp_ms, &batch.interface, &batch.data);
+            f.write_all(lines.as_bytes())?;
+            can_bytes += lines.len() as u64;
+        }
+        f.flush()?;
+    }
+    for (i, buf) in metadata_buffers.iter().enumerate() {
+        if let Some(ref mut f) = meta_files[i] {
+            let batches: Vec<TimestampedBlob> = buf.lock().unwrap().drain(..).collect();
+            for batch in &batches {
+                let ts = batch.timestamp_ms.saturating_sub(recording_start_ms);
+                write_bin_entry(f, ts, &batch.data)?;
+                meta_bytes[i] += 12 + batch.data.len() as u64;
+            }
+            f.flush()?;
+        }
+    }
+    for ref mut f in color_files.iter_mut().flatten() {
+        f.flush()?;
+    }
+    for ref mut f in depth_files.iter_mut().flatten() {
+        f.flush()?;
     }
 
-    file.flush()?;
-
     let elapsed = (now_ms() - recording_start_ms) / 1000;
+    let total: u64 = color_bytes.iter().sum::<u64>()
+        + depth_bytes.iter().sum::<u64>()
+        + meta_bytes.iter().sum::<u64>()
+        + can_bytes;
+
     println!();
     println!("========================================");
     println!("Recording complete");
     println!("========================================");
-    println!("File:       {}", output_path);
-    println!("Fragments:  {}", fragment_count);
-    println!(
-        "Size:       {} bytes ({:.1} MB)",
-        total_bytes,
-        total_bytes as f64 / 1_048_576.0
-    );
+    for (i, path) in color_paths.iter().enumerate() {
+        if color_bytes[i] > 0 {
+            println!("  {} ({:.1} MB)", path, color_bytes[i] as f64 / 1_048_576.0);
+        }
+    }
+    for (i, path) in depth_paths.iter().enumerate() {
+        if depth_bytes[i] > 0 {
+            println!("  {} ({:.1} MB)", path, depth_bytes[i] as f64 / 1_048_576.0);
+        }
+    }
+    for (i, path) in meta_paths.iter().enumerate() {
+        if meta_bytes[i] > 0 {
+            println!("  {} ({:.1} KB)", path, meta_bytes[i] as f64 / 1024.0);
+        }
+    }
+    if can_bytes > 0 {
+        println!("  {} ({:.1} KB)", can_path, can_bytes as f64 / 1024.0);
+    }
+    println!("Total:      {:.1} MB", total as f64 / 1_048_576.0);
+    println!("Frames:     {}", fragment_count);
     println!("Duration:   {}s", elapsed);
     println!("========================================");
 

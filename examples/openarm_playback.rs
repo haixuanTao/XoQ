@@ -49,7 +49,8 @@
 //!   openarm_playback recording.json --step left <id>
 
 use anyhow::Result;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::f64::consts::FRAC_PI_2;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -62,11 +63,21 @@ const DISABLE_MIT: [u8; 8] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFD];
 const QUERY_CMD: [u8; 8] = [0x80, 0x00, 0x80, 0x00, 0x00, 0x00, 0x08, 0x00];
 
 const POSITION_THRESHOLD_RAD: f64 = 0.175; // ~10 degrees
-const MOVE_STEPS: usize = 100;
-const MOVE_STEP_MS: u64 = 30;
-const STEP_MAX_SPEED: f64 = 1.0; // rad/s — max interpolation speed per motor
+const MOVE_STEPS: usize = 50;
+const MOVE_STEP_MS: u64 = 20;
+const STEP_MAX_SPEED: f64 = 3.0; // rad/s — max interpolation speed per motor
 const STEP_MIN_SUBSTEPS: usize = 3; // minimum substeps even for tiny moves
-const STEP_MAX_SUBSTEPS: usize = 100; // cap for very large moves
+const STEP_MAX_SUBSTEPS: usize = 50; // cap for very large moves
+
+const EE_ERROR_THRESHOLD: f64 = 0.05; // 5cm — triggers catchup pause
+const EE_ESTOP_THRESHOLD: f64 = 0.30; // 30cm — hard e-stop, no convergence accepted
+const MIN_JOINTS_FOR_FK: usize = 5; // need at least 5 of 7 joints for meaningful FK
+const SAFETY_LAG_MS: u64 = 200; // compare actual against commanded from 200ms ago
+const CONVERGENCE_MM: f64 = 0.001; // 1mm — arm "stopped moving" if EE moves less than this
+const CONVERGENCE_COUNT: usize = 10; // 10 consecutive stable readings = converged (~200ms)
+
+const POS_KI: f64 = 0.1; // integral gain: correction += KI * (cmd_pos - actual_pos) per update
+const POS_CORRECTION_MAX: f64 = 1.5; // anti-windup: max correction ±1.5 rad (~86°)
 
 const POS_MIN: f64 = -12.5;
 const POS_MAX: f64 = 12.5;
@@ -217,10 +228,22 @@ fn parse_v2_command(s: &str, arm_name: &str) -> Result<Timestep> {
         let data_b64 = extract_string_field(frame_str, "data")
             .ok_or_else(|| anyhow::anyhow!("frame missing 'data'"))?;
 
-        can_frames.push(CanCmd {
-            can_id: u32::from_str_radix(id_str.trim_start_matches("0x"), 16)?,
-            data: base64_decode(&data_b64)?,
-        });
+        let raw = base64_decode(&data_b64)?;
+        if raw.len() == 72 {
+            // v3: full 72-byte canfd_frame wire format — extract can_id and payload
+            let can_id = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]) & 0x1FFFFFFF;
+            let len = (raw[4] as usize).min(64);
+            can_frames.push(CanCmd {
+                can_id,
+                data: raw[8..8 + len].to_vec(),
+            });
+        } else {
+            // v2: 8-byte MIT payload, id from JSON field
+            can_frames.push(CanCmd {
+                can_id: u32::from_str_radix(id_str.trim_start_matches("0x"), 16)?,
+                data: raw,
+            });
+        }
     }
 
     let mut commands = HashMap::new();
@@ -410,6 +433,426 @@ fn query_motor_positions(socket: &mut socketcan::RemoteCanSocket) -> Result<Hash
 }
 
 // ---------------------------------------------------------------------------
+// Forward kinematics for safety monitoring
+// ---------------------------------------------------------------------------
+
+/// 4x4 homogeneous transformation matrix (column-major).
+type Mat4 = [f64; 16];
+
+const MAT4_IDENTITY: Mat4 = [
+    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+];
+
+fn mat4_mul(a: &Mat4, b: &Mat4) -> Mat4 {
+    let mut r = [0.0f64; 16];
+    for col in 0..4 {
+        for row in 0..4 {
+            let mut sum = 0.0;
+            for k in 0..4 {
+                sum += a[k * 4 + row] * b[col * 4 + k];
+            }
+            r[col * 4 + row] = sum;
+        }
+    }
+    r
+}
+
+fn mat4_translation(x: f64, y: f64, z: f64) -> Mat4 {
+    let mut m = MAT4_IDENTITY;
+    m[12] = x;
+    m[13] = y;
+    m[14] = z;
+    m
+}
+
+/// Rotation from roll (X), pitch (Y), yaw (Z) — URDF convention: R = Rz * Ry * Rx.
+fn mat4_rotation_rpy(roll: f64, pitch: f64, yaw: f64) -> Mat4 {
+    let (sr, cr) = roll.sin_cos();
+    let (sp, cp) = pitch.sin_cos();
+    let (sy, cy) = yaw.sin_cos();
+    [
+        cy * cp,
+        sy * cp,
+        -sp,
+        0.0,
+        cy * sp * sr - sy * cr,
+        sy * sp * sr + cy * cr,
+        cp * sr,
+        0.0,
+        cy * sp * cr + sy * sr,
+        sy * sp * cr - cy * sr,
+        cp * cr,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+    ]
+}
+
+/// Rotation about an arbitrary unit axis by angle (Rodrigues' formula).
+fn mat4_rotation_axis_angle(axis: [f64; 3], angle: f64) -> Mat4 {
+    let (s, c) = angle.sin_cos();
+    let t = 1.0 - c;
+    let [x, y, z] = axis;
+    [
+        t * x * x + c,
+        t * y * x + z * s,
+        t * z * x - y * s,
+        0.0,
+        t * x * y - z * s,
+        t * y * y + c,
+        t * z * y + x * s,
+        0.0,
+        t * x * z + y * s,
+        t * y * z - x * s,
+        t * z * z + c,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+    ]
+}
+
+struct JointDef {
+    origin_xyz: [f64; 3],
+    origin_rpy: [f64; 3],
+    axis: [f64; 3],
+}
+
+const LEFT_ARM_CHAIN: [JointDef; 7] = [
+    JointDef {
+        origin_xyz: [0.0, 0.0, 0.0625],
+        origin_rpy: [0.0, 0.0, 0.0],
+        axis: [0.0, 0.0, 1.0],
+    },
+    JointDef {
+        origin_xyz: [-0.0301, 0.0, 0.06],
+        origin_rpy: [-FRAC_PI_2, 0.0, 0.0],
+        axis: [-1.0, 0.0, 0.0],
+    },
+    JointDef {
+        origin_xyz: [0.0301, 0.0, 0.06625],
+        origin_rpy: [0.0, 0.0, 0.0],
+        axis: [0.0, 0.0, 1.0],
+    },
+    JointDef {
+        origin_xyz: [0.0, 0.0315, 0.15375],
+        origin_rpy: [0.0, 0.0, 0.0],
+        axis: [0.0, 1.0, 0.0],
+    },
+    JointDef {
+        origin_xyz: [0.0, -0.0315, 0.0955],
+        origin_rpy: [0.0, 0.0, 0.0],
+        axis: [0.0, 0.0, 1.0],
+    },
+    JointDef {
+        origin_xyz: [0.0375, 0.0, 0.1205],
+        origin_rpy: [0.0, 0.0, 0.0],
+        axis: [1.0, 0.0, 0.0],
+    },
+    JointDef {
+        origin_xyz: [-0.0375, 0.0, 0.0],
+        origin_rpy: [0.0, 0.0, 0.0],
+        axis: [0.0, -1.0, 0.0],
+    },
+];
+
+const LEFT_ARM_EE_OFFSET: [f64; 3] = [1e-6, 0.0205, 0.0];
+
+const RIGHT_ARM_CHAIN: [JointDef; 7] = [
+    JointDef {
+        origin_xyz: [0.0, 0.0, 0.0625],
+        origin_rpy: [0.0, 0.0, 0.0],
+        axis: [0.0, 0.0, 1.0],
+    },
+    JointDef {
+        origin_xyz: [-0.0301, 0.0, 0.06],
+        origin_rpy: [FRAC_PI_2, 0.0, 0.0],
+        axis: [-1.0, 0.0, 0.0],
+    },
+    JointDef {
+        origin_xyz: [0.0301, 0.0, 0.06625],
+        origin_rpy: [0.0, 0.0, 0.0],
+        axis: [0.0, 0.0, 1.0],
+    },
+    JointDef {
+        origin_xyz: [0.0, 0.0315, 0.15375],
+        origin_rpy: [0.0, 0.0, 0.0],
+        axis: [0.0, 1.0, 0.0],
+    },
+    JointDef {
+        origin_xyz: [0.0, -0.0315, 0.0955],
+        origin_rpy: [0.0, 0.0, 0.0],
+        axis: [0.0, 0.0, 1.0],
+    },
+    JointDef {
+        origin_xyz: [0.0375, 0.0, 0.1205],
+        origin_rpy: [0.0, 0.0, 0.0],
+        axis: [1.0, 0.0, 0.0],
+    },
+    JointDef {
+        origin_xyz: [-0.0375, 0.0, 0.0],
+        origin_rpy: [0.0, 0.0, 0.0],
+        axis: [0.0, 1.0, 0.0],
+    },
+];
+
+const RIGHT_ARM_EE_OFFSET: [f64; 3] = [1e-6, 0.0205, 0.0];
+
+/// Compute end-effector position via forward kinematics.
+fn ee_position(angles: &[f64; 7], chain: &[JointDef; 7], ee_offset: &[f64; 3]) -> [f64; 3] {
+    let mut t = MAT4_IDENTITY;
+    for i in 0..7 {
+        let j = &chain[i];
+        let origin = mat4_mul(
+            &mat4_translation(j.origin_xyz[0], j.origin_xyz[1], j.origin_xyz[2]),
+            &mat4_rotation_rpy(j.origin_rpy[0], j.origin_rpy[1], j.origin_rpy[2]),
+        );
+        t = mat4_mul(&t, &origin);
+        t = mat4_mul(&t, &mat4_rotation_axis_angle(j.axis, angles[i]));
+    }
+    let ee = mat4_translation(ee_offset[0], ee_offset[1], ee_offset[2]);
+    t = mat4_mul(&t, &ee);
+    [t[12], t[13], t[14]]
+}
+
+/// Read all available motor response frames, returning motor_id -> actual position.
+fn read_response_positions(socket: &mut socketcan::RemoteCanSocket) -> HashMap<u32, f64> {
+    let mut positions = HashMap::new();
+    while let Ok(Some(frame)) = socket.read_frame() {
+        let can_id = frame.id();
+        if (0x11..=0x18).contains(&can_id) && frame.data().len() >= 8 {
+            positions.insert(can_id - 0x10, decode_response_pos(frame.data()));
+        }
+    }
+    positions
+}
+
+/// Compute commanded end-effector position from joint positions.
+fn compute_cmd_ee(commanded: &HashMap<u32, f64>, arm_name: &str) -> Option<[f64; 3]> {
+    let mut angles = [0.0f64; 7];
+    let mut count = 0;
+    for i in 0..7 {
+        if let Some(&pos) = commanded.get(&(i as u32 + 1)) {
+            angles[i] = pos;
+            count += 1;
+        }
+    }
+    if count < MIN_JOINTS_FOR_FK {
+        return None;
+    }
+    let (chain, ee_offset) = if arm_name.contains("left") {
+        (&LEFT_ARM_CHAIN, &LEFT_ARM_EE_OFFSET)
+    } else {
+        (&RIGHT_ARM_CHAIN, &RIGHT_ARM_EE_OFFSET)
+    };
+    Some(ee_position(&angles, chain, ee_offset))
+}
+
+/// Compute actual end-effector position, using commanded values for missing joints.
+fn compute_act_ee(
+    commanded: &HashMap<u32, f64>,
+    actual: &HashMap<u32, f64>,
+    arm_name: &str,
+) -> Option<[f64; 3]> {
+    let mut angles = [0.0f64; 7];
+    let mut joint_count = 0;
+    for i in 0..7 {
+        let id = i as u32 + 1;
+        if let Some(&a) = actual.get(&id) {
+            angles[i] = a;
+            joint_count += 1;
+        } else if let Some(&c) = commanded.get(&id) {
+            angles[i] = c;
+        }
+    }
+    if joint_count < MIN_JOINTS_FOR_FK {
+        return None;
+    }
+    let (chain, ee_offset) = if arm_name.contains("left") {
+        (&LEFT_ARM_CHAIN, &LEFT_ARM_EE_OFFSET)
+    } else {
+        (&RIGHT_ARM_CHAIN, &RIGHT_ARM_EE_OFFSET)
+    };
+    Some(ee_position(&angles, chain, ee_offset))
+}
+
+/// Safety monitor with lag compensation, catchup-pause, and convergence detection.
+///
+/// Compares actual EE position against the commanded EE from SAFETY_LAG_MS ago.
+/// Returns Ok(true) when the arm is behind (caller should pause and wait).
+/// Detects convergence: if the arm stops moving (steady state), accepts it and
+/// returns Ok(false) even if error exceeds threshold (gravity deflection is normal).
+/// Hard e-stop only if error exceeds EE_ESTOP_THRESHOLD (catastrophic failure).
+struct SafetyMonitor {
+    cmd_history: HashMap<String, VecDeque<(Instant, [f64; 3])>>,
+    violation_start: HashMap<String, Option<Instant>>,
+    last_actual_ee: HashMap<String, [f64; 3]>,
+    stable_count: HashMap<String, usize>,
+}
+
+impl SafetyMonitor {
+    fn new() -> Self {
+        SafetyMonitor {
+            cmd_history: HashMap::new(),
+            violation_start: HashMap::new(),
+            last_actual_ee: HashMap::new(),
+            stable_count: HashMap::new(),
+        }
+    }
+
+    /// Returns Ok(false) = all good / converged, Ok(true) = arm behind (pause), Err = e-stop.
+    fn check(
+        &mut self,
+        commanded: &HashMap<u32, f64>,
+        actual: &HashMap<u32, f64>,
+        arm_name: &str,
+    ) -> Result<bool> {
+        let now = Instant::now();
+
+        // Record commanded EE in history
+        if let Some(ee) = compute_cmd_ee(commanded, arm_name) {
+            let history = self.cmd_history.entry(arm_name.to_string()).or_default();
+            history.push_back((now, ee));
+            let cutoff = now - Duration::from_secs(4);
+            while history.front().map_or(false, |(t, _)| *t < cutoff) {
+                history.pop_front();
+            }
+        }
+
+        // Find reference: commanded EE from SAFETY_LAG_MS ago
+        let lag = Duration::from_millis(SAFETY_LAG_MS);
+        let ref_ee = self.cmd_history.get(arm_name).and_then(|h| {
+            h.iter()
+                .rev()
+                .find(|(t, _)| now.duration_since(*t) >= lag)
+                .map(|(_, ee)| *ee)
+        });
+
+        let ref_ee = match ref_ee {
+            Some(ee) => ee,
+            None => return Ok(false),
+        };
+
+        let act_ee = match compute_act_ee(commanded, actual, arm_name) {
+            Some(ee) => ee,
+            None => return Ok(false),
+        };
+
+        let dx = act_ee[0] - ref_ee[0];
+        let dy = act_ee[1] - ref_ee[1];
+        let dz = act_ee[2] - ref_ee[2];
+        let error = (dx * dx + dy * dy + dz * dz).sqrt();
+
+        // Hard e-stop: catastrophic deviation, no convergence accepted
+        if error > EE_ESTOP_THRESHOLD {
+            anyhow::bail!(
+                "SAFETY: {} end-effector error {:.1}cm exceeds hard limit {:.1}cm — EMERGENCY STOP\n\
+                 Reference EE: [{:.4}, {:.4}, {:.4}]\n\
+                 Actual EE:    [{:.4}, {:.4}, {:.4}]",
+                arm_name,
+                error * 100.0,
+                EE_ESTOP_THRESHOLD * 100.0,
+                ref_ee[0],
+                ref_ee[1],
+                ref_ee[2],
+                act_ee[0],
+                act_ee[1],
+                act_ee[2],
+            );
+        }
+
+        if error > EE_ERROR_THRESHOLD {
+            // Check convergence: has the arm stopped moving?
+            let stable = self.stable_count.entry(arm_name.to_string()).or_insert(0);
+            if let Some(prev) = self.last_actual_ee.get(arm_name) {
+                let mx = act_ee[0] - prev[0];
+                let my = act_ee[1] - prev[1];
+                let mz = act_ee[2] - prev[2];
+                let movement = (mx * mx + my * my + mz * mz).sqrt();
+                if movement < CONVERGENCE_MM {
+                    *stable += 1;
+                    if *stable >= CONVERGENCE_COUNT {
+                        // Arm at steady state — accept as caught up
+                        eprintln!(
+                            "  {} converged at {:.1}cm offset (steady state), resuming",
+                            arm_name,
+                            error * 100.0
+                        );
+                        *stable = 0;
+                        self.violation_start.insert(arm_name.to_string(), None);
+                        return Ok(false);
+                    }
+                } else {
+                    *stable = 0;
+                }
+            }
+            self.last_actual_ee.insert(arm_name.to_string(), act_ee);
+
+            let v_start = self
+                .violation_start
+                .entry(arm_name.to_string())
+                .or_insert(None);
+            if v_start.is_none() {
+                *v_start = Some(now);
+                // Print per-joint diagnostics on first detection
+                eprintln!(
+                    "\n  SAFETY: {} EE error {:.1}cm (threshold {:.1}cm) — joint deltas:",
+                    arm_name,
+                    error * 100.0,
+                    EE_ERROR_THRESHOLD * 100.0
+                );
+                for i in 0..7 {
+                    let id = i as u32 + 1;
+                    match (commanded.get(&id), actual.get(&id)) {
+                        (Some(&cmd), Some(&act)) => {
+                            let delta = act - cmd;
+                            eprintln!(
+                                "    J{}: cmd={:+.4} act={:+.4} delta={:+.4} ({:+.1}°)",
+                                id,
+                                cmd,
+                                act,
+                                delta,
+                                delta.to_degrees()
+                            );
+                        }
+                        (Some(&cmd), None) => {
+                            eprintln!("    J{}: cmd={:+.4} act=n/a", id, cmd);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            // Arm still moving — signal catchup needed
+            return Ok(true);
+        }
+
+        // Error below threshold — reset all state
+        self.violation_start.insert(arm_name.to_string(), None);
+        self.stable_count.insert(arm_name.to_string(), 0);
+        self.last_actual_ee.remove(arm_name);
+        Ok(false)
+    }
+}
+
+/// Emergency stop: disable MIT mode on all motors across all arms.
+fn emergency_stop(arms: &mut HashMap<String, socketcan::RemoteCanSocket>) {
+    eprintln!("\n*** EMERGENCY STOP — Disabling all motors ***");
+    for (name, socket) in arms.iter_mut() {
+        for motor_id in 0x01..=0x08u32 {
+            if let Ok(frame) = socketcan::CanFrame::new(motor_id, &DISABLE_MIT) {
+                let _ = socket.write_frame(&frame);
+                let _ = socket.read_frame();
+            }
+        }
+        eprintln!("  {} disabled", name);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -424,7 +867,7 @@ fn main() -> Result<()> {
 
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        println!("Usage: openarm_playback <json-file> [--loop [N]] [--step] [--interp] [<arm-name> <server-id> ...]");
+        println!("Usage: openarm_playback <json-file> [--loop [N]] [--step] [--interp] [--no-safety] [<arm-name> <server-id> ...]");
         println!();
         println!("Supports v1 (wire-encoded bundles) and v2 (per-motor frames) JSON formats.");
         println!("Default arms: champagne left + right");
@@ -435,6 +878,7 @@ fn main() -> Result<()> {
             "  --interp     Interpolation mode: slowly move between waypoints (constant speed)"
         );
         println!("  --step       Step mode: like --interp but press Enter before each waypoint");
+        println!("  --no-safety  Disable end-effector safety monitoring");
         return Ok(());
     }
 
@@ -444,6 +888,7 @@ fn main() -> Result<()> {
     let mut loop_count: Option<u64> = None; // None = no loop, Some(0) = infinite, Some(n) = n times
     let mut step_mode = false;
     let mut interp_mode = false;
+    let mut safety_disabled = false;
     let mut rest_args: Vec<String> = Vec::new();
     let mut i = 2;
     while i < args.len() {
@@ -464,6 +909,9 @@ fn main() -> Result<()> {
             i += 1;
         } else if args[i] == "--interp" || args[i] == "-i" {
             interp_mode = true;
+            i += 1;
+        } else if args[i] == "--no-safety" {
+            safety_disabled = true;
             i += 1;
         } else {
             rest_args.push(args[i].clone());
@@ -730,6 +1178,12 @@ fn main() -> Result<()> {
     let total_loops = loop_count.unwrap_or(1); // 0 = infinite
     let mut iteration = 0u64;
     let mut total_sent = 0usize;
+    let mut safety_monitor = SafetyMonitor::new();
+    // Integral position correction: accumulates error to compensate gravity deflection.
+    // correction[arm_name][motor_id] is added to commanded position each timestep.
+    let mut pos_correction: HashMap<String, HashMap<u32, f64>> = HashMap::new();
+    let mut pos_last_error: HashMap<String, HashMap<u32, f64>> = HashMap::new(); // latest per-motor error
+    let mut last_correction_log = Instant::now();
 
     loop {
         iteration += 1;
@@ -869,7 +1323,13 @@ fn main() -> Result<()> {
                                 .copied()
                                 .unwrap_or(target_pos);
                             let interp_pos = prev_pos + t * (target_pos - prev_pos);
-                            let cmd_data = encode_damiao_cmd(interp_pos, 0.0, kp, kd, 0.0);
+                            let correction = pos_correction
+                                .get(arm_name.as_str())
+                                .and_then(|m| m.get(&motor_id))
+                                .copied()
+                                .unwrap_or(0.0);
+                            let cmd_data =
+                                encode_damiao_cmd(interp_pos + correction, 0.0, kp, kd, 0.0);
                             if let Ok(frame) = socketcan::CanFrame::new(motor_id, &cmd_data) {
                                 let _ = socket.write_frame(&frame);
                                 sent += 1;
@@ -891,6 +1351,126 @@ fn main() -> Result<()> {
                 }
                 println!();
 
+                // Convergence loop: keep sending corrected commands until EE error is small
+                const CONVERGE_EE_THRESHOLD: f64 = 0.02; // 2cm in end-effector space
+                const CONVERGE_TIMEOUT_MS: u64 = 3000; // max 3s waiting per waypoint
+                let converge_start = Instant::now();
+                let mut converge_iter = 0u32;
+
+                loop {
+                    if !running.load(Ordering::SeqCst) {
+                        break;
+                    }
+
+                    // Read responses and update corrections
+                    let mut max_ee_err: f64 = 0.0;
+                    let mut safety_error: Option<String> = None;
+                    for (arm_name, socket) in arms.iter_mut() {
+                        let actual = read_response_positions(socket);
+                        let mut commanded = HashMap::new();
+                        for &(ref target_arm, motor_id, target_pos, _, _) in &curr_targets {
+                            if target_arm == arm_name && (1..=7).contains(&motor_id) {
+                                commanded.insert(motor_id, target_pos);
+                            }
+                        }
+                        for (&motor_id, &actual_pos) in &actual {
+                            if let Some(&cmd_pos) = commanded.get(&motor_id) {
+                                let error = cmd_pos - actual_pos;
+                                pos_last_error
+                                    .entry(arm_name.clone())
+                                    .or_default()
+                                    .insert(motor_id, error);
+                                let corr = pos_correction
+                                    .entry(arm_name.clone())
+                                    .or_default()
+                                    .entry(motor_id)
+                                    .or_insert(0.0);
+                                *corr = (*corr + POS_KI * error)
+                                    .clamp(-POS_CORRECTION_MAX, POS_CORRECTION_MAX);
+                            }
+                        }
+                        // Compute EE error via FK
+                        if let (Some(cmd_ee), Some(act_ee)) = (
+                            compute_cmd_ee(&commanded, arm_name),
+                            compute_act_ee(&commanded, &actual, arm_name),
+                        ) {
+                            let dx = cmd_ee[0] - act_ee[0];
+                            let dy = cmd_ee[1] - act_ee[1];
+                            let dz = cmd_ee[2] - act_ee[2];
+                            let ee_err = (dx * dx + dy * dy + dz * dz).sqrt();
+                            if ee_err > max_ee_err {
+                                max_ee_err = ee_err;
+                            }
+                        }
+                        if !safety_disabled && !actual.is_empty() && !commanded.is_empty() {
+                            match safety_monitor.check(&commanded, &actual, arm_name) {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    safety_error = Some(e.to_string());
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if let Some(err) = safety_error {
+                        emergency_stop(&mut arms);
+                        anyhow::bail!("{}", err);
+                    }
+
+                    // Converged or first iteration (no responses yet)
+                    if max_ee_err < CONVERGE_EE_THRESHOLD || converge_iter == 0 {
+                        if converge_iter > 1 {
+                            eprintln!(
+                                "  Converged after {:.1}s (EE err {:.1}cm)",
+                                converge_start.elapsed().as_secs_f64(),
+                                max_ee_err * 100.0,
+                            );
+                        }
+                        break;
+                    }
+
+                    // Timeout
+                    if converge_start.elapsed() > Duration::from_millis(CONVERGE_TIMEOUT_MS) {
+                        eprintln!(
+                            "  Convergence timeout ({:.1}s), EE err {:.1}cm (threshold {:.1}cm), continuing",
+                            CONVERGE_TIMEOUT_MS as f64 / 1000.0,
+                            max_ee_err * 100.0,
+                            CONVERGE_EE_THRESHOLD * 100.0,
+                        );
+                        break;
+                    }
+
+                    // Log on first detection
+                    if converge_iter == 1 {
+                        eprintln!(
+                            "  Waiting for convergence (EE err {:.1}cm, threshold {:.1}cm)...",
+                            max_ee_err * 100.0,
+                            CONVERGE_EE_THRESHOLD * 100.0,
+                        );
+                    }
+
+                    // Re-send corrected commands and wait
+                    for (arm_name, socket) in arms.iter_mut() {
+                        for &(ref target_arm, motor_id, target_pos, kp, kd) in &curr_targets {
+                            if target_arm != arm_name {
+                                continue;
+                            }
+                            let correction = pos_correction
+                                .get(arm_name.as_str())
+                                .and_then(|m| m.get(&motor_id))
+                                .copied()
+                                .unwrap_or(0.0);
+                            let cmd_data =
+                                encode_damiao_cmd(target_pos + correction, 0.0, kp, kd, 0.0);
+                            if let Ok(frame) = socketcan::CanFrame::new(motor_id, &cmd_data) {
+                                let _ = socket.write_frame(&frame);
+                            }
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(MOVE_STEP_MS));
+                    converge_iter += 1;
+                }
+
                 // Update prev_positions for next waypoint
                 for &(ref arm_name, motor_id, target_pos, _, _) in &curr_targets {
                     prev_positions
@@ -909,16 +1489,108 @@ fn main() -> Result<()> {
                 std::thread::sleep(target - elapsed);
             }
 
+            let mut safety_error: Option<String> = None;
+            let mut throttle = false;
             for (arm_name, can_cmds) in &timestep.commands {
                 if let Some(socket) = arms.get_mut(arm_name) {
+                    let mut commanded = HashMap::new();
                     for cmd in can_cmds {
-                        if let Ok(can_frame) = socketcan::CanFrame::new(cmd.can_id, &cmd.data) {
-                            let _ = socket.write_frame(&can_frame);
-                            sent += 1;
+                        if cmd.data.len() == 8 && (1..=7).contains(&cmd.can_id) {
+                            // Motor command: apply integral correction
+                            let (pos, vel, kp, kd, tau) = decode_damiao_cmd(&cmd.data);
+                            commanded.insert(cmd.can_id, pos); // record ORIGINAL for safety
+                            let correction = pos_correction
+                                .get(arm_name)
+                                .and_then(|m| m.get(&cmd.can_id))
+                                .copied()
+                                .unwrap_or(0.0);
+                            let corrected = encode_damiao_cmd(pos + correction, vel, kp, kd, tau);
+                            if let Ok(frame) = socketcan::CanFrame::new(cmd.can_id, &corrected) {
+                                let _ = socket.write_frame(&frame);
+                                sent += 1;
+                            }
+                        } else {
+                            // Non-motor command (enable/disable MIT, motor 8, etc): send as-is
+                            if let Ok(can_frame) = socketcan::CanFrame::new(cmd.can_id, &cmd.data) {
+                                let _ = socket.write_frame(&can_frame);
+                                sent += 1;
+                            }
                         }
                     }
-                    // Drain responses
-                    while socket.read_frame().ok().flatten().is_some() {}
+                    let actual = read_response_positions(socket);
+                    // Update integral corrections from response errors
+                    for (&motor_id, &actual_pos) in &actual {
+                        if let Some(&cmd_pos) = commanded.get(&motor_id) {
+                            let error = cmd_pos - actual_pos;
+                            pos_last_error
+                                .entry(arm_name.clone())
+                                .or_default()
+                                .insert(motor_id, error);
+                            let corr = pos_correction
+                                .entry(arm_name.clone())
+                                .or_default()
+                                .entry(motor_id)
+                                .or_insert(0.0);
+                            *corr = (*corr + POS_KI * error)
+                                .clamp(-POS_CORRECTION_MAX, POS_CORRECTION_MAX);
+                        }
+                    }
+                    if !safety_disabled && !actual.is_empty() && !commanded.is_empty() {
+                        match safety_monitor.check(&commanded, &actual, arm_name) {
+                            Ok(true) => throttle = true,
+                            Ok(false) => {}
+                            Err(e) => {
+                                safety_error = Some(e.to_string());
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(err) = safety_error {
+                emergency_stop(&mut arms);
+                anyhow::bail!("{}", err);
+            }
+            // Arm behind — slow down by delaying the next timestep
+            if throttle {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+
+            // Log active integral corrections periodically (~1s)
+            if last_correction_log.elapsed() >= Duration::from_secs(1) {
+                let mut parts: Vec<String> = Vec::new();
+                for (arm_name, corrs) in &pos_correction {
+                    let errors = pos_last_error.get(arm_name);
+                    let mut motor_parts: Vec<String> = Vec::new();
+                    for motor_id in 1..=7u32 {
+                        if let Some(&c) = corrs.get(&motor_id) {
+                            if c.abs() > 1.0_f64.to_radians() {
+                                let err = errors
+                                    .and_then(|e| e.get(&motor_id))
+                                    .copied()
+                                    .unwrap_or(0.0);
+                                let sat = if c.abs() >= POS_CORRECTION_MAX - 0.001 {
+                                    " SAT!"
+                                } else {
+                                    ""
+                                };
+                                motor_parts.push(format!(
+                                    "J{}: corr {:+.1}° err {:+.1}°{}",
+                                    motor_id,
+                                    c.to_degrees(),
+                                    err.to_degrees(),
+                                    sat,
+                                ));
+                            }
+                        }
+                    }
+                    if !motor_parts.is_empty() {
+                        parts.push(format!("{} [{}]", arm_name, motor_parts.join(", ")));
+                    }
+                }
+                if !parts.is_empty() {
+                    eprintln!("\n  INTEGRAL CORRECTION: {}", parts.join(", "));
+                    last_correction_log = Instant::now();
                 }
             }
 

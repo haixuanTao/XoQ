@@ -225,7 +225,7 @@ impl RealSenseCamera {
         // Extract accel frames before alignment (IMU frames are independent of depth/color).
         // The accel stream runs at 100-200 Hz vs 15 fps for depth/color, so not every
         // composite will contain an accel frame — we keep the last known value.
-        // Apply EMA low-pass filter (alpha=0.1) to smooth out accelerometer noise.
+        // Apply EMA low-pass filter (alpha=0.05) with outlier rejection to smooth accelerometer noise.
         let accel_frames: Vec<AccelFrame> = composite.frames_of_type();
         if let Some(af) = accel_frames.first() {
             let a = *af.acceleration();
@@ -238,15 +238,29 @@ impl RealSenseCamera {
                 ],
                 None => a,
             };
-            const ALPHA: f32 = 0.1;
-            self.filtered_accel = Some(match self.filtered_accel {
-                Some(prev) => [
-                    prev[0] + ALPHA * (raw[0] - prev[0]),
-                    prev[1] + ALPHA * (raw[1] - prev[1]),
-                    prev[2] + ALPHA * (raw[2] - prev[2]),
-                ],
-                None => raw,
-            });
+            // Outlier rejection: skip samples that deviate too far from the
+            // current filtered value.  This prevents vibration spikes from
+            // polluting the gravity estimate.
+            const OUTLIER_THRESHOLD: f32 = 1.5; // m/s²
+            let is_outlier = match self.filtered_accel {
+                Some(prev) => {
+                    (raw[0] - prev[0]).abs() > OUTLIER_THRESHOLD
+                        || (raw[1] - prev[1]).abs() > OUTLIER_THRESHOLD
+                        || (raw[2] - prev[2]).abs() > OUTLIER_THRESHOLD
+                }
+                None => false,
+            };
+            if !is_outlier {
+                const ALPHA: f32 = 0.05;
+                self.filtered_accel = Some(match self.filtered_accel {
+                    Some(prev) => [
+                        prev[0] + ALPHA * (raw[0] - prev[0]),
+                        prev[1] + ALPHA * (raw[1] - prev[1]),
+                        prev[2] + ALPHA * (raw[2] - prev[2]),
+                    ],
+                    None => raw,
+                });
+            }
         }
         drop(accel_frames);
 

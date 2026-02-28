@@ -530,7 +530,13 @@ export class DepthDecoder {
     }
   }
   onData(data) {
-    if (this.disabled || this._autoConfiguring) return;
+    if (this.disabled) return;
+    if (this._autoConfiguring) {
+      // Buffer segments arriving during async auto-config (e.g. replay bulk-feeding)
+      if (!this._pendingData) this._pendingData = [];
+      this._pendingData.push(new Uint8Array(data));
+      return;
+    }
     const d = new Uint8Array(data);
 
     // MSE fallback path
@@ -545,33 +551,48 @@ export class DepthDecoder {
       if (!this.configured) {
         const av1c = extractAv1C(d);
         const codec = detectCodec(d);
+        if (av1c) this._savedAv1c = av1c;
+        if (codec) this._savedCodec = codec;
         const moofOff = findBoxOffset(d, 'moof');
         const firstSeg = moofOff >= 0 ? d.subarray(moofOff) : null;
         if (av1c && codec && firstSeg) {
-          // Capture for xoqRetry() debug tool
-          if (typeof window !== 'undefined') {
-            const mdat = findMdatContent(firstSeg);
-            if (mdat) window._xoqCapturedFrame = mdat.slice();
-            window._xoqCapturedAv1C = av1c.slice();
-          }
-          // Auto-test multiple WebCodecs configurations with the first keyframe
-          this._autoConfiguring = true;
-          this._autoConfig(codec, av1c, firstSeg).catch(e => {
-            log(`Depth auto-config error: ${e.message}`, 'error');
-            this._switchToMse(codec);
-          }).finally(() => {
-            this._autoConfiguring = false;
-          });
+          this._startAutoConfig(codec, av1c, firstSeg);
           return;
         }
+        // Init-only segment (no moof) — save and wait for first media segment
+        return;
       }
       if (this.configured) {
         const moofOff = findBoxOffset(d, 'moof');
         if (moofOff >= 0) this.decodeSample(d.subarray(moofOff));
       }
+    } else if (!this.configured && this._savedAv1c && this._savedCodec) {
+      // First media segment after init-only — use it to trigger auto-config
+      this._startAutoConfig(this._savedCodec, this._savedAv1c, d);
     } else if (this.configured) {
       this.decodeSample(d);
     }
+  }
+  _startAutoConfig(codec, av1c, firstSeg) {
+    // Capture for xoqRetry() debug tool
+    if (typeof window !== 'undefined') {
+      const mdat = findMdatContent(firstSeg);
+      if (mdat) window._xoqCapturedFrame = mdat.slice();
+      window._xoqCapturedAv1C = av1c.slice();
+    }
+    this._autoConfiguring = true;
+    this._autoConfig(codec, av1c, firstSeg).catch(e => {
+      log(`Depth auto-config error: ${e.message}`, 'error');
+      this._switchToMse(codec);
+    }).finally(() => {
+      this._autoConfiguring = false;
+      // Flush any segments that arrived during auto-config
+      if (this._pendingData) {
+        const pending = this._pendingData;
+        this._pendingData = null;
+        for (const d of pending) this.onData(d);
+      }
+    });
   }
   // Test-decode a single keyframe with a given configuration. Returns [success, reason].
   _testDecode(cfg, chunkData) {
@@ -990,18 +1011,22 @@ export class DepthDecoder {
 
 // ─── MsePlayer (MSE video playback) ─────────────────
 export class MsePlayer {
-  constructor(videoEl, label) {
+  constructor(videoEl, label, { liveMode = true } = {}) {
     this.video = videoEl; this.label = label;
     this.ms = null; this.sb = null; this.queue = []; this.ready = false;
-    this.frames = 0; this.seekIv = null;
+    this.frames = 0; this.seekIv = null; this.liveMode = liveMode;
   }
   onData(data) {
     this.frames++;
     if (!this.ready) {
-      if (!hasFtyp(data)) return;
-      const codec = detectCodec(data);
-      if (!codec) { log(`${this.label}: cannot detect codec`, "error"); return; }
-      this.initMse(codec, data); return;
+      if (hasFtyp(data)) {
+        const codec = detectCodec(data);
+        if (!codec) { log(`${this.label}: cannot detect codec`, "error"); return; }
+        this.initMse(codec, data); return;
+      }
+      // Buffer data arriving before sourceopen (e.g. replay bulk-feeding segments)
+      this.queue.push(data);
+      return;
     }
     this.enqueue(data);
   }
@@ -1026,18 +1051,22 @@ export class MsePlayer {
         this.sb.mode = 'segments';
         this.sb.addEventListener('updateend', () => this.flush());
         this.ready = true;
-        this.enqueue(initData);
-        this.video.play().catch(() => {});
-        this.seekIv = setInterval(() => {
-          if (this.video.buffered.length > 0) {
-            const start = this.video.buffered.start(0);
-            const end = this.video.buffered.end(this.video.buffered.length - 1);
-            if (this.video.currentTime < start || end - this.video.currentTime > 0.15) {
-              this.video.currentTime = Math.max(start, end - 0.03);
+        // Prepend init before any pre-buffered segments (from replay bulk-feeding)
+        this.queue.unshift(initData);
+        this.flush();
+        if (this.liveMode) {
+          this.video.play().catch(() => {});
+          this.seekIv = setInterval(() => {
+            if (this.video.buffered.length > 0) {
+              const start = this.video.buffered.start(0);
+              const end = this.video.buffered.end(this.video.buffered.length - 1);
+              if (this.video.currentTime < start || end - this.video.currentTime > 0.15) {
+                this.video.currentTime = Math.max(start, end - 0.03);
+              }
+              if (end - start > 4 && !this.sb.updating) try { this.sb.remove(start, end - 2); } catch {}
             }
-            if (end - start > 4 && !this.sb.updating) try { this.sb.remove(start, end - 2); } catch {}
-          }
-        }, 100);
+          }, 100);
+        }
       } catch (e) { log(`${this.label}: init failed: ${e.message}`, "error"); }
     });
   }
@@ -1051,6 +1080,73 @@ export class MsePlayer {
     this.queue = []; this.ready = false;
     if (this.ms && this.ms.readyState === 'open') try { this.ms.endOfStream(); } catch {}
     this.video.src = '';
+  }
+}
+
+// ─── DepthVideoExtractor (replay: extract Y plane from MSE <video>) ──
+// Same interface as DepthDecoder (latestY, width, height, is10bit) so the
+// render loop's updatePointCloudGeneric() works unchanged.
+export class DepthVideoExtractor {
+  constructor(videoEl, codec) {
+    this.video = videoEl;
+    this.latestY = null;
+    this.width = 0;
+    this.height = 0;
+    this.is10bit = !!(codec && codec.endsWith('.10'));
+    this._canvas = null;
+    this._ctx = null;
+    this._rafId = null;
+    this._lastTime = -1;
+    this._startLoop();
+  }
+  _startLoop() {
+    const tick = () => {
+      this._rafId = requestAnimationFrame(tick);
+      this._extract();
+    };
+    this._rafId = requestAnimationFrame(tick);
+  }
+  _extract() {
+    const v = this.video;
+    if (!v || !v.videoWidth || v.readyState < 2) return;
+    // Skip if video time hasn't changed (same frame)
+    if (v.currentTime === this._lastTime) return;
+    this._lastTime = v.currentTime;
+
+    const w = v.videoWidth, h = v.videoHeight;
+    if (!this._canvas || this._canvas.width !== w || this._canvas.height !== h) {
+      this._canvas = document.createElement('canvas');
+      this._canvas.width = w; this._canvas.height = h;
+      this._ctx = this._canvas.getContext('2d', { willReadFrequently: true });
+    }
+    this._ctx.drawImage(v, 0, 0, w, h);
+    const rgba = this._ctx.getImageData(0, 0, w, h).data;
+    const ySize = w * h;
+    if (this.is10bit) {
+      if (!this.latestY || this.latestY.length !== ySize) this.latestY = new Uint16Array(ySize);
+      for (let i = 0; i < ySize; i++) {
+        const g = rgba[i * 4];
+        this.latestY[i] = g < 2 ? 0 : Math.min(1023, Math.round(g * 3.435 + 64));
+      }
+    } else {
+      if (!this.latestY || this.latestY.length !== ySize) this.latestY = new Uint8Array(ySize);
+      for (let i = 0; i < ySize; i++) this.latestY[i] = rgba[i * 4];
+    }
+    this.width = w;
+    this.height = h;
+  }
+  // Force extraction even if currentTime hasn't changed (after seek)
+  forceExtract() {
+    this._lastTime = -1;
+    this._extract();
+  }
+  destroy() {
+    if (this._rafId) cancelAnimationFrame(this._rafId);
+    this._rafId = null;
+    this.video = null;
+    this._canvas = null;
+    this._ctx = null;
+    this.latestY = null;
   }
 }
 

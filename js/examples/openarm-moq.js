@@ -6,6 +6,7 @@ import { log } from "./openarm-log.js";
 import { MsePlayer, DepthDecoder, HAS_WEBCODECS, stripTimestamp } from "./openarm-depth.js";
 
 // ─── Helpers ─────────────────────────────────────────
+
 export function buildConnectOpts(config) {
   const certHash = (config.general.certHash || "").trim();
   // Skip WebTransport delay for browsers that don't support it (Firefox, Safari)
@@ -65,6 +66,7 @@ async function subscribeArmOnce(config, appState, label, path, jointState) {
         if (!frame) break;
         const bytes = new Uint8Array(frame);
         appState.bytesTotal += bytes.length;
+        appState.recorder?.onData(`can_${label}`, bytes, 'can');
         const canFrames = parseAllCanFrames(bytes);
         appState.frameCount += canFrames.length;
         appState.fpsCounter += canFrames.length;
@@ -106,7 +108,7 @@ export async function subscribeArm(config, appState, label, path, jointState) {
 }
 
 // ─── Plain camera connection (video only, no depth) ──
-async function connectCameraOnce(config, cam, path, videoEl, label) {
+async function connectCameraOnce(config, appState, cam, path, videoEl, label) {
   const relay = config.general.relay;
   const fullUrl = `${relay}/${path}`;
 
@@ -127,7 +129,9 @@ async function connectCameraOnce(config, cam, path, videoEl, label) {
     while (cam.running) {
       const frame = await withTimeout(group.readFrame(), STALE_MS);
       if (!frame) break;
-      cam.colorPlayer.onData(new Uint8Array(frame));
+      const d = new Uint8Array(frame);
+      cam.colorPlayer.onData(d);
+      appState.recorder?.onData(`${label}_color`, d, 'fmp4');
     }
   }
 }
@@ -137,13 +141,13 @@ function cleanupCamera(cam) {
   if (cam.colorPlayer) { cam.colorPlayer.destroy(); cam.colorPlayer = null; }
 }
 
-async function connectSingleCamera(config, cam, path, videoEl, label) {
+async function connectSingleCamera(config, appState, cam, path, videoEl, label) {
   if (!path) return;
   cam.running = true;
   let lastError = null;
   while (cam.running) {
     try {
-      await connectCameraOnce(config, cam, path, videoEl, label);
+      await connectCameraOnce(config, appState, cam, path, videoEl, label);
       if (!cam.running) break;
       lastError = null;
       log(`[${label}] Stream ended`, 'info');
@@ -158,12 +162,12 @@ async function connectSingleCamera(config, cam, path, videoEl, label) {
   }
 }
 
-export async function connectCameras(config, camState, camVideoEls) {
+export async function connectCameras(config, appState, camState, camVideoEls) {
   const promises = [];
   config.cameras.forEach((camCfg, i) => {
     const path = (camCfg.path || "").trim();
     if (camCfg.enabled !== false && path && camState[i]) {
-      promises.push(connectSingleCamera(config, camState[i], path, camVideoEls[i], camCfg.label || ("Cam " + (i+1))));
+      promises.push(connectSingleCamera(config, appState, camState[i], path, camVideoEls[i], camCfg.label || ("Cam " + (i+1))));
     }
   });
   if (promises.length) await Promise.all(promises);
@@ -206,16 +210,24 @@ async function connectRealSenseOnce(config, appState, cam, path, videoEl, label)
     }
   }
 
-  const promises = [readTrack(videoTrack, d => { appState.videoFps.count++; cam.colorPlayer.onData(d); }, 'video')];
+  const promises = [readTrack(videoTrack, d => {
+    appState.videoFps.count++;
+    cam.colorPlayer.onData(d);
+    appState.recorder?.onData(`${label}_color`, d, 'fmp4');
+  }, 'video')];
 
   if (HAS_WEBCODECS) {
     const depthTrack = broadcast.subscribe("depth", 0);
-    promises.push(readTrack(depthTrack, d => cam.depthDecoder.onData(d), 'depth'));
+    promises.push(readTrack(depthTrack, d => {
+      cam.depthDecoder.onData(d);
+      appState.recorder?.onData(`${label}_depth`, d, 'fmp4');
+    }, 'depth'));
     trackNames.push('depth');
 
     // Subscribe to metadata track (intrinsics JSON, sent on keyframes)
     const metadataTrack = broadcast.subscribe("metadata", 0);
     promises.push(readTrack(metadataTrack, d => {
+      appState.recorder?.onData(`${label}_meta`, d, 'metadata');
       try {
         const json = new TextDecoder().decode(d);
         const meta = JSON.parse(json);
