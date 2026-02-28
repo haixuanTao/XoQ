@@ -407,14 +407,13 @@ async fn run_watch(relay: &str, base_path: &str) -> Result<()> {
 
 // ─── CAN command test ──────────────────────────────────────
 
-/// Encode a CAN wire frame: [flags(1), canId(4 LE), len(1), data(len)]
-/// Matches the wire format in xoq::can_types::wire and JS encodeCanFrame()
+/// Encode a CAN wire frame as 72-byte canfd_frame:
+/// [4B can_id LE][1B len][1B flags][2B reserved][64B data zero-padded]
 fn encode_can_wire_frame(can_id: u32, data: &[u8]) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(6 + data.len());
-    buf.push(0x00); // flags: standard CAN
-    buf.extend_from_slice(&can_id.to_le_bytes());
-    buf.push(data.len() as u8);
-    buf.extend_from_slice(data);
+    let mut buf = vec![0u8; 72];
+    buf[0..4].copy_from_slice(&can_id.to_le_bytes());
+    buf[4] = data.len() as u8;
+    buf[8..8 + data.len()].copy_from_slice(data);
     buf
 }
 
