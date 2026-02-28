@@ -26,18 +26,22 @@ export function makeJointState() {
   }));
 }
 
-// Format: [1B flags][4B can_id LE][1B data_len][0-64B data]
+// Linux struct canfd_frame: [4B can_id LE][1B len][1B flags][2B reserved][64B data]
+// Fixed 72 bytes per frame
+const CANFD_FRAME_SIZE = 72;
+const CAN_EFF_FLAG = 0x80000000;
+const CAN_EFF_MASK = 0x1FFFFFFF;
+const CAN_SFF_MASK = 0x000007FF;
+
 export function parseCanFrame(buf) {
-  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
-  if (buf.length < 6) return null;
-
-  const flags = buf[0];
-  const canId = view.getUint32(1, true);
-  const dataLen = buf[5];
-
-  if (buf.length < 6 + dataLen) return null;
-
-  const data = buf.slice(6, 6 + dataLen);
+  if (buf.length < CANFD_FRAME_SIZE) return null;
+  const view = new DataView(buf.buffer, buf.byteOffset, CANFD_FRAME_SIZE);
+  const rawId = view.getUint32(0, true);
+  const dataLen = buf[4];
+  const flags = buf[5];
+  const isExtended = (rawId & CAN_EFF_FLAG) !== 0;
+  const canId = isExtended ? (rawId & CAN_EFF_MASK) : (rawId & CAN_SFF_MASK);
+  const data = buf.slice(8, 8 + Math.min(dataLen, 64));
   return { flags, canId, dataLen, data };
 }
 
@@ -45,18 +49,10 @@ export function parseCanFrame(buf) {
 export function parseAllCanFrames(buf) {
   const frames = [];
   let offset = 0;
-  while (offset + 6 <= buf.length) {
-    const slice = buf.subarray(offset);
-    const dataLen = slice[5];
-    if (offset + 6 + dataLen > buf.length) break;
-    const view = new DataView(buf.buffer, buf.byteOffset + offset, 6 + dataLen);
-    frames.push({
-      flags: slice[0],
-      canId: view.getUint32(1, true),
-      dataLen,
-      data: buf.slice(offset + 6, offset + 6 + dataLen),
-    });
-    offset += 6 + dataLen;
+  while (offset + CANFD_FRAME_SIZE <= buf.length) {
+    const slice = buf.subarray(offset, offset + CANFD_FRAME_SIZE);
+    frames.push(parseCanFrame(slice));
+    offset += CANFD_FRAME_SIZE;
   }
   return frames;
 }

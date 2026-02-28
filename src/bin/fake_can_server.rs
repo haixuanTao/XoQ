@@ -92,27 +92,24 @@ fn encode_damiao_response(
     ]
 }
 
-/// Encode a CAN frame in wire format: [1B flags][4B can_id LE][1B data_len][data...]
+/// Encode a CAN frame as a 72-byte canfd_frame.
 fn encode_wire_frame(can_id: u32, data: &[u8]) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(6 + data.len());
-    buf.push(0u8); // flags: standard CAN, no FD
-    buf.extend_from_slice(&can_id.to_le_bytes());
-    buf.push(data.len() as u8);
-    buf.extend_from_slice(data);
+    let mut buf = vec![0u8; 72];
+    buf[0..4].copy_from_slice(&can_id.to_le_bytes());
+    buf[4] = data.len() as u8;
+    // buf[5] = flags (0), buf[6..8] = reserved (0), already zeroed
+    buf[8..8 + data.len()].copy_from_slice(data);
     buf
 }
 
-/// Decode one wire frame: returns (can_id, data, bytes_consumed).
+/// Decode one 72-byte canfd_frame: returns (can_id, data, bytes_consumed).
 fn decode_wire_frame(buf: &[u8]) -> Option<(u32, Vec<u8>, usize)> {
-    if buf.len() < 6 {
+    if buf.len() < 72 {
         return None;
     }
-    let can_id = u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]);
-    let data_len = buf[5] as usize;
-    if buf.len() < 6 + data_len {
-        return None;
-    }
-    Some((can_id, buf[6..6 + data_len].to_vec(), 6 + data_len))
+    let can_id = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+    let len = (buf[4] as usize).min(64);
+    Some((can_id, buf[8..8 + len].to_vec(), 72))
 }
 
 /// Process a CAN command and return the wire-encoded response (if any).

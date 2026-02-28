@@ -81,34 +81,19 @@ impl CanClient {
 
     /// Read a CAN frame from the remote interface
     pub async fn read_frame(&self) -> Result<Option<AnyCanFrame>> {
-        let mut header = [0u8; 6];
+        let mut buf = [0u8; wire::FRAME_SIZE];
         let mut recv = self.recv.lock().await;
 
-        // Read header
         let mut read = 0;
-        while read < 6 {
-            match recv.read(&mut header[read..]).await? {
+        while read < wire::FRAME_SIZE {
+            match recv.read(&mut buf[read..]).await? {
                 Some(n) if n > 0 => read += n,
                 Some(_) => continue,
                 None => return Ok(None),
             }
         }
 
-        // Get full frame size and read remaining data
-        let frame_size = wire::encoded_size(&header)?;
-        let mut data = vec![0u8; frame_size];
-        data[..6].copy_from_slice(&header);
-
-        let mut read = 6;
-        while read < frame_size {
-            match recv.read(&mut data[read..]).await? {
-                Some(n) if n > 0 => read += n,
-                Some(_) => continue,
-                None => return Ok(None),
-            }
-        }
-
-        let (frame, _) = wire::decode(&data)?;
+        let (frame, _) = wire::decode(&buf)?;
         Ok(Some(frame))
     }
 }
@@ -536,43 +521,19 @@ impl RemoteCanSocket {
     fn try_decode_buffered(&self) -> Result<Option<AnyCanFrame>> {
         let mut buffer = self.read_buffer.lock().unwrap();
 
-        if buffer.len() < 6 {
+        if buffer.len() < wire::FRAME_SIZE {
             return Ok(None);
         }
 
-        // Validate data_len before proceeding - prevents buffer corruption from bad data
-        let data_len = buffer[5] as usize;
-        if data_len > 64 {
-            // Invalid data length - corrupted packet, skip this byte and try to resync
-            tracing::warn!(
-                "Invalid CAN frame data_len={}, skipping byte to resync",
-                data_len
-            );
-            buffer.drain(..1);
-            return Ok(None);
-        }
-
-        match wire::encoded_size(&buffer) {
-            Ok(frame_size) if buffer.len() >= frame_size => {
-                match wire::decode(&buffer) {
-                    Ok((frame, consumed)) => {
-                        buffer.drain(..consumed);
-                        Ok(Some(frame))
-                    }
-                    Err(e) => {
-                        // Decode failed - likely corrupted data, skip one byte to try to resync
-                        tracing::warn!("CAN frame decode error: {}, skipping byte to resync", e);
-                        buffer.drain(..1);
-                        Ok(None)
-                    }
-                }
+        match wire::decode(&buffer) {
+            Ok((frame, consumed)) => {
+                buffer.drain(..consumed);
+                Ok(Some(frame))
             }
-            Ok(_) => Ok(None), // Need more data
             Err(e) => {
-                // Should not happen since we check len >= 6 above, but handle it safely
-                tracing::warn!("CAN frame size error: {}, clearing buffer", e);
-                buffer.clear();
-                Err(e)
+                tracing::warn!("CAN frame decode error: {}, skipping frame to resync", e);
+                buffer.drain(..wire::FRAME_SIZE);
+                Ok(None)
             }
         }
     }
@@ -687,18 +648,8 @@ impl CanBusSocket for RemoteCanSocket {
     }
 
     fn is_data_available(&self, _timeout_us: u64) -> anyhow::Result<bool> {
-        // Check if we have a complete frame buffered
         let buffer = self.read_buffer.lock().unwrap();
-        if buffer.len() >= 6 {
-            if let Ok(frame_size) = wire::encoded_size(&buffer) {
-                if buffer.len() >= frame_size {
-                    return Ok(true);
-                }
-            }
-        }
-        // Return false if no complete frame is buffered
-        // The actual read_frame method will block/timeout as needed
-        Ok(false)
+        Ok(buffer.len() >= wire::FRAME_SIZE)
     }
 
     fn set_recv_timeout(&mut self, timeout_us: u64) -> anyhow::Result<()> {

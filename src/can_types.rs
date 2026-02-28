@@ -247,106 +247,126 @@ pub struct CanInterfaceInfo {
     pub name: String,
 }
 
-/// Network frame encoding for CAN frames.
+/// Network frame encoding using standard Linux `struct canfd_frame` layout.
 ///
-/// Frame format:
 /// ```text
-/// [1 byte flags][4 bytes can_id (little-endian)][1 byte data_len][0-64 bytes data]
+/// struct canfd_frame {        // 72 bytes total, fixed size
+///     u32 can_id;             // CAN ID + flags (LE). Bit 31=EFF, 30=RTR, 29=ERR
+///     u8  len;                // payload length (0-64)
+///     u8  flags;              // CANFD_BRS=0x01, CANFD_ESI=0x02
+///     u8  __res0;             // reserved
+///     u8  __res1;             // reserved
+///     u8  data[64];           // payload, zero-padded
+/// };
 /// ```
-///
-/// Flags:
-/// - bit 0: CAN FD frame
-/// - bit 1: Extended ID
-/// - bits 2-7: reserved
 pub mod wire {
     use super::{AnyCanFrame, CanFdFlags, CanFdFrame, CanFrame};
     use anyhow::Result;
 
-    const FLAG_FD: u8 = 0x01;
-    const FLAG_EXTENDED: u8 = 0x02;
-    const FLAG_BRS: u8 = 0x04;
-    const FLAG_ESI: u8 = 0x08;
+    /// Fixed size of a canfd_frame (matches Linux struct canfd_frame).
+    pub const FRAME_SIZE: usize = 72;
 
-    /// Encode a CAN frame for network transmission.
+    // can_id flag bits (high bits of the 32-bit can_id field)
+    const CAN_EFF_FLAG: u32 = 0x80000000; // Extended frame format
+    const CAN_RTR_FLAG: u32 = 0x40000000; // Remote transmission request
+    const CAN_EFF_MASK: u32 = 0x1FFFFFFF; // 29-bit extended ID mask
+    const CAN_SFF_MASK: u32 = 0x000007FF; // 11-bit standard ID mask
+
+    // canfd_frame flags byte
+    const CANFD_BRS: u8 = 0x01; // Bit rate switch
+    const CANFD_ESI: u8 = 0x02; // Error state indicator
+
+    /// Encode a CAN frame as a 72-byte canfd_frame.
     pub fn encode(frame: &AnyCanFrame) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(70);
+        let mut buf = vec![0u8; FRAME_SIZE];
 
-        let (flags, id, data) = match frame {
+        let (raw_id, flags, data) = match frame {
             AnyCanFrame::Can(f) => {
-                let mut flags = 0u8;
+                let mut id = f.id();
                 if f.is_extended() {
-                    flags |= FLAG_EXTENDED;
+                    id |= CAN_EFF_FLAG;
                 }
-                (flags, f.id(), f.data())
+                if f.is_remote() {
+                    id |= CAN_RTR_FLAG;
+                }
+                (id, 0u8, f.data())
             }
             AnyCanFrame::CanFd(f) => {
-                let mut flags = FLAG_FD;
+                let mut id = f.id();
                 if f.is_extended() {
-                    flags |= FLAG_EXTENDED;
+                    id |= CAN_EFF_FLAG;
                 }
+                let mut flags = 0u8;
                 if f.flags().brs {
-                    flags |= FLAG_BRS;
+                    flags |= CANFD_BRS;
                 }
                 if f.flags().esi {
-                    flags |= FLAG_ESI;
+                    flags |= CANFD_ESI;
                 }
-                (flags, f.id(), f.data())
+                (id, flags, f.data())
             }
         };
 
-        buf.push(flags);
-        buf.extend_from_slice(&id.to_le_bytes());
-        buf.push(data.len() as u8);
-        buf.extend_from_slice(data);
+        buf[0..4].copy_from_slice(&raw_id.to_le_bytes());
+        buf[4] = data.len() as u8;
+        buf[5] = flags;
+        // buf[6], buf[7] = reserved (already 0)
+        buf[8..8 + data.len()].copy_from_slice(data);
 
         buf
     }
 
-    /// Decode a CAN frame from network data.
+    /// Decode a canfd_frame from network data.
     ///
-    /// Returns the decoded frame and the number of bytes consumed.
+    /// Returns the decoded frame and the number of bytes consumed (always FRAME_SIZE).
     pub fn decode(data: &[u8]) -> Result<(AnyCanFrame, usize)> {
-        if data.len() < 6 {
-            anyhow::bail!("Insufficient data for CAN frame header");
+        if data.len() < FRAME_SIZE {
+            anyhow::bail!(
+                "Need {} bytes for canfd_frame, got {}",
+                FRAME_SIZE,
+                data.len()
+            );
         }
 
-        let flags = data[0];
-        let id = u32::from_le_bytes([data[1], data[2], data[3], data[4]]);
-        let data_len = data[5] as usize;
+        let raw_id = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        let len = (data[4] as usize).min(64);
+        let flags = data[5];
 
-        if data.len() < 6 + data_len {
-            anyhow::bail!("Insufficient data for CAN frame payload");
-        }
+        let is_extended = (raw_id & CAN_EFF_FLAG) != 0;
+        let is_rtr = (raw_id & CAN_RTR_FLAG) != 0;
+        let can_id = if is_extended {
+            raw_id & CAN_EFF_MASK
+        } else {
+            raw_id & CAN_SFF_MASK
+        };
 
-        let frame_data = &data[6..6 + data_len];
-        let is_fd = (flags & FLAG_FD) != 0;
-        let is_extended = (flags & FLAG_EXTENDED) != 0;
+        let frame_data = &data[8..8 + len];
 
-        let frame = if is_fd {
+        let frame = if flags != 0 || len > 8 {
+            // CAN FD frame (has FD flags set, or data > 8 bytes)
             let fd_flags = CanFdFlags {
-                brs: (flags & FLAG_BRS) != 0,
-                esi: (flags & FLAG_ESI) != 0,
+                brs: (flags & CANFD_BRS) != 0,
+                esi: (flags & CANFD_ESI) != 0,
             };
-            let mut f = CanFdFrame::new_with_flags(id, frame_data, fd_flags)?;
-            if is_extended {
-                f.is_extended = true;
-            }
+            let mut f = CanFdFrame::new_with_flags(can_id, frame_data, fd_flags)?;
+            f.is_extended = is_extended;
             AnyCanFrame::CanFd(f)
         } else {
-            let mut f = CanFrame::new(id, frame_data)?;
+            // Standard CAN frame
+            let mut f = if is_rtr {
+                CanFrame::new_remote(can_id, len as u8)?
+            } else {
+                CanFrame::new(can_id, frame_data)?
+            };
             f.is_extended = is_extended;
             AnyCanFrame::Can(f)
         };
 
-        Ok((frame, 6 + data_len))
+        Ok((frame, FRAME_SIZE))
     }
 
-    /// Get the expected size of an encoded frame given its header.
-    pub fn encoded_size(header: &[u8]) -> Result<usize> {
-        if header.len() < 6 {
-            anyhow::bail!("Insufficient data for CAN frame header");
-        }
-        let data_len = header[5] as usize;
-        Ok(6 + data_len)
+    /// Get the expected size of an encoded frame (always FRAME_SIZE).
+    pub fn encoded_size(_header: &[u8]) -> Result<usize> {
+        Ok(FRAME_SIZE)
     }
 }

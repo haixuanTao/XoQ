@@ -145,6 +145,22 @@ can-server can0:fd can1:fd --moq-relay https://cdn.1ms.ai
 
 Publishes per-interface at `anon/xoq-can-can0/state` and `anon/xoq-can-can1/state`. Subscribes to `anon/xoq-can-can0/commands` and `anon/xoq-can-can1/commands` for motor commands.
 
+### CAN Wire Format (MoQ / Recording)
+
+CAN frames are transmitted over MoQ channels and stored in recordings using the standard Linux
+`struct canfd_frame` layout (72 bytes, fixed size):
+
+| Offset | Size | Field     | Description |
+|--------|------|-----------|-------------|
+| 0      | 4    | can_id    | CAN ID + flags (LE). Bit 31=EFF (extended), bit 30=RTR, bit 29=ERR, bits 0-28=ID |
+| 4      | 1    | len       | Payload length (0-64) |
+| 5      | 1    | flags     | CAN FD flags: bit 0=BRS (bit rate switch), bit 1=ESI (error state) |
+| 6      | 2    | reserved  | Zero padding |
+| 8      | 64   | data      | Payload, zero-padded to 64 bytes |
+
+Multiple frames are concatenated in MoQ groups and recording tracks (N × 72 bytes).
+This matches the Linux kernel's `struct canfd_frame` from `<linux/can.h>`, using little-endian byte order.
+
 ### Damiao Motor Protocol
 
 - **Enable MIT mode:** CAN data `[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFC]`
