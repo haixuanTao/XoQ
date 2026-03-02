@@ -49,7 +49,7 @@
 //!   openarm_playback recording.json --step left <id>
 
 use anyhow::Result;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::f64::consts::FRAC_PI_2;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -69,15 +69,11 @@ const STEP_MAX_SPEED: f64 = 3.0; // rad/s — max interpolation speed per motor
 const STEP_MIN_SUBSTEPS: usize = 3; // minimum substeps even for tiny moves
 const STEP_MAX_SUBSTEPS: usize = 50; // cap for very large moves
 
-const EE_ERROR_THRESHOLD: f64 = 0.05; // 5cm — triggers catchup pause
-const EE_ESTOP_THRESHOLD: f64 = 0.30; // 30cm — hard e-stop, no convergence accepted
+const EE_ERROR_THRESHOLD: f64 = 0.05; // 5cm — hard e-stop
+const EE_ESTOP_THRESHOLD: f64 = 0.05; // 5cm — hard e-stop
 const MIN_JOINTS_FOR_FK: usize = 5; // need at least 5 of 7 joints for meaningful FK
 const SAFETY_LAG_MS: u64 = 200; // compare actual against commanded from 200ms ago
-const CONVERGENCE_MM: f64 = 0.001; // 1mm — arm "stopped moving" if EE moves less than this
-const CONVERGENCE_COUNT: usize = 10; // 10 consecutive stable readings = converged (~200ms)
-
-const POS_KI: f64 = 0.1; // integral gain: correction += KI * (cmd_pos - actual_pos) per update
-const POS_CORRECTION_MAX: f64 = 1.5; // anti-windup: max correction ±1.5 rad (~86°)
+const KP_SCALE_DEFAULT: f64 = 1.0; // default kp multiplier (--kp-scale flag)
 
 const POS_MIN: f64 = -12.5;
 const POS_MAX: f64 = 12.5;
@@ -772,9 +768,9 @@ impl SafetyMonitor {
                 let my = act_ee[1] - prev[1];
                 let mz = act_ee[2] - prev[2];
                 let movement = (mx * mx + my * my + mz * mz).sqrt();
-                if movement < CONVERGENCE_MM {
+                if movement < 0.001 {
                     *stable += 1;
-                    if *stable >= CONVERGENCE_COUNT {
+                    if *stable >= 10 {
                         // Arm at steady state — accept as caught up
                         eprintln!(
                             "  {} converged at {:.1}cm offset (steady state), resuming",
@@ -879,6 +875,10 @@ fn main() -> Result<()> {
         );
         println!("  --step       Step mode: like --interp but press Enter before each waypoint");
         println!("  --no-safety  Disable end-effector safety monitoring");
+        println!(
+            "  --kp-scale F Multiply all motor kp values by F (default 1.0, try 2.0 for stiffer)"
+        );
+        println!("  --no-gravity-comp  Disable feedforward gravity compensation (on by default)");
         return Ok(());
     }
 
@@ -889,6 +889,8 @@ fn main() -> Result<()> {
     let mut step_mode = false;
     let mut interp_mode = false;
     let mut safety_disabled = false;
+    let mut gravity_comp = true;
+    let mut kp_scale: f64 = KP_SCALE_DEFAULT;
     let mut rest_args: Vec<String> = Vec::new();
     let mut i = 2;
     while i < args.len() {
@@ -913,6 +915,16 @@ fn main() -> Result<()> {
         } else if args[i] == "--no-safety" {
             safety_disabled = true;
             i += 1;
+        } else if args[i] == "--no-gravity-comp" {
+            gravity_comp = false;
+            i += 1;
+        } else if args[i] == "--kp-scale" {
+            if i + 1 < args.len() {
+                kp_scale = args[i + 1].parse::<f64>().unwrap_or(KP_SCALE_DEFAULT);
+                i += 2;
+            } else {
+                i += 1;
+            }
         } else {
             rest_args.push(args[i].clone());
             i += 1;
@@ -1006,6 +1018,9 @@ fn main() -> Result<()> {
         })?;
     }
 
+    // Pause/resume state (thread spawned later, after interactive prompts)
+    let paused = Arc::new(AtomicBool::new(false));
+
     // Enable motors — immediately follow with zero-torque query to prevent position jump
     println!("Enabling motors...");
     for (name, socket) in &mut arms {
@@ -1024,6 +1039,13 @@ fn main() -> Result<()> {
     // --- Pre-playback safety check ---
     // Query current motor positions and compare with first waypoint.
     // If any motor is too far from its target, offer to slow-move there.
+    // Per-motor gravity compensation torque: (arm_name, motor_id) → tau_ff
+    let mut tau_ff: HashMap<(String, u32), f64> = HashMap::new();
+    const TAU_FF_MAX: f64 = 8.0; // Absolute clamp (typical gravity torque is 2-6 Nm)
+    const TAU_FF_ABORT: f64 = 7.0; // Abort if any motor's |tau_ff| exceeds this
+    const TAU_FF_ALPHA: f64 = 0.3; // EMA gain — only applied when arm is holding still (not during motion)
+    const TAU_FF_DEADBAND: f64 = 0.005; // ~0.3° — ignore errors below this to prevent integral windup from noise/friction
+
     println!("\nChecking motor positions...");
     let first_timestep = &timesteps[0];
     let mut needs_slow_move = false;
@@ -1057,11 +1079,18 @@ fn main() -> Result<()> {
         }
     }
 
+    // Only apply gravity comp to motors that responded to the initial query (1-7 only)
+    let gravity_comp_motors: HashSet<(String, u32)> = mismatches
+        .iter()
+        .filter(|(_, mid, _, _, _, _)| (1..=7).contains(mid))
+        .map(|(arm, mid, _, _, _, _)| (arm.clone(), *mid))
+        .collect();
+
     // Immediately hold motors at queried position with kp/kd so they don't drift
     // while the user reads the screen or presses Enter
     for (arm_name, motor_id, current, _target, kp, kd) in &mismatches {
         if let Some(socket) = arms.get_mut(arm_name) {
-            let cmd_data = encode_damiao_cmd(*current, 0.0, *kp, *kd, 0.0);
+            let cmd_data = encode_damiao_cmd(*current, 0.0, (*kp * kp_scale).min(500.0), *kd, 0.0);
             if let Ok(frame) = socketcan::CanFrame::new(*motor_id, &cmd_data) {
                 let _ = socket.write_frame(&frame);
             }
@@ -1139,7 +1168,8 @@ fn main() -> Result<()> {
                 if let Some(socket) = arms.get_mut(arm_name) {
                     for &(motor_id, current, target, kp, kd) in targets {
                         let interp_pos = current + t * (target - current);
-                        let cmd_data = encode_damiao_cmd(interp_pos, 0.0, kp, kd, 0.0);
+                        let cmd_data =
+                            encode_damiao_cmd(interp_pos, 0.0, (kp * kp_scale).min(500.0), kd, 0.0);
                         if let Ok(frame) = socketcan::CanFrame::new(motor_id, &cmd_data) {
                             let _ = socket.write_frame(&frame);
                         }
@@ -1179,11 +1209,52 @@ fn main() -> Result<()> {
     let mut iteration = 0u64;
     let mut total_sent = 0usize;
     let mut safety_monitor = SafetyMonitor::new();
-    // Integral position correction: accumulates error to compensate gravity deflection.
-    // correction[arm_name][motor_id] is added to commanded position each timestep.
-    let mut pos_correction: HashMap<String, HashMap<u32, f64>> = HashMap::new();
-    let mut pos_last_error: HashMap<String, HashMap<u32, f64>> = HashMap::new(); // latest per-motor error
-    let mut last_correction_log = Instant::now();
+    let mut pos_last_error: HashMap<String, HashMap<u32, f64>> = HashMap::new();
+
+    if gravity_comp {
+        eprintln!(
+            "  gravity compensation ENABLED (alpha={}, abort=±{} Nm, motors: {:?})",
+            TAU_FF_ALPHA,
+            TAU_FF_ABORT,
+            gravity_comp_motors
+                .iter()
+                .map(|(a, m)| format!("{}/0x{:02X}", a, m))
+                .collect::<Vec<_>>()
+        );
+    }
+    if kp_scale != 1.0 {
+        eprintln!("  kp_scale = {:.1}x", kp_scale);
+    }
+
+    // Start pause/resume key listener now (after all interactive prompts are done)
+    if !step_mode {
+        let paused = paused.clone();
+        let running = running.clone();
+        std::thread::spawn(move || {
+            let _ = std::process::Command::new("stty")
+                .args(["-icanon", "min", "1", "-echo"])
+                .stdin(std::process::Stdio::inherit())
+                .status();
+            let mut buf = [0u8; 1];
+            use std::io::Read;
+            while running.load(Ordering::SeqCst) {
+                if std::io::stdin().read_exact(&mut buf).is_ok() {
+                    if buf[0] == b'p' || buf[0] == b' ' {
+                        let was = paused.fetch_xor(true, Ordering::SeqCst);
+                        if was {
+                            eprintln!("\n  RESUMED");
+                        } else {
+                            eprintln!("\n  PAUSED (press p or space to resume)");
+                        }
+                    }
+                }
+            }
+            let _ = std::process::Command::new("stty")
+                .args(["icanon", "echo"])
+                .stdin(std::process::Stdio::inherit())
+                .status();
+        });
+    }
 
     loop {
         iteration += 1;
@@ -1212,13 +1283,94 @@ fn main() -> Result<()> {
             duration
         );
 
-        let start = Instant::now();
+        let mut start = Instant::now();
         let t_offset = timesteps[0].t;
         let mut sent = 0usize;
 
         for (step_i, timestep) in timesteps.iter().enumerate() {
             if !running.load(Ordering::SeqCst) {
                 break;
+            }
+
+            // Pause: hold current position by re-sending last timestep's commands
+            while paused.load(Ordering::SeqCst) && running.load(Ordering::SeqCst) {
+                if step_i > 0 {
+                    let hold = &timesteps[step_i - 1];
+                    for (arm_name, can_cmds) in &hold.commands {
+                        if let Some(socket) = arms.get_mut(arm_name) {
+                            for cmd in can_cmds {
+                                if cmd.data.len() == 8 && (1..=7).contains(&cmd.can_id) {
+                                    let (pos, _vel, kp, kd, _tau) = decode_damiao_cmd(&cmd.data);
+                                    let motor_tau_ff = if gravity_comp {
+                                        tau_ff
+                                            .get(&(arm_name.clone(), cmd.can_id))
+                                            .copied()
+                                            .unwrap_or(0.0)
+                                            .clamp(-TAU_FF_MAX, TAU_FF_MAX)
+                                    } else {
+                                        0.0
+                                    };
+                                    let corrected = encode_damiao_cmd(
+                                        pos,
+                                        0.0,
+                                        (kp * kp_scale).min(500.0),
+                                        kd,
+                                        motor_tau_ff,
+                                    );
+                                    if let Ok(frame) =
+                                        socketcan::CanFrame::new(cmd.can_id, &corrected)
+                                    {
+                                        let _ = socket.write_frame(&frame);
+                                    }
+                                }
+                            }
+                            // Read responses and update tau_ff during hold
+                            let actual = read_response_positions(socket);
+                            if gravity_comp {
+                                for (&motor_id, &actual_pos) in &actual {
+                                    if !gravity_comp_motors.contains(&(arm_name.clone(), motor_id))
+                                    {
+                                        continue;
+                                    }
+                                    let cmd_pos = can_cmds
+                                        .iter()
+                                        .find(|c| c.can_id == motor_id && c.data.len() == 8)
+                                        .map(|c| decode_damiao_cmd(&c.data).0);
+                                    if let Some(cmd_pos) = cmd_pos {
+                                        let error = cmd_pos - actual_pos;
+                                        if error.abs() > TAU_FF_DEADBAND {
+                                            let kp_val = can_cmds
+                                                .iter()
+                                                .find(|c| c.can_id == motor_id && c.data.len() == 8)
+                                                .map(|c| decode_damiao_cmd(&c.data).2 * kp_scale)
+                                                .unwrap_or(30.0);
+                                            let old_tau = tau_ff
+                                                .get(&(arm_name.clone(), motor_id))
+                                                .copied()
+                                                .unwrap_or(0.0);
+                                            let new_tau = old_tau + TAU_FF_ALPHA * kp_val * error;
+                                            tau_ff.insert(
+                                                (arm_name.clone(), motor_id),
+                                                new_tau.clamp(-TAU_FF_MAX, TAU_FF_MAX),
+                                            );
+                                        }
+                                    }
+                                }
+                            } else {
+                                drop(actual);
+                            }
+                        }
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(MOVE_STEP_MS));
+            }
+            // Adjust start time so normal mode doesn't skip ahead after pause
+            if !interp_mode && step_i > 0 {
+                let expected = Duration::from_secs_f64(timestep.t - t_offset);
+                let actual_elapsed = start.elapsed();
+                if actual_elapsed > expected + Duration::from_millis(100) {
+                    start += actual_elapsed - expected;
+                }
             }
 
             if interp_mode {
@@ -1306,6 +1458,7 @@ fn main() -> Result<()> {
                 let substeps = substeps.clamp(STEP_MIN_SUBSTEPS, STEP_MAX_SUBSTEPS);
 
                 // Interpolate from previous positions to current targets
+                // With gravity_comp: settle loop at each substep until actual ≈ target
                 for substep in 0..substeps {
                     if !running.load(Ordering::SeqCst) {
                         break;
@@ -1323,16 +1476,47 @@ fn main() -> Result<()> {
                                 .copied()
                                 .unwrap_or(target_pos);
                             let interp_pos = prev_pos + t * (target_pos - prev_pos);
-                            let correction = pos_correction
-                                .get(arm_name.as_str())
-                                .and_then(|m| m.get(&motor_id))
-                                .copied()
-                                .unwrap_or(0.0);
-                            let cmd_data =
-                                encode_damiao_cmd(interp_pos + correction, 0.0, kp, kd, 0.0);
+                            let motor_tau_ff = if gravity_comp {
+                                tau_ff
+                                    .get(&(arm_name.clone(), motor_id))
+                                    .copied()
+                                    .unwrap_or(0.0)
+                                    .clamp(-TAU_FF_MAX, TAU_FF_MAX)
+                            } else {
+                                0.0
+                            };
+                            let cmd_data = encode_damiao_cmd(
+                                interp_pos,
+                                0.0,
+                                (kp * kp_scale).min(500.0),
+                                kd,
+                                motor_tau_ff,
+                            );
                             if let Ok(frame) = socketcan::CanFrame::new(motor_id, &cmd_data) {
                                 let _ = socket.write_frame(&frame);
                                 sent += 1;
+                            }
+                        }
+
+                        // Read responses for safety monitoring (don't update tau_ff during motion)
+                        let actual = read_response_positions(socket);
+                        for (&motor_id, &actual_pos) in &actual {
+                            let cmd_pos = curr_targets
+                                .iter()
+                                .find(|(a, mid, _, _, _)| a == arm_name && *mid == motor_id)
+                                .map(|&(_, _, tp, _, _)| {
+                                    let prev_pos = prev_positions
+                                        .get(arm_name.as_str())
+                                        .and_then(|m| m.get(&motor_id))
+                                        .copied()
+                                        .unwrap_or(tp);
+                                    prev_pos + t * (tp - prev_pos)
+                                });
+                            if let Some(cmd_pos) = cmd_pos {
+                                pos_last_error
+                                    .entry(arm_name.clone())
+                                    .or_default()
+                                    .insert(motor_id, cmd_pos - actual_pos);
                             }
                         }
                     }
@@ -1351,132 +1535,230 @@ fn main() -> Result<()> {
                 }
                 println!();
 
-                // Convergence loop: keep sending corrected commands until EE error is small
-                const CONVERGE_EE_THRESHOLD: f64 = 0.02; // 2cm in end-effector space
-                const CONVERGE_TIMEOUT_MS: u64 = 3000; // max 3s waiting per waypoint
-                let converge_start = Instant::now();
-                let mut converge_iter = 0u32;
+                // Settle: hold final waypoint, update tau_ff, re-send until position converges
+                if gravity_comp && running.load(Ordering::SeqCst) {
+                    const TAU_FF_SETTLE_MAX: usize = 10;
+                    const TAU_FF_SETTLE_THRESH: f64 = 0.01; // ~0.6° per joint
+                    const TAU_FF_SETTLE_MS: u64 = 80; // Wait for motor to physically settle
+                    let mut prev_max_error = f64::MAX;
+                    for settle_i in 0..TAU_FF_SETTLE_MAX {
+                        // Send command with current tau_ff
+                        for (arm_name, socket) in arms.iter_mut() {
+                            for &(ref target_arm, motor_id, target_pos, kp, kd) in &curr_targets {
+                                if target_arm != arm_name {
+                                    continue;
+                                }
+                                let motor_tau_ff = tau_ff
+                                    .get(&(arm_name.clone(), motor_id))
+                                    .copied()
+                                    .unwrap_or(0.0)
+                                    .clamp(-TAU_FF_MAX, TAU_FF_MAX);
+                                let cmd_data = encode_damiao_cmd(
+                                    target_pos,
+                                    0.0,
+                                    (kp * kp_scale).min(500.0),
+                                    kd,
+                                    motor_tau_ff,
+                                );
+                                if let Ok(frame) = socketcan::CanFrame::new(motor_id, &cmd_data) {
+                                    let _ = socket.write_frame(&frame);
+                                }
+                            }
+                            // Drain immediate responses (stale)
+                            while socket.read_frame().ok().flatten().is_some() {}
+                        }
 
-                loop {
-                    if !running.load(Ordering::SeqCst) {
-                        break;
-                    }
+                        // Wait for motor to physically settle
+                        std::thread::sleep(Duration::from_millis(TAU_FF_SETTLE_MS));
 
-                    // Read responses and update corrections
-                    let mut max_ee_err: f64 = 0.0;
-                    let mut safety_error: Option<String> = None;
-                    for (arm_name, socket) in arms.iter_mut() {
-                        let actual = read_response_positions(socket);
-                        let mut commanded = HashMap::new();
-                        for &(ref target_arm, motor_id, target_pos, _, _) in &curr_targets {
-                            if target_arm == arm_name && (1..=7).contains(&motor_id) {
-                                commanded.insert(motor_id, target_pos);
+                        // Now query actual positions and update tau_ff
+                        for (arm_name, socket) in arms.iter_mut() {
+                            // Send same command again to get fresh response
+                            for &(ref target_arm, motor_id, target_pos, kp, kd) in &curr_targets {
+                                if target_arm != arm_name {
+                                    continue;
+                                }
+                                let motor_tau_ff = tau_ff
+                                    .get(&(arm_name.clone(), motor_id))
+                                    .copied()
+                                    .unwrap_or(0.0)
+                                    .clamp(-TAU_FF_MAX, TAU_FF_MAX);
+                                let cmd_data = encode_damiao_cmd(
+                                    target_pos,
+                                    0.0,
+                                    (kp * kp_scale).min(500.0),
+                                    kd,
+                                    motor_tau_ff,
+                                );
+                                if let Ok(frame) = socketcan::CanFrame::new(motor_id, &cmd_data) {
+                                    let _ = socket.write_frame(&frame);
+                                }
+                            }
+                            let actual = read_response_positions(socket);
+                            for (&motor_id, &actual_pos) in &actual {
+                                if !gravity_comp_motors.contains(&(arm_name.clone(), motor_id)) {
+                                    continue;
+                                }
+                                if let Some(&(_, _, target_pos, kp, _)) = curr_targets
+                                    .iter()
+                                    .find(|(a, mid, _, _, _)| a == arm_name && *mid == motor_id)
+                                {
+                                    let error = target_pos - actual_pos;
+                                    if error.abs() > TAU_FF_DEADBAND {
+                                        let old_tau = tau_ff
+                                            .get(&(arm_name.clone(), motor_id))
+                                            .copied()
+                                            .unwrap_or(0.0);
+                                        let new_tau =
+                                            old_tau + TAU_FF_ALPHA * kp * kp_scale * error;
+                                        tau_ff.insert(
+                                            (arm_name.clone(), motor_id),
+                                            new_tau.clamp(-TAU_FF_MAX, TAU_FF_MAX),
+                                        );
+                                    }
+                                    pos_last_error
+                                        .entry(arm_name.clone())
+                                        .or_default()
+                                        .insert(motor_id, error);
+                                }
                             }
                         }
-                        for (&motor_id, &actual_pos) in &actual {
-                            if let Some(&cmd_pos) = commanded.get(&motor_id) {
-                                let error = cmd_pos - actual_pos;
+
+                        // Abort immediately if tau_ff diverges
+                        if let Some(((arm, mid), &val)) =
+                            tau_ff.iter().find(|(_, v)| v.abs() >= TAU_FF_ABORT)
+                        {
+                            eprintln!("\n  ABORT: {} motor 0x{:02X} tau_ff={:.2} Nm exceeds {:.0} Nm limit", arm, mid, val, TAU_FF_ABORT);
+                            emergency_stop(&mut arms);
+                            let _ = std::process::Command::new("stty")
+                                .args(["icanon", "echo"])
+                                .stdin(std::process::Stdio::inherit())
+                                .status();
+                            anyhow::bail!(
+                                "tau_ff runaway: {} motor 0x{:02X} = {:.2} Nm",
+                                arm,
+                                mid,
+                                val
+                            );
+                        }
+
+                        // Check convergence
+                        let max_error = gravity_comp_motors
+                            .iter()
+                            .filter_map(|(arm, mid)| {
                                 pos_last_error
-                                    .entry(arm_name.clone())
-                                    .or_default()
-                                    .insert(motor_id, error);
-                                let corr = pos_correction
-                                    .entry(arm_name.clone())
-                                    .or_default()
-                                    .entry(motor_id)
-                                    .or_insert(0.0);
-                                *corr = (*corr + POS_KI * error)
-                                    .clamp(-POS_CORRECTION_MAX, POS_CORRECTION_MAX);
+                                    .get(arm)
+                                    .and_then(|e| e.get(mid))
+                                    .map(|e| e.abs())
+                            })
+                            .fold(0.0f64, f64::max);
+                        if max_error < TAU_FF_SETTLE_THRESH {
+                            break;
+                        }
+                        // Abort if error is clearly diverging (not just noise)
+                        // Require both: >20% relative increase AND >0.005 rad absolute increase
+                        if settle_i >= 2
+                            && max_error > prev_max_error * 1.2
+                            && (max_error - prev_max_error) > 0.005
+                        {
+                            eprintln!(
+                                "\n  ABORT: settle diverging — error grew from {:.4} to {:.4} rad",
+                                prev_max_error, max_error
+                            );
+                            emergency_stop(&mut arms);
+                            let _ = std::process::Command::new("stty")
+                                .args(["icanon", "echo"])
+                                .stdin(std::process::Stdio::inherit())
+                                .status();
+                            anyhow::bail!("gravity comp settle diverging");
+                        }
+                        prev_max_error = max_error;
+                        if settle_i == TAU_FF_SETTLE_MAX - 1 {
+                            eprintln!(
+                                "  [settle] max error {:.3} rad after {} iters",
+                                max_error, TAU_FF_SETTLE_MAX
+                            );
+                        }
+                    }
+                }
+
+                // Safety check after substeps
+                if !safety_disabled {
+                    let arm_names: Vec<String> = arms.keys().cloned().collect();
+                    let mut safety_err: Option<String> = None;
+                    for arm_name in &arm_names {
+                        let errors = pos_last_error.get(arm_name.as_str());
+                        let responding: Vec<u32> = (1..=7u32)
+                            .filter(|id| errors.map_or(false, |e| e.contains_key(id)))
+                            .collect();
+
+                        if responding.len() < 7 {
+                            let missing: Vec<u32> =
+                                (1..=7u32).filter(|id| !responding.contains(id)).collect();
+                            safety_err = Some(format!(
+                                "{}: only {}/7 motors responding (missing: {:?})",
+                                arm_name,
+                                responding.len(),
+                                missing,
+                            ));
+                            break;
+                        }
+
+                        // All 7 responding — check EE error via FK
+                        let mut commanded = HashMap::new();
+                        let mut actual_positions = HashMap::new();
+                        for &(ref target_arm, motor_id, target_pos, _, _) in &curr_targets {
+                            if target_arm.as_str() == arm_name.as_str()
+                                && (1..=7).contains(&motor_id)
+                            {
+                                commanded.insert(motor_id, target_pos);
+                                if let Some(&err) = errors.unwrap().get(&motor_id) {
+                                    actual_positions.insert(motor_id, target_pos - err);
+                                }
                             }
                         }
-                        // Compute EE error via FK
                         if let (Some(cmd_ee), Some(act_ee)) = (
                             compute_cmd_ee(&commanded, arm_name),
-                            compute_act_ee(&commanded, &actual, arm_name),
+                            compute_act_ee(&commanded, &actual_positions, arm_name),
                         ) {
                             let dx = cmd_ee[0] - act_ee[0];
                             let dy = cmd_ee[1] - act_ee[1];
                             let dz = cmd_ee[2] - act_ee[2];
                             let ee_err = (dx * dx + dy * dy + dz * dz).sqrt();
-                            if ee_err > max_ee_err {
-                                max_ee_err = ee_err;
-                            }
-                        }
-                        if !safety_disabled && !actual.is_empty() && !commanded.is_empty() {
-                            match safety_monitor.check(&commanded, &actual, arm_name) {
-                                Ok(_) => {}
-                                Err(e) => {
-                                    safety_error = Some(e.to_string());
-                                    break;
-                                }
+                            if ee_err > EE_ERROR_THRESHOLD {
+                                safety_err = Some(format!(
+                                    "{} EE error {:.1}cm (threshold {:.1}cm)",
+                                    arm_name,
+                                    ee_err * 100.0,
+                                    EE_ERROR_THRESHOLD * 100.0,
+                                ));
+                                break;
                             }
                         }
                     }
-                    if let Some(err) = safety_error {
+                    if let Some(err) = safety_err {
+                        eprintln!("\n  {} — EMERGENCY STOP", err);
                         emergency_stop(&mut arms);
+                        let _ = std::process::Command::new("stty")
+                            .args(["icanon", "echo"])
+                            .stdin(std::process::Stdio::inherit())
+                            .status();
                         anyhow::bail!("{}", err);
                     }
-
-                    // Converged or first iteration (no responses yet)
-                    if max_ee_err < CONVERGE_EE_THRESHOLD || converge_iter == 0 {
-                        if converge_iter > 1 {
-                            eprintln!(
-                                "  Converged after {:.1}s (EE err {:.1}cm)",
-                                converge_start.elapsed().as_secs_f64(),
-                                max_ee_err * 100.0,
-                            );
-                        }
-                        break;
-                    }
-
-                    // Timeout
-                    if converge_start.elapsed() > Duration::from_millis(CONVERGE_TIMEOUT_MS) {
-                        eprintln!(
-                            "  Convergence timeout ({:.1}s), EE err {:.1}cm (threshold {:.1}cm), continuing",
-                            CONVERGE_TIMEOUT_MS as f64 / 1000.0,
-                            max_ee_err * 100.0,
-                            CONVERGE_EE_THRESHOLD * 100.0,
-                        );
-                        break;
-                    }
-
-                    // Log on first detection
-                    if converge_iter == 1 {
-                        eprintln!(
-                            "  Waiting for convergence (EE err {:.1}cm, threshold {:.1}cm)...",
-                            max_ee_err * 100.0,
-                            CONVERGE_EE_THRESHOLD * 100.0,
-                        );
-                    }
-
-                    // Re-send corrected commands and wait
-                    for (arm_name, socket) in arms.iter_mut() {
-                        for &(ref target_arm, motor_id, target_pos, kp, kd) in &curr_targets {
-                            if target_arm != arm_name {
-                                continue;
-                            }
-                            let correction = pos_correction
-                                .get(arm_name.as_str())
-                                .and_then(|m| m.get(&motor_id))
-                                .copied()
-                                .unwrap_or(0.0);
-                            let cmd_data =
-                                encode_damiao_cmd(target_pos + correction, 0.0, kp, kd, 0.0);
-                            if let Ok(frame) = socketcan::CanFrame::new(motor_id, &cmd_data) {
-                                let _ = socket.write_frame(&frame);
-                            }
-                        }
-                    }
-                    std::thread::sleep(Duration::from_millis(MOVE_STEP_MS));
-                    converge_iter += 1;
                 }
 
-                // Update prev_positions for next waypoint
+                // Update prev_positions with ACTUAL positions (not targets) so next
+                // waypoint interpolates from where the arm really is
                 for &(ref arm_name, motor_id, target_pos, _, _) in &curr_targets {
+                    let actual_pos = pos_last_error
+                        .get(arm_name.as_str())
+                        .and_then(|e| e.get(&motor_id))
+                        .map(|&err| target_pos - err)
+                        .unwrap_or(target_pos);
                     prev_positions
                         .entry(arm_name.clone())
                         .or_default()
-                        .insert(motor_id, target_pos);
+                        .insert(motor_id, actual_pos);
                 }
 
                 continue;
@@ -1496,15 +1778,25 @@ fn main() -> Result<()> {
                     let mut commanded = HashMap::new();
                     for cmd in can_cmds {
                         if cmd.data.len() == 8 && (1..=7).contains(&cmd.can_id) {
-                            // Motor command: apply integral correction
+                            // Motor command: apply kp scaling + gravity compensation
                             let (pos, vel, kp, kd, tau) = decode_damiao_cmd(&cmd.data);
-                            commanded.insert(cmd.can_id, pos); // record ORIGINAL for safety
-                            let correction = pos_correction
-                                .get(arm_name)
-                                .and_then(|m| m.get(&cmd.can_id))
-                                .copied()
-                                .unwrap_or(0.0);
-                            let corrected = encode_damiao_cmd(pos + correction, vel, kp, kd, tau);
+                            commanded.insert(cmd.can_id, pos);
+                            let motor_tau_ff = if gravity_comp {
+                                tau_ff
+                                    .get(&(arm_name.clone(), cmd.can_id))
+                                    .copied()
+                                    .unwrap_or(0.0)
+                                    .clamp(-TAU_FF_MAX, TAU_FF_MAX)
+                            } else {
+                                tau // original recording value
+                            };
+                            let corrected = encode_damiao_cmd(
+                                pos,
+                                vel,
+                                (kp * kp_scale).min(500.0),
+                                kd,
+                                motor_tau_ff,
+                            );
                             if let Ok(frame) = socketcan::CanFrame::new(cmd.can_id, &corrected) {
                                 let _ = socket.write_frame(&frame);
                                 sent += 1;
@@ -1518,21 +1810,41 @@ fn main() -> Result<()> {
                         }
                     }
                     let actual = read_response_positions(socket);
-                    // Update integral corrections from response errors
-                    for (&motor_id, &actual_pos) in &actual {
-                        if let Some(&cmd_pos) = commanded.get(&motor_id) {
-                            let error = cmd_pos - actual_pos;
-                            pos_last_error
-                                .entry(arm_name.clone())
-                                .or_default()
-                                .insert(motor_id, error);
-                            let corr = pos_correction
-                                .entry(arm_name.clone())
-                                .or_default()
-                                .entry(motor_id)
-                                .or_insert(0.0);
-                            *corr = (*corr + POS_KI * error)
-                                .clamp(-POS_CORRECTION_MAX, POS_CORRECTION_MAX);
+                    if gravity_comp {
+                        for (&motor_id, &actual_pos) in &actual {
+                            if !gravity_comp_motors.contains(&(arm_name.clone(), motor_id)) {
+                                continue;
+                            }
+                            if let Some(&cmd_pos) = commanded.get(&motor_id) {
+                                let error = cmd_pos - actual_pos;
+                                if error.abs() > TAU_FF_DEADBAND {
+                                    let kp_val = can_cmds
+                                        .iter()
+                                        .find(|c| c.can_id == motor_id && c.data.len() == 8)
+                                        .map(|c| decode_damiao_cmd(&c.data).2 * kp_scale)
+                                        .unwrap_or(30.0);
+                                    let old_tau = tau_ff
+                                        .get(&(arm_name.clone(), motor_id))
+                                        .copied()
+                                        .unwrap_or(0.0);
+                                    let new_tau = old_tau + TAU_FF_ALPHA * kp_val * error;
+                                    tau_ff.insert(
+                                        (arm_name.clone(), motor_id),
+                                        new_tau.clamp(-TAU_FF_MAX, TAU_FF_MAX),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    if gravity_comp {
+                        if let Some(((a, mid), &val)) =
+                            tau_ff.iter().find(|(_, v)| v.abs() >= TAU_FF_ABORT)
+                        {
+                            safety_error = Some(format!(
+                                "tau_ff runaway: {} motor 0x{:02X} = {:.2} Nm",
+                                a, mid, val
+                            ));
+                            break;
                         }
                     }
                     if !safety_disabled && !actual.is_empty() && !commanded.is_empty() {
@@ -1549,49 +1861,15 @@ fn main() -> Result<()> {
             }
             if let Some(err) = safety_error {
                 emergency_stop(&mut arms);
+                let _ = std::process::Command::new("stty")
+                    .args(["icanon", "echo"])
+                    .stdin(std::process::Stdio::inherit())
+                    .status();
                 anyhow::bail!("{}", err);
             }
             // Arm behind — slow down by delaying the next timestep
             if throttle {
                 std::thread::sleep(Duration::from_millis(20));
-            }
-
-            // Log active integral corrections periodically (~1s)
-            if last_correction_log.elapsed() >= Duration::from_secs(1) {
-                let mut parts: Vec<String> = Vec::new();
-                for (arm_name, corrs) in &pos_correction {
-                    let errors = pos_last_error.get(arm_name);
-                    let mut motor_parts: Vec<String> = Vec::new();
-                    for motor_id in 1..=7u32 {
-                        if let Some(&c) = corrs.get(&motor_id) {
-                            if c.abs() > 1.0_f64.to_radians() {
-                                let err = errors
-                                    .and_then(|e| e.get(&motor_id))
-                                    .copied()
-                                    .unwrap_or(0.0);
-                                let sat = if c.abs() >= POS_CORRECTION_MAX - 0.001 {
-                                    " SAT!"
-                                } else {
-                                    ""
-                                };
-                                motor_parts.push(format!(
-                                    "J{}: corr {:+.1}° err {:+.1}°{}",
-                                    motor_id,
-                                    c.to_degrees(),
-                                    err.to_degrees(),
-                                    sat,
-                                ));
-                            }
-                        }
-                    }
-                    if !motor_parts.is_empty() {
-                        parts.push(format!("{} [{}]", arm_name, motor_parts.join(", ")));
-                    }
-                }
-                if !parts.is_empty() {
-                    eprintln!("\n  INTEGRAL CORRECTION: {}", parts.join(", "));
-                    last_correction_log = Instant::now();
-                }
             }
 
             {
@@ -1616,6 +1894,12 @@ fn main() -> Result<()> {
     }
 
     println!("\nPlayback complete ({} CAN frames sent).", total_sent);
+
+    // Restore terminal mode
+    let _ = std::process::Command::new("stty")
+        .args(["icanon", "echo"])
+        .stdin(std::process::Stdio::inherit())
+        .status();
 
     // Disable motors
     println!("Disabling motors...");

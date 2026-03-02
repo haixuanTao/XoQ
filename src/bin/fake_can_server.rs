@@ -13,10 +13,14 @@
 //!   --moq-path <path>    MoQ base path (default: anon/xoq-can-can0)
 //!   --moq-insecure       Disable TLS verification for MoQ
 //!   --key-dir <path>     Directory for identity key files (default: current dir)
+//!   --gravity            Enable gravity simulation (rigid body dynamics)
+//!   --arm <left|right>   Arm chain to simulate (default: left)
 
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::mpsc;
+use xoq::arm_dynamics::{self, ArmModel};
 use xoq::bridge_server::{BridgeServer, MoqConfig};
 
 // Damiao MIT protocol ranges
@@ -29,6 +33,9 @@ const TAU_MAX: f64 = 18.0;
 
 const ENABLE_MIT: [u8; 8] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFC];
 const DISABLE_MIT: [u8; 8] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFD];
+
+const PHYSICS_DT: f64 = 0.001; // 1kHz physics
+const JOINT_DAMPING: f64 = 0.5; // Nm/(rad/s)
 
 #[derive(Clone, Default)]
 struct MotorState {
@@ -113,6 +120,7 @@ fn decode_wire_frame(buf: &[u8]) -> Option<(u32, Vec<u8>, usize)> {
 }
 
 /// Process a CAN command and return the wire-encoded response (if any).
+/// Used when gravity is disabled (instant snap behavior).
 fn process_command(motors: &Motors, can_id: u32, data: &[u8]) -> Option<Vec<u8>> {
     let idx = motor_index(can_id)?;
     if data.len() != 8 {
@@ -160,12 +168,158 @@ fn process_command(motors: &Motors, can_id: u32, data: &[u8]) -> Option<Vec<u8>>
     Some(encode_wire_frame(resp_id, &resp))
 }
 
+// ── Gravity simulation ──────────────────────────────────────────────────────
+
+struct GravitySim {
+    model: ArmModel,
+    pos: [f64; 7],
+    vel: [f64; 7],
+    p_des: [f64; 7],
+    v_des: [f64; 7],
+    kp: [f64; 7],
+    kd: [f64; 7],
+    tau_ff: [f64; 7],
+    tau_motor: [f64; 7],
+    enabled: [bool; 8],
+    gripper_pos: f64,
+}
+
+impl GravitySim {
+    fn new(model: ArmModel) -> Self {
+        Self {
+            model,
+            pos: [0.0; 7],
+            vel: [0.0; 7],
+            p_des: [0.0; 7],
+            v_des: [0.0; 7],
+            kp: [0.0; 7],
+            kd: [0.0; 7],
+            tau_ff: [0.0; 7],
+            tau_motor: [0.0; 7],
+            enabled: [false; 8],
+            gripper_pos: 0.0,
+        }
+    }
+
+    /// Process an enable/disable command. Returns a response frame if handled.
+    fn process_enable_disable(&mut self, idx: usize, can_id: u32, data: &[u8]) -> Option<Vec<u8>> {
+        let resp_id = (0x11 + idx) as u32;
+
+        if data == ENABLE_MIT {
+            self.enabled[idx] = true;
+            tracing::info!("Motor 0x{:02X} enabled (gravity)", can_id);
+            let pos = if idx < 7 {
+                self.pos[idx]
+            } else {
+                self.gripper_pos
+            };
+            let resp = encode_damiao_response(resp_id as u8, pos, 0.0, 0.0, 45, 50);
+            return Some(encode_wire_frame(resp_id, &resp));
+        }
+        if data == DISABLE_MIT {
+            self.enabled[idx] = false;
+            if idx < 7 {
+                // Zero out setpoints so the joint is free-floating
+                self.kp[idx] = 0.0;
+                self.kd[idx] = 0.0;
+                self.tau_ff[idx] = 0.0;
+            }
+            tracing::info!("Motor 0x{:02X} disabled (gravity)", can_id);
+            let pos = if idx < 7 {
+                self.pos[idx]
+            } else {
+                self.gripper_pos
+            };
+            let resp = encode_damiao_response(resp_id as u8, pos, 0.0, 0.0, 45, 50);
+            return Some(encode_wire_frame(resp_id, &resp));
+        }
+        None
+    }
+
+    /// Process a MIT command for one motor. Updates setpoints for joints 0-6,
+    /// snaps position for motor 7 (gripper). Returns a response frame.
+    fn process_mit_command(&mut self, idx: usize, data: &[u8]) -> Option<Vec<u8>> {
+        if !self.enabled[idx] {
+            return None;
+        }
+
+        let resp_id = (0x11 + idx) as u32;
+        let (cmd_pos, cmd_vel, cmd_kp, cmd_kd, cmd_tau) = decode_damiao_cmd(data);
+
+        if idx < 7 {
+            // Joint motor: update setpoints, physics runs continuously
+            self.p_des[idx] = cmd_pos;
+            self.v_des[idx] = cmd_vel;
+            self.kp[idx] = cmd_kp;
+            self.kd[idx] = cmd_kd;
+            self.tau_ff[idx] = cmd_tau;
+
+            let resp = encode_damiao_response(
+                resp_id as u8,
+                self.pos[idx],
+                self.vel[idx],
+                self.tau_motor[idx],
+                45,
+                50,
+            );
+            Some(encode_wire_frame(resp_id, &resp))
+        } else {
+            // Gripper (motor 8): no gravity, snap position
+            if cmd_kp > 0.0 {
+                self.gripper_pos = cmd_pos;
+            }
+            let resp =
+                encode_damiao_response(resp_id as u8, self.gripper_pos, 0.0, cmd_tau, 45, 50);
+            Some(encode_wire_frame(resp_id, &resp))
+        }
+    }
+
+    /// Run one physics step at PHYSICS_DT.
+    fn step(&mut self) {
+        self.tau_motor = arm_dynamics::physics_step(
+            &self.model,
+            &mut self.pos,
+            &mut self.vel,
+            &self.p_des,
+            &self.v_des,
+            &self.kp,
+            &self.kd,
+            &self.tau_ff,
+            PHYSICS_DT,
+            JOINT_DAMPING,
+        );
+    }
+
+    /// Build a response batch for all enabled motors (for MoQ publishing).
+    fn build_state_batch(&self) -> Vec<u8> {
+        let mut batch = Vec::new();
+        for idx in 0..8 {
+            if !self.enabled[idx] {
+                continue;
+            }
+            let resp_id = (0x11 + idx) as u32;
+            let (pos, vel, tau) = if idx < 7 {
+                (self.pos[idx], self.vel[idx], self.tau_motor[idx])
+            } else {
+                (self.gripper_pos, 0.0, 0.0)
+            };
+            let resp = encode_damiao_response(resp_id as u8, pos, vel, tau, 45, 50);
+            batch.extend_from_slice(&encode_wire_frame(resp_id, &resp));
+        }
+        batch
+    }
+}
+
+// ── Args ────────────────────────────────────────────────────────────────────
+
 struct Args {
     iroh_relay: Option<String>,
     moq_relay: Option<String>,
     moq_path: String,
     moq_insecure: bool,
     key_dir: String,
+    gravity: bool,
+    arm: String,
 }
 
 fn parse_args() -> Args {
@@ -176,6 +330,8 @@ fn parse_args() -> Args {
         moq_path: "anon/xoq-can-can0".to_string(),
         moq_insecure: false,
         key_dir: ".".to_string(),
+        gravity: false,
+        arm: "left".to_string(),
     };
 
     let mut i = 1;
@@ -201,6 +357,14 @@ fn parse_args() -> Args {
                 result.key_dir = args[i + 1].clone();
                 i += 2;
             }
+            "--gravity" => {
+                result.gravity = true;
+                i += 1;
+            }
+            "--arm" if i + 1 < args.len() => {
+                result.arm = args[i + 1].clone();
+                i += 2;
+            }
             "--help" | "-h" => {
                 print_usage();
                 std::process::exit(0);
@@ -224,17 +388,18 @@ fn print_usage() {
     println!("  --moq-path <path>    MoQ base path (default: anon/xoq-can-can0)");
     println!("  --moq-insecure       Disable TLS verification for MoQ");
     println!("  --key-dir <path>     Directory for identity key files (default: .)");
+    println!("  --gravity            Enable gravity simulation (rigid body dynamics)");
+    println!("  --arm <left|right>   Arm chain to simulate (default: left)");
     println!();
     println!("Examples:");
     println!("  fake-can-server                                             # iroh only");
     println!("  fake-can-server --moq-relay https://cdn.1ms.ai              # iroh + MoQ");
+    println!("  fake-can-server --moq-relay https://cdn.1ms.ai --gravity    # with gravity sim");
 }
 
-/// Motor simulation backend task.
-///
-/// Receives wire-encoded CAN commands from write_rx (from both iroh and MoQ),
-/// processes them through the motor simulation, and sends wire-encoded responses
-/// to read_tx (for iroh) and moq_read_tx (for MoQ state publishing).
+// ── Motor sim tasks ─────────────────────────────────────────────────────────
+
+/// Motor simulation backend task (no gravity — original instant-snap behavior).
 async fn motor_sim_task(
     motors: Motors,
     mut write_rx: mpsc::Receiver<Vec<u8>>,
@@ -287,6 +452,91 @@ async fn motor_sim_task(
     }
 }
 
+/// Motor simulation backend task with gravity (1kHz physics loop).
+async fn motor_sim_task_gravity(
+    model: ArmModel,
+    mut write_rx: mpsc::Receiver<Vec<u8>>,
+    read_tx: mpsc::Sender<Vec<u8>>,
+    moq_read_tx: Option<mpsc::Sender<Vec<u8>>>,
+) {
+    let mut sim = GravitySim::new(model);
+    let mut pending = Vec::new();
+    let mut interval = tokio::time::interval(Duration::from_millis(1));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    let mut last_moq_positions = [f64::NAN; 8];
+    let mut moq_tick_counter = 0u32;
+
+    loop {
+        tokio::select! {
+            Some(data) = write_rx.recv() => {
+                tracing::debug!("Gravity sim received {} bytes", data.len());
+                pending.extend_from_slice(&data);
+
+                let mut response_batch = Vec::new();
+
+                while let Some((can_id, frame_data, consumed)) = decode_wire_frame(&pending) {
+                    let idx = match motor_index(can_id) {
+                        Some(idx) => idx,
+                        None => { pending.drain(..consumed); continue; }
+                    };
+                    if frame_data.len() != 8 {
+                        pending.drain(..consumed);
+                        continue;
+                    }
+
+                    // Try enable/disable first
+                    if let Some(resp) = sim.process_enable_disable(idx, can_id, &frame_data) {
+                        response_batch.extend_from_slice(&resp);
+                    } else if let Some(resp) = sim.process_mit_command(idx, &frame_data) {
+                        response_batch.extend_from_slice(&resp);
+                    }
+                    pending.drain(..consumed);
+                }
+
+                if !response_batch.is_empty() {
+                    if read_tx.send(response_batch).await.is_err() {
+                        break;
+                    }
+                }
+            }
+            _ = interval.tick() => {
+                // Run physics at 1kHz
+                sim.step();
+
+                // Publish MoQ state at ~100Hz (every 10 ticks)
+                moq_tick_counter += 1;
+                if moq_tick_counter >= 10 {
+                    moq_tick_counter = 0;
+                    if let Some(ref moq_tx) = moq_read_tx {
+                        let any_enabled = sim.enabled.iter().any(|e| *e);
+                        if !any_enabled {
+                            continue;
+                        }
+                        // Check if positions changed
+                        let changed = (0..7).any(|i| {
+                            last_moq_positions[i].is_nan()
+                                || (sim.pos[i] - last_moq_positions[i]).abs() > 1e-6
+                        }) || last_moq_positions[7].is_nan()
+                            || (sim.gripper_pos - last_moq_positions[7]).abs() > 1e-6;
+
+                        if changed {
+                            for i in 0..7 {
+                                last_moq_positions[i] = sim.pos[i];
+                            }
+                            last_moq_positions[7] = sim.gripper_pos;
+                            let batch = sim.build_state_batch();
+                            if !batch.is_empty() {
+                                let _ = moq_tx.try_send(batch);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -311,11 +561,14 @@ async fn main() -> Result<()> {
     } else {
         println!("MoQ:       disabled");
     }
+    if args.gravity {
+        println!("Gravity:   enabled ({} arm)", args.arm);
+    } else {
+        println!("Gravity:   disabled");
+    }
     println!("Motors:    0x01–0x08 (8 Damiao MIT, respond on 0x11–0x18)");
     println!("========================================");
     println!();
-
-    let motors: Motors = Arc::new(Mutex::new(Default::default()));
 
     // Create channels between motor sim backend and BridgeServer
     let (write_tx, write_rx) = mpsc::channel::<Vec<u8>>(16);
@@ -329,10 +582,20 @@ async fn main() -> Result<()> {
     };
 
     // Spawn motor simulation backend task
-    let motors_clone = Arc::clone(&motors);
-    tokio::spawn(async move {
-        motor_sim_task(motors_clone, write_rx, read_tx, moq_read_tx).await;
-    });
+    if args.gravity {
+        let model = match args.arm.as_str() {
+            "right" => arm_dynamics::right_arm_model(),
+            _ => arm_dynamics::left_arm_model(),
+        };
+        tokio::spawn(async move {
+            motor_sim_task_gravity(model, write_rx, read_tx, moq_read_tx).await;
+        });
+    } else {
+        let motors: Motors = Arc::new(Mutex::new(Default::default()));
+        tokio::spawn(async move {
+            motor_sim_task(motors, write_rx, read_tx, moq_read_tx).await;
+        });
+    }
 
     // Create MoQ config
     let moq_config = args.moq_relay.as_ref().map(|relay| MoqConfig {

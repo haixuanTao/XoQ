@@ -186,6 +186,9 @@ pub mod sounddevice {
     pub use crate::sounddevice_impl::{new, AudioStreamBuilder, RemoteAudioStream, Transport};
 }
 
+// Arm rigid-body dynamics (gravity simulation)
+pub mod arm_dynamics;
+
 // Platform-independent CAN types (always available)
 pub mod can_types;
 
