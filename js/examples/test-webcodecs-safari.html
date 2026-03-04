@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html><head><title>WebCodecs AV1 Codec String Test</title></head>
+<body>
+<pre id="log"></pre>
+<script>
+const L = document.getElementById('log');
+function log(msg) { L.textContent += msg + '\n'; console.log(msg); }
+
+async function testIsConfigSupported() {
+  log('=== isConfigSupported for various codec strings ===');
+  const codecs = [
+    'av01.0.04M.08', 'av01.0.05M.08', 'av01.0.08M.08', 'av01.0.12M.08',
+    'av01.0.04M.10', 'av01.0.05M.10', 'av01.0.08M.10', 'av01.0.12M.10',
+    'av01.0.04H.10', 'av01.0.05H.10', 'av01.0.08H.10',
+  ];
+  for (const codec of codecs) {
+    try {
+      const r = await VideoDecoder.isConfigSupported({ codec });
+      log(`  ${codec}: ${r.supported ? 'YES' : 'NO'}`);
+    } catch (e) {
+      log(`  ${codec}: ERROR ${e.message}`);
+    }
+  }
+}
+
+async function testDecodeWithCodecString(codecStr, label) {
+  log(`\n=== ${label}: configure(${codecStr}) ===`);
+  if (typeof VideoEncoder === 'undefined') { log('  SKIP: no encoder'); return; }
+
+  // Encode a real 10-bit frame
+  let chunks = [];
+  const encoder = new VideoEncoder({
+    output: (chunk, meta) => {
+      const buf = new Uint8Array(chunk.byteLength); chunk.copyTo(buf);
+      chunks.push({ data: buf, type: chunk.type, meta });
+    },
+    error: (e) => log(`  Enc err: ${e.message}`),
+  });
+
+  // Always encode at the same config
+  const encCodec = 'av01.0.04M.10';
+  try {
+    const s = await VideoEncoder.isConfigSupported({ codec: encCodec, width: 640, height: 480, bitrate: 500000, framerate: 30 });
+    if (!s.supported) { log('  SKIP: encoder unsupported'); return; }
+  } catch(e) { log(`  SKIP: ${e.message}`); return; }
+
+  encoder.configure({ codec: encCodec, width: 640, height: 480, bitrate: 500000, framerate: 30 });
+  const canvas = new OffscreenCanvas(640, 480);
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#808080'; ctx.fillRect(0, 0, 640, 480);
+  const frame = new VideoFrame(canvas, { timestamp: 0 });
+  encoder.encode(frame, { keyFrame: true }); frame.close();
+  await encoder.flush(); encoder.close();
+
+  if (!chunks.length) { log('  No chunks'); return; }
+  const data = chunks[0].data;
+  log(`  Encoded: ${data.length}b`);
+
+  // Decode with the specified codec string (different from encoder's)
+  return new Promise(resolve => {
+    const timer = setTimeout(() => { try { dec.close(); } catch {} resolve('timeout'); }, 3000);
+    const dec = new VideoDecoder({
+      output: (f) => {
+        clearTimeout(timer);
+        log(`  OK: DECODED ${f.displayWidth}x${f.displayHeight} fmt=${f.format}`);
+        f.close(); try { dec.close(); } catch {} resolve('SUCCESS');
+      },
+      error: (e) => {
+        clearTimeout(timer);
+        log(`  XX: ${e.name}: ${e.message}`);
+        try { dec.close(); } catch {} resolve('ERROR');
+      },
+    });
+    try {
+      dec.configure({ codec: codecStr });
+      dec.decode(new EncodedVideoChunk({ type: 'key', timestamp: 0, data }));
+      dec.flush().catch(() => {});
+    } catch (e) {
+      clearTimeout(timer);
+      log(`  XX threw: ${e.message}`);
+      resolve('THREW');
+    }
+  });
+}
+
+async function testNvencSeqHdrDecode() {
+  log('\n=== Test with NVENC-like SeqHdr (1280x720 10-bit) ===');
+  // We can't produce NVENC data, but let's encode at 1280x720 10-bit
+  if (typeof VideoEncoder === 'undefined') { log('  SKIP: no encoder'); return; }
+
+  let chunks = [];
+  const encoder = new VideoEncoder({
+    output: (chunk, meta) => {
+      const buf = new Uint8Array(chunk.byteLength); chunk.copyTo(buf);
+      chunks.push({ data: buf, type: chunk.type, meta });
+    },
+    error: (e) => log(`  Enc err: ${e.message}`),
+  });
+
+  const encCodec = 'av01.0.05M.10';
+  try {
+    const s = await VideoEncoder.isConfigSupported({ codec: encCodec, width: 1280, height: 720, bitrate: 2000000, framerate: 30 });
+    if (!s.supported) { log('  SKIP: 1280x720 encoder unsupported'); return; }
+  } catch(e) { log(`  SKIP: ${e.message}`); return; }
+
+  encoder.configure({ codec: encCodec, width: 1280, height: 720, bitrate: 2000000, framerate: 30 });
+  const canvas = new OffscreenCanvas(1280, 720);
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#808080'; ctx.fillRect(0, 0, 1280, 720);
+  const frame = new VideoFrame(canvas, { timestamp: 0 });
+  encoder.encode(frame, { keyFrame: true }); frame.close();
+  await encoder.flush(); encoder.close();
+
+  if (!chunks.length) { log('  No chunks'); return; }
+  const data = chunks[0].data;
+  log(`  Encoded 1280x720: ${data.length}b`);
+
+  // Try with WRONG codec (level 8 = 4.0, like our broken av1C)
+  log('  --- Decode with wrong level (av01.0.08M.10 = Level 4.0) ---');
+  await new Promise(resolve => {
+    const timer = setTimeout(() => { try { dec.close(); } catch {} log('  timeout'); resolve(); }, 3000);
+    const dec = new VideoDecoder({
+      output: (f) => { clearTimeout(timer); log(`  OK: ${f.displayWidth}x${f.displayHeight}`); f.close(); try{dec.close();}catch{} resolve(); },
+      error: (e) => { clearTimeout(timer); log(`  XX: ${e.message}`); try{dec.close();}catch{} resolve(); },
+    });
+    dec.configure({ codec: 'av01.0.08M.10' });
+    dec.decode(new EncodedVideoChunk({ type: 'key', timestamp: 0, data }));
+    dec.flush().catch(() => {});
+  });
+
+  // Try with CORRECT codec (level 5 = 3.1)
+  log('  --- Decode with correct level (av01.0.05M.10 = Level 3.1) ---');
+  await new Promise(resolve => {
+    const timer = setTimeout(() => { try { dec.close(); } catch {} log('  timeout'); resolve(); }, 3000);
+    const dec = new VideoDecoder({
+      output: (f) => { clearTimeout(timer); log(`  OK: ${f.displayWidth}x${f.displayHeight}`); f.close(); try{dec.close();}catch{} resolve(); },
+      error: (e) => { clearTimeout(timer); log(`  XX: ${e.message}`); try{dec.close();}catch{} resolve(); },
+    });
+    dec.configure({ codec: 'av01.0.05M.10' });
+    dec.decode(new EncodedVideoChunk({ type: 'key', timestamp: 0, data }));
+    dec.flush().catch(() => {});
+  });
+}
+
+async function runAll() {
+  log('=== WebCodecs AV1 Codec String Test ===');
+  log(`UA: ${navigator.userAgent}`);
+
+  await testIsConfigSupported();
+  await testDecodeWithCodecString('av01.0.04M.10', 'Correct level (L2.0)');
+  await testDecodeWithCodecString('av01.0.05M.10', 'Correct level (L3.1)');
+  await testDecodeWithCodecString('av01.0.08M.10', 'Wrong level (L4.0)');
+  await testDecodeWithCodecString('av01.0.12M.10', 'Higher level (L5.2)');
+  await testNvencSeqHdrDecode();
+
+  log('\n=== ALL DONE ===');
+  window.__testDone = true;
+}
+runAll();
+</script>
+</body>
+</html>

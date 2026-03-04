@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "packages/serial", "packages/cv2", "packages/can", "packages/sounddevice", "packages/realsense"]
+members = [".", "packages/serial", "packages/cv2", "packages/can", "packages/sounddevice", "packages/realsense", "packages/chat"]
 
 [package]
 name = "xoq"
@@ -40,6 +40,8 @@ audio-remote = ["iroh", "audio"]
 dav1d = ["dep:dav1d"]
 # Remote RealSense client (MoQ subscriber + NVDEC AV1 decode)
 realsense-remote = ["image"]
+# Chat client (MoQ multi-user chat)
+chat = ["dep:serde_json"]
 
 [dependencies]
 moq-transport = "0.12"
@@ -87,6 +89,8 @@ video-toolbox-sys = { git = "https://github.com/haixuantao/video-toolbox-sys", o
 core-foundation = { version = "0.9", optional = true }
 core-foundation-sys = { version = "0.8", optional = true }
 core-media-sys = { version = "0.1.0", optional = true }
+# JSON serialization (for chat)
+serde_json = { version = "1", optional = true }
 
 [dev-dependencies]
 rustypot = "1.4.2"

@@ -472,6 +472,101 @@ mod tests {
         }
     }
 
+    /// Real hardware data from baguette right arm (2026-03-04).
+    /// Joint configuration at t≈20s during pick-place trajectory playback.
+    /// tau_ff values from EMA gravity compensation (converged during hold periods).
+    ///
+    /// Motors 2 and 6 have fully converged tau_ff (stable for >5 seconds).
+    /// Other motors were in motion — their tau_ff is partially converged.
+    #[test]
+    fn test_model_vs_real_hardware_baguette_right() {
+        let model = right_arm_model();
+
+        // Actual joint angles from baguette right arm at t≈20.93s
+        let angles: [f64; 7] = [
+            -0.620851, // J1
+            0.235561,  // J2
+            -0.325971, // J3
+            0.796330,  // J4
+            0.206569,  // J5
+            0.787556,  // J6
+            1.487564,  // J7
+        ];
+
+        // Converged tau_ff from EMA on real hardware (Nm)
+        // Motors marked "converged" had stable tau_ff for >5s in hold state
+        let real_tau_ff: [(f64, bool); 7] = [
+            (0.1478, false),  // J1 — in motion, partially converged
+            (0.5362, true),   // J2 — converged (hold, stable >5s)
+            (-0.2269, false), // J3 — in motion, partially converged
+            (-0.0619, false), // J4 — in motion, partially converged
+            (0.0000, false),  // J5 — in motion, near zero
+            (1.5365, true),   // J6 — converged (hold, stable >5s)
+            (-0.0516, false), // J7 — partially converged
+        ];
+
+        let model_tau = compute_gravity_torques(&model, &angles);
+
+        println!("\nModel vs real hardware (baguette right arm):");
+        println!(
+            "{:>5} {:>10} {:>10} {:>8} {:>10}",
+            "Joint", "Model", "Real", "Ratio", "Status"
+        );
+        for i in 0..7 {
+            let (real, converged) = real_tau_ff[i];
+            let ratio = if real.abs() > 0.01 {
+                model_tau[i] / real
+            } else {
+                f64::NAN
+            };
+            let status = if converged { "converged" } else { "partial" };
+            println!(
+                "  J{}  {:>+10.4} {:>+10.4} {:>8.2} {:>10}",
+                i + 1,
+                model_tau[i],
+                real,
+                ratio,
+                status
+            );
+        }
+
+        // Pinocchio (RNEA from same URDF, openarm_v10.urdf) reference values:
+        let pinocchio_tau: [f64; 7] = [
+            -3.7156, // J1
+            1.2496,  // J2
+            0.0106,  // J3
+            1.1064,  // J4
+            -0.0079, // J5
+            0.0987,  // J6
+            0.4217,  // J7
+        ];
+
+        // Comparison summary:
+        //          Pinocchio  Rust-model  Real(hw)  Pin/Real  Rust/Real
+        // J2(conv)   +1.25     -9.93      +0.54     +2.33x    -18.5x
+        // J6(conv)   +0.10     -0.05      +1.54     +0.06x    -0.03x
+        //
+        // Pinocchio gets the right SIGN for both converged joints.
+        // Our hand-coded model gets signs WRONG — the forward kinematics
+        // chain has errors vs the URDF that Pinocchio parses correctly.
+        //
+        // Neither model is accurate enough for direct gravity compensation.
+        // J2 is 2.3x off, J6 is 16x off — likely wrong URDF masses.
+
+        for i in 0..7 {
+            assert!(
+                model_tau[i].is_finite(),
+                "J{} model torque not finite",
+                i + 1
+            );
+            assert!(
+                pinocchio_tau[i].is_finite(),
+                "J{} pinocchio ref not finite",
+                i + 1
+            );
+        }
+    }
+
     #[test]
     fn test_left_right_model_differ_at_j2_and_j7() {
         let left = left_arm_model();

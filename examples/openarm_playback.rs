@@ -49,8 +49,9 @@
 //!   openarm_playback recording.json --step left <id>
 
 use anyhow::Result;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::f64::consts::FRAC_PI_2;
+use std::io::Write as IoWrite;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -64,16 +65,20 @@ const QUERY_CMD: [u8; 8] = [0x80, 0x00, 0x80, 0x00, 0x00, 0x00, 0x08, 0x00];
 
 const POSITION_THRESHOLD_RAD: f64 = 0.175; // ~10 degrees
 const MOVE_STEPS: usize = 50;
-const MOVE_STEP_MS: u64 = 20;
-const STEP_MAX_SPEED: f64 = 3.0; // rad/s — max interpolation speed per motor
+const MOVE_STEP_MS: u64 = 10;
+const STEP_MAX_SPEED: f64 = 6.0; // rad/s — max interpolation speed per motor
 const STEP_MIN_SUBSTEPS: usize = 3; // minimum substeps even for tiny moves
-const STEP_MAX_SUBSTEPS: usize = 50; // cap for very large moves
+const STEP_MAX_SUBSTEPS: usize = 30; // cap for very large moves
 
-const EE_ERROR_THRESHOLD: f64 = 0.05; // 5cm — hard e-stop
+const EE_ERROR_THRESHOLD: f64 = 0.05; // 5cm — pause + wait for arm to converge
 const EE_ESTOP_THRESHOLD: f64 = 0.05; // 5cm — hard e-stop
 const MIN_JOINTS_FOR_FK: usize = 5; // need at least 5 of 7 joints for meaningful FK
 const SAFETY_LAG_MS: u64 = 200; // compare actual against commanded from 200ms ago
 const KP_SCALE_DEFAULT: f64 = 1.0; // default kp multiplier (--kp-scale flag)
+
+// Per-motor PD gains (indexed by motor_id 1–8 → index 0–7)
+const MOTOR_KP: [f64; 8] = [300.0, 300.0, 150.0, 150.0, 40.0, 40.0, 30.0, 30.0];
+const MOTOR_KD: [f64; 8] = [15.0, 15.0, 7.5, 7.5, 2.0, 2.0, 1.5, 1.5];
 
 const POS_MIN: f64 = -12.5;
 const POS_MAX: f64 = 12.5;
@@ -81,6 +86,12 @@ const VEL_MIN: f64 = -45.0;
 const VEL_MAX: f64 = 45.0;
 const TAU_MIN: f64 = -18.0;
 const TAU_MAX: f64 = 18.0;
+
+/// Get per-motor kp/kd gains (motor_id 1–8). Returns (kp * kp_scale, kd).
+fn motor_gains(motor_id: u32, kp_scale: f64) -> (f64, f64) {
+    let idx = (motor_id as usize).saturating_sub(1).min(7);
+    (MOTOR_KP[idx] * kp_scale, MOTOR_KD[idx])
+}
 
 /// Decode a Damiao MIT command (8 bytes) into (pos, vel, kp, kd, tau).
 fn decode_damiao_cmd(data: &[u8]) -> (f64, f64, f64, f64, f64) {
@@ -878,7 +889,6 @@ fn main() -> Result<()> {
         println!(
             "  --kp-scale F Multiply all motor kp values by F (default 1.0, try 2.0 for stiffer)"
         );
-        println!("  --no-gravity-comp  Disable feedforward gravity compensation (on by default)");
         return Ok(());
     }
 
@@ -889,7 +899,6 @@ fn main() -> Result<()> {
     let mut step_mode = false;
     let mut interp_mode = false;
     let mut safety_disabled = false;
-    let mut gravity_comp = true;
     let mut kp_scale: f64 = KP_SCALE_DEFAULT;
     let mut rest_args: Vec<String> = Vec::new();
     let mut i = 2;
@@ -914,9 +923,6 @@ fn main() -> Result<()> {
             i += 1;
         } else if args[i] == "--no-safety" {
             safety_disabled = true;
-            i += 1;
-        } else if args[i] == "--no-gravity-comp" {
-            gravity_comp = false;
             i += 1;
         } else if args[i] == "--kp-scale" {
             if i + 1 < args.len() {
@@ -1036,16 +1042,24 @@ fn main() -> Result<()> {
         println!("  {} enabled", name);
     }
 
+    // --- CSV logger ---
+    let csv_path = format!("{}.playback.csv", json_path);
+    let mut csv_writer: Option<std::fs::File> = match std::fs::File::create(&csv_path) {
+        Ok(mut f) => {
+            let _ = writeln!(f, "t,arm,motor,cmd_pos,actual_pos,error,kp,state");
+            println!("  Logging to {}", csv_path);
+            Some(f)
+        }
+        Err(e) => {
+            eprintln!("  Warning: could not create log file {}: {}", csv_path, e);
+            None
+        }
+    };
+    let playback_t0 = Instant::now();
+
     // --- Pre-playback safety check ---
     // Query current motor positions and compare with first waypoint.
     // If any motor is too far from its target, offer to slow-move there.
-    // Per-motor gravity compensation torque: (arm_name, motor_id) → tau_ff
-    let mut tau_ff: HashMap<(String, u32), f64> = HashMap::new();
-    const TAU_FF_MAX: f64 = 8.0; // Absolute clamp (typical gravity torque is 2-6 Nm)
-    const TAU_FF_ABORT: f64 = 7.0; // Abort if any motor's |tau_ff| exceeds this
-    const TAU_FF_ALPHA: f64 = 0.3; // EMA gain — only applied when arm is holding still (not during motion)
-    const TAU_FF_DEADBAND: f64 = 0.005; // ~0.3° — ignore errors below this to prevent integral windup from noise/friction
-
     println!("\nChecking motor positions...");
     let first_timestep = &timesteps[0];
     let mut needs_slow_move = false;
@@ -1079,18 +1093,12 @@ fn main() -> Result<()> {
         }
     }
 
-    // Only apply gravity comp to motors that responded to the initial query (1-7 only)
-    let gravity_comp_motors: HashSet<(String, u32)> = mismatches
-        .iter()
-        .filter(|(_, mid, _, _, _, _)| (1..=7).contains(mid))
-        .map(|(arm, mid, _, _, _, _)| (arm.clone(), *mid))
-        .collect();
-
     // Immediately hold motors at queried position with kp/kd so they don't drift
     // while the user reads the screen or presses Enter
-    for (arm_name, motor_id, current, _target, kp, kd) in &mismatches {
+    for (arm_name, motor_id, current, _target, _kp, _kd) in &mismatches {
         if let Some(socket) = arms.get_mut(arm_name) {
-            let cmd_data = encode_damiao_cmd(*current, 0.0, (*kp * kp_scale).min(500.0), *kd, 0.0);
+            let (mg_kp, mg_kd) = motor_gains(*motor_id, kp_scale);
+            let cmd_data = encode_damiao_cmd(*current, 0.0, mg_kp, mg_kd, 0.0);
             if let Ok(frame) = socketcan::CanFrame::new(*motor_id, &cmd_data) {
                 let _ = socket.write_frame(&frame);
             }
@@ -1166,10 +1174,10 @@ fn main() -> Result<()> {
 
             for (arm_name, targets) in &arm_targets {
                 if let Some(socket) = arms.get_mut(arm_name) {
-                    for &(motor_id, current, target, kp, kd) in targets {
+                    for &(motor_id, current, target, _kp, _kd) in targets {
                         let interp_pos = current + t * (target - current);
-                        let cmd_data =
-                            encode_damiao_cmd(interp_pos, 0.0, (kp * kp_scale).min(500.0), kd, 0.0);
+                        let (mg_kp, mg_kd) = motor_gains(motor_id, kp_scale);
+                        let cmd_data = encode_damiao_cmd(interp_pos, 0.0, mg_kp, mg_kd, 0.0);
                         if let Ok(frame) = socketcan::CanFrame::new(motor_id, &cmd_data) {
                             let _ = socket.write_frame(&frame);
                         }
@@ -1211,17 +1219,6 @@ fn main() -> Result<()> {
     let mut safety_monitor = SafetyMonitor::new();
     let mut pos_last_error: HashMap<String, HashMap<u32, f64>> = HashMap::new();
 
-    if gravity_comp {
-        eprintln!(
-            "  gravity compensation ENABLED (alpha={}, abort=±{} Nm, motors: {:?})",
-            TAU_FF_ALPHA,
-            TAU_FF_ABORT,
-            gravity_comp_motors
-                .iter()
-                .map(|(a, m)| format!("{}/0x{:02X}", a, m))
-                .collect::<Vec<_>>()
-        );
-    }
     if kp_scale != 1.0 {
         eprintln!("  kp_scale = {:.1}x", kp_scale);
     }
@@ -1299,24 +1296,10 @@ fn main() -> Result<()> {
                     for (arm_name, can_cmds) in &hold.commands {
                         if let Some(socket) = arms.get_mut(arm_name) {
                             for cmd in can_cmds {
-                                if cmd.data.len() == 8 && (1..=7).contains(&cmd.can_id) {
-                                    let (pos, _vel, kp, kd, _tau) = decode_damiao_cmd(&cmd.data);
-                                    let motor_tau_ff = if gravity_comp {
-                                        tau_ff
-                                            .get(&(arm_name.clone(), cmd.can_id))
-                                            .copied()
-                                            .unwrap_or(0.0)
-                                            .clamp(-TAU_FF_MAX, TAU_FF_MAX)
-                                    } else {
-                                        0.0
-                                    };
-                                    let corrected = encode_damiao_cmd(
-                                        pos,
-                                        0.0,
-                                        (kp * kp_scale).min(500.0),
-                                        kd,
-                                        motor_tau_ff,
-                                    );
+                                if cmd.data.len() == 8 && (1..=8).contains(&cmd.can_id) {
+                                    let (pos, _vel, _kp, _kd, _tau) = decode_damiao_cmd(&cmd.data);
+                                    let (mg_kp, mg_kd) = motor_gains(cmd.can_id, kp_scale);
+                                    let corrected = encode_damiao_cmd(pos, 0.0, mg_kp, mg_kd, 0.0);
                                     if let Ok(frame) =
                                         socketcan::CanFrame::new(cmd.can_id, &corrected)
                                     {
@@ -1324,41 +1307,8 @@ fn main() -> Result<()> {
                                     }
                                 }
                             }
-                            // Read responses and update tau_ff during hold
-                            let actual = read_response_positions(socket);
-                            if gravity_comp {
-                                for (&motor_id, &actual_pos) in &actual {
-                                    if !gravity_comp_motors.contains(&(arm_name.clone(), motor_id))
-                                    {
-                                        continue;
-                                    }
-                                    let cmd_pos = can_cmds
-                                        .iter()
-                                        .find(|c| c.can_id == motor_id && c.data.len() == 8)
-                                        .map(|c| decode_damiao_cmd(&c.data).0);
-                                    if let Some(cmd_pos) = cmd_pos {
-                                        let error = cmd_pos - actual_pos;
-                                        if error.abs() > TAU_FF_DEADBAND {
-                                            let kp_val = can_cmds
-                                                .iter()
-                                                .find(|c| c.can_id == motor_id && c.data.len() == 8)
-                                                .map(|c| decode_damiao_cmd(&c.data).2 * kp_scale)
-                                                .unwrap_or(30.0);
-                                            let old_tau = tau_ff
-                                                .get(&(arm_name.clone(), motor_id))
-                                                .copied()
-                                                .unwrap_or(0.0);
-                                            let new_tau = old_tau + TAU_FF_ALPHA * kp_val * error;
-                                            tau_ff.insert(
-                                                (arm_name.clone(), motor_id),
-                                                new_tau.clamp(-TAU_FF_MAX, TAU_FF_MAX),
-                                            );
-                                        }
-                                    }
-                                }
-                            } else {
-                                drop(actual);
-                            }
+                            // Drain responses
+                            while socket.read_frame().ok().flatten().is_some() {}
                         }
                     }
                 }
@@ -1375,11 +1325,27 @@ fn main() -> Result<()> {
 
             if interp_mode {
                 // Decode current waypoint targets: (arm_name, motor_id, pos, kp, kd)
+                // For gripper (motor 8): look ahead ~1s to speed up close/open
+                const GRIPPER_LOOKAHEAD: usize = 10; // 10 waypoints @ 100ms = 1s
                 let mut curr_targets: Vec<(String, u32, f64, f64, f64)> = Vec::new();
                 for (arm_name, can_cmds) in &timestep.commands {
                     for cmd in can_cmds {
                         if cmd.data.len() == 8 {
                             let (pos, _vel, kp, kd, _tau) = decode_damiao_cmd(&cmd.data);
+                            let pos = if cmd.can_id == 8 {
+                                // Look ahead for gripper target
+                                let ahead = (step_i + GRIPPER_LOOKAHEAD).min(timesteps.len() - 1);
+                                timesteps[ahead]
+                                    .commands
+                                    .get(arm_name)
+                                    .and_then(|cmds| {
+                                        cmds.iter().find(|c| c.can_id == 8 && c.data.len() == 8)
+                                    })
+                                    .map(|c| decode_damiao_cmd(&c.data).0)
+                                    .unwrap_or(pos)
+                            } else {
+                                pos
+                            };
                             curr_targets.push((arm_name.clone(), cmd.can_id, pos, kp, kd));
                         }
                     }
@@ -1440,8 +1406,13 @@ fn main() -> Result<()> {
                 }
 
                 // Compute substep count from max motor delta so speed is constant
+                // Exclude motor 8 (gripper) — its lookahead-inflated delta would
+                // slow down arm movement when the gripper is closing/opening.
                 let mut max_delta: f64 = 0.0;
                 for &(ref arm_name, motor_id, target_pos, _, _) in &curr_targets {
+                    if motor_id == 8 {
+                        continue;
+                    }
                     let prev_pos = prev_positions
                         .get(arm_name.as_str())
                         .and_then(|m| m.get(&motor_id))
@@ -1458,7 +1429,6 @@ fn main() -> Result<()> {
                 let substeps = substeps.clamp(STEP_MIN_SUBSTEPS, STEP_MAX_SUBSTEPS);
 
                 // Interpolate from previous positions to current targets
-                // With gravity_comp: settle loop at each substep until actual ≈ target
                 for substep in 0..substeps {
                     if !running.load(Ordering::SeqCst) {
                         break;
@@ -1467,7 +1437,7 @@ fn main() -> Result<()> {
 
                     for (arm_name, socket) in arms.iter_mut() {
                         let arm_prev = prev_positions.get(arm_name.as_str());
-                        for &(ref target_arm, motor_id, target_pos, kp, kd) in &curr_targets {
+                        for &(ref target_arm, motor_id, target_pos, _kp, _kd) in &curr_targets {
                             if target_arm != arm_name {
                                 continue;
                             }
@@ -1476,30 +1446,18 @@ fn main() -> Result<()> {
                                 .copied()
                                 .unwrap_or(target_pos);
                             let interp_pos = prev_pos + t * (target_pos - prev_pos);
-                            let motor_tau_ff = if gravity_comp {
-                                tau_ff
-                                    .get(&(arm_name.clone(), motor_id))
-                                    .copied()
-                                    .unwrap_or(0.0)
-                                    .clamp(-TAU_FF_MAX, TAU_FF_MAX)
-                            } else {
-                                0.0
-                            };
-                            let cmd_data = encode_damiao_cmd(
-                                interp_pos,
-                                0.0,
-                                (kp * kp_scale).min(500.0),
-                                kd,
-                                motor_tau_ff,
-                            );
+                            let (mg_kp, mg_kd) = motor_gains(motor_id, kp_scale);
+                            let cmd_data = encode_damiao_cmd(interp_pos, 0.0, mg_kp, mg_kd, 0.0);
                             if let Ok(frame) = socketcan::CanFrame::new(motor_id, &cmd_data) {
                                 let _ = socket.write_frame(&frame);
                                 sent += 1;
                             }
                         }
 
-                        // Read responses for safety monitoring (don't update tau_ff during motion)
+                        // Read responses for safety monitoring (short timeout to avoid blocking)
+                        let _ = socket.set_timeout(Duration::from_millis(5));
                         let actual = read_response_positions(socket);
+                        let _ = socket.set_timeout(Duration::from_millis(100));
                         for (&motor_id, &actual_pos) in &actual {
                             let cmd_pos = curr_targets
                                 .iter()
@@ -1513,15 +1471,28 @@ fn main() -> Result<()> {
                                     prev_pos + t * (tp - prev_pos)
                                 });
                             if let Some(cmd_pos) = cmd_pos {
+                                let error = cmd_pos - actual_pos;
                                 pos_last_error
                                     .entry(arm_name.clone())
                                     .or_default()
-                                    .insert(motor_id, cmd_pos - actual_pos);
+                                    .insert(motor_id, error);
+                                if let Some(ref mut w) = csv_writer {
+                                    let (kp_val, _) = motor_gains(motor_id, kp_scale);
+                                    let _ = writeln!(
+                                        w,
+                                        "{:.4},{},{},{:.6},{:.6},{:.6},{:.1},interp",
+                                        playback_t0.elapsed().as_secs_f64(),
+                                        arm_name,
+                                        motor_id,
+                                        cmd_pos,
+                                        actual_pos,
+                                        error,
+                                        kp_val
+                                    );
+                                }
                             }
                         }
                     }
-
-                    std::thread::sleep(Duration::from_millis(MOVE_STEP_MS));
 
                     let pct = ((substep + 1) as f64 / substeps as f64 * 100.0) as u32;
                     print!(
@@ -1534,153 +1505,6 @@ fn main() -> Result<()> {
                     let _ = std::io::stdout().flush();
                 }
                 println!();
-
-                // Settle: hold final waypoint, update tau_ff, re-send until position converges
-                if gravity_comp && running.load(Ordering::SeqCst) {
-                    const TAU_FF_SETTLE_MAX: usize = 10;
-                    const TAU_FF_SETTLE_THRESH: f64 = 0.01; // ~0.6° per joint
-                    const TAU_FF_SETTLE_MS: u64 = 80; // Wait for motor to physically settle
-                    let mut prev_max_error = f64::MAX;
-                    for settle_i in 0..TAU_FF_SETTLE_MAX {
-                        // Send command with current tau_ff
-                        for (arm_name, socket) in arms.iter_mut() {
-                            for &(ref target_arm, motor_id, target_pos, kp, kd) in &curr_targets {
-                                if target_arm != arm_name {
-                                    continue;
-                                }
-                                let motor_tau_ff = tau_ff
-                                    .get(&(arm_name.clone(), motor_id))
-                                    .copied()
-                                    .unwrap_or(0.0)
-                                    .clamp(-TAU_FF_MAX, TAU_FF_MAX);
-                                let cmd_data = encode_damiao_cmd(
-                                    target_pos,
-                                    0.0,
-                                    (kp * kp_scale).min(500.0),
-                                    kd,
-                                    motor_tau_ff,
-                                );
-                                if let Ok(frame) = socketcan::CanFrame::new(motor_id, &cmd_data) {
-                                    let _ = socket.write_frame(&frame);
-                                }
-                            }
-                            // Drain immediate responses (stale)
-                            while socket.read_frame().ok().flatten().is_some() {}
-                        }
-
-                        // Wait for motor to physically settle
-                        std::thread::sleep(Duration::from_millis(TAU_FF_SETTLE_MS));
-
-                        // Now query actual positions and update tau_ff
-                        for (arm_name, socket) in arms.iter_mut() {
-                            // Send same command again to get fresh response
-                            for &(ref target_arm, motor_id, target_pos, kp, kd) in &curr_targets {
-                                if target_arm != arm_name {
-                                    continue;
-                                }
-                                let motor_tau_ff = tau_ff
-                                    .get(&(arm_name.clone(), motor_id))
-                                    .copied()
-                                    .unwrap_or(0.0)
-                                    .clamp(-TAU_FF_MAX, TAU_FF_MAX);
-                                let cmd_data = encode_damiao_cmd(
-                                    target_pos,
-                                    0.0,
-                                    (kp * kp_scale).min(500.0),
-                                    kd,
-                                    motor_tau_ff,
-                                );
-                                if let Ok(frame) = socketcan::CanFrame::new(motor_id, &cmd_data) {
-                                    let _ = socket.write_frame(&frame);
-                                }
-                            }
-                            let actual = read_response_positions(socket);
-                            for (&motor_id, &actual_pos) in &actual {
-                                if !gravity_comp_motors.contains(&(arm_name.clone(), motor_id)) {
-                                    continue;
-                                }
-                                if let Some(&(_, _, target_pos, kp, _)) = curr_targets
-                                    .iter()
-                                    .find(|(a, mid, _, _, _)| a == arm_name && *mid == motor_id)
-                                {
-                                    let error = target_pos - actual_pos;
-                                    if error.abs() > TAU_FF_DEADBAND {
-                                        let old_tau = tau_ff
-                                            .get(&(arm_name.clone(), motor_id))
-                                            .copied()
-                                            .unwrap_or(0.0);
-                                        let new_tau =
-                                            old_tau + TAU_FF_ALPHA * kp * kp_scale * error;
-                                        tau_ff.insert(
-                                            (arm_name.clone(), motor_id),
-                                            new_tau.clamp(-TAU_FF_MAX, TAU_FF_MAX),
-                                        );
-                                    }
-                                    pos_last_error
-                                        .entry(arm_name.clone())
-                                        .or_default()
-                                        .insert(motor_id, error);
-                                }
-                            }
-                        }
-
-                        // Abort immediately if tau_ff diverges
-                        if let Some(((arm, mid), &val)) =
-                            tau_ff.iter().find(|(_, v)| v.abs() >= TAU_FF_ABORT)
-                        {
-                            eprintln!("\n  ABORT: {} motor 0x{:02X} tau_ff={:.2} Nm exceeds {:.0} Nm limit", arm, mid, val, TAU_FF_ABORT);
-                            emergency_stop(&mut arms);
-                            let _ = std::process::Command::new("stty")
-                                .args(["icanon", "echo"])
-                                .stdin(std::process::Stdio::inherit())
-                                .status();
-                            anyhow::bail!(
-                                "tau_ff runaway: {} motor 0x{:02X} = {:.2} Nm",
-                                arm,
-                                mid,
-                                val
-                            );
-                        }
-
-                        // Check convergence
-                        let max_error = gravity_comp_motors
-                            .iter()
-                            .filter_map(|(arm, mid)| {
-                                pos_last_error
-                                    .get(arm)
-                                    .and_then(|e| e.get(mid))
-                                    .map(|e| e.abs())
-                            })
-                            .fold(0.0f64, f64::max);
-                        if max_error < TAU_FF_SETTLE_THRESH {
-                            break;
-                        }
-                        // Abort if error is clearly diverging (not just noise)
-                        // Require both: >20% relative increase AND >0.005 rad absolute increase
-                        if settle_i >= 2
-                            && max_error > prev_max_error * 1.2
-                            && (max_error - prev_max_error) > 0.005
-                        {
-                            eprintln!(
-                                "\n  ABORT: settle diverging — error grew from {:.4} to {:.4} rad",
-                                prev_max_error, max_error
-                            );
-                            emergency_stop(&mut arms);
-                            let _ = std::process::Command::new("stty")
-                                .args(["icanon", "echo"])
-                                .stdin(std::process::Stdio::inherit())
-                                .status();
-                            anyhow::bail!("gravity comp settle diverging");
-                        }
-                        prev_max_error = max_error;
-                        if settle_i == TAU_FF_SETTLE_MAX - 1 {
-                            eprintln!(
-                                "  [settle] max error {:.3} rad after {} iters",
-                                max_error, TAU_FF_SETTLE_MAX
-                            );
-                        }
-                    }
-                }
 
                 // Safety check after substeps
                 if !safety_disabled {
@@ -1747,18 +1571,13 @@ fn main() -> Result<()> {
                     }
                 }
 
-                // Update prev_positions with ACTUAL positions (not targets) so next
-                // waypoint interpolates from where the arm really is
+                // Update prev_positions with TARGET positions so next waypoint
+                // interpolation is smooth (no backward jump to lagging actual)
                 for &(ref arm_name, motor_id, target_pos, _, _) in &curr_targets {
-                    let actual_pos = pos_last_error
-                        .get(arm_name.as_str())
-                        .and_then(|e| e.get(&motor_id))
-                        .map(|&err| target_pos - err)
-                        .unwrap_or(target_pos);
                     prev_positions
                         .entry(arm_name.clone())
                         .or_default()
-                        .insert(motor_id, actual_pos);
+                        .insert(motor_id, target_pos);
                 }
 
                 continue;
@@ -1777,26 +1596,12 @@ fn main() -> Result<()> {
                 if let Some(socket) = arms.get_mut(arm_name) {
                     let mut commanded = HashMap::new();
                     for cmd in can_cmds {
-                        if cmd.data.len() == 8 && (1..=7).contains(&cmd.can_id) {
-                            // Motor command: apply kp scaling + gravity compensation
-                            let (pos, vel, kp, kd, tau) = decode_damiao_cmd(&cmd.data);
+                        if cmd.data.len() == 8 && (1..=8).contains(&cmd.can_id) {
+                            // Motor command: use per-motor gains, no tau
+                            let (pos, vel, _kp, _kd, _tau) = decode_damiao_cmd(&cmd.data);
                             commanded.insert(cmd.can_id, pos);
-                            let motor_tau_ff = if gravity_comp {
-                                tau_ff
-                                    .get(&(arm_name.clone(), cmd.can_id))
-                                    .copied()
-                                    .unwrap_or(0.0)
-                                    .clamp(-TAU_FF_MAX, TAU_FF_MAX)
-                            } else {
-                                tau // original recording value
-                            };
-                            let corrected = encode_damiao_cmd(
-                                pos,
-                                vel,
-                                (kp * kp_scale).min(500.0),
-                                kd,
-                                motor_tau_ff,
-                            );
+                            let (mg_kp, mg_kd) = motor_gains(cmd.can_id, kp_scale);
+                            let corrected = encode_damiao_cmd(pos, vel, mg_kp, mg_kd, 0.0);
                             if let Ok(frame) = socketcan::CanFrame::new(cmd.can_id, &corrected) {
                                 let _ = socket.write_frame(&frame);
                                 sent += 1;
@@ -1809,42 +1614,26 @@ fn main() -> Result<()> {
                             }
                         }
                     }
+                    let _ = socket.set_timeout(Duration::from_millis(5));
                     let actual = read_response_positions(socket);
-                    if gravity_comp {
+                    let _ = socket.set_timeout(Duration::from_millis(100));
+                    if let Some(ref mut w) = csv_writer {
                         for (&motor_id, &actual_pos) in &actual {
-                            if !gravity_comp_motors.contains(&(arm_name.clone(), motor_id)) {
-                                continue;
-                            }
                             if let Some(&cmd_pos) = commanded.get(&motor_id) {
                                 let error = cmd_pos - actual_pos;
-                                if error.abs() > TAU_FF_DEADBAND {
-                                    let kp_val = can_cmds
-                                        .iter()
-                                        .find(|c| c.can_id == motor_id && c.data.len() == 8)
-                                        .map(|c| decode_damiao_cmd(&c.data).2 * kp_scale)
-                                        .unwrap_or(30.0);
-                                    let old_tau = tau_ff
-                                        .get(&(arm_name.clone(), motor_id))
-                                        .copied()
-                                        .unwrap_or(0.0);
-                                    let new_tau = old_tau + TAU_FF_ALPHA * kp_val * error;
-                                    tau_ff.insert(
-                                        (arm_name.clone(), motor_id),
-                                        new_tau.clamp(-TAU_FF_MAX, TAU_FF_MAX),
-                                    );
-                                }
+                                let (kp_val, _) = motor_gains(motor_id, kp_scale);
+                                let _ = writeln!(
+                                    w,
+                                    "{:.4},{},{},{:.6},{:.6},{:.6},{:.1},normal",
+                                    playback_t0.elapsed().as_secs_f64(),
+                                    arm_name,
+                                    motor_id,
+                                    cmd_pos,
+                                    actual_pos,
+                                    error,
+                                    kp_val
+                                );
                             }
-                        }
-                    }
-                    if gravity_comp {
-                        if let Some(((a, mid), &val)) =
-                            tau_ff.iter().find(|(_, v)| v.abs() >= TAU_FF_ABORT)
-                        {
-                            safety_error = Some(format!(
-                                "tau_ff runaway: {} motor 0x{:02X} = {:.2} Nm",
-                                a, mid, val
-                            ));
-                            break;
                         }
                     }
                     if !safety_disabled && !actual.is_empty() && !commanded.is_empty() {

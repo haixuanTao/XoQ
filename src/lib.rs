@@ -186,6 +186,10 @@ pub mod sounddevice {
     pub use crate::sounddevice_impl::{new, AudioStreamBuilder, RemoteAudioStream, Transport};
 }
 
+// MoQ Chat (multi-user chat via relay)
+#[cfg(feature = "chat")]
+pub mod chat;
+
 // Arm rigid-body dynamics (gravity simulation)
 pub mod arm_dynamics;
 
@@ -336,6 +340,10 @@ pub use sounddevice::{AudioStreamBuilder, RemoteAudioStream};
     any(feature = "nvenc", feature = "videotoolbox", feature = "dav1d")
 ))]
 pub use realsense_client::{RealSenseClient, SyncRealSenseClient};
+
+// Chat client
+#[cfg(feature = "chat")]
+pub use chat::{ChatClient, ChatMessage};
 
 // Re-export token generation
 pub use moq_token;
