@@ -572,6 +572,11 @@ async fn moq_command_subscriber(
     // Create client once — reuse across reconnects to avoid UDP socket leak.
     let client = builder.create_client_public()?;
 
+    // Exponential backoff for reconnects when no command publisher is active.
+    // Resets to 2s whenever we successfully receive command data.
+    let mut backoff = Duration::from_secs(10);
+    let max_backoff = Duration::from_secs(3600);
+
     loop {
         tracing::info!("MoQ command subscriber connecting on {}...", cmd_path);
 
@@ -589,13 +594,22 @@ async fn moq_command_subscriber(
         {
             Ok(Ok(r)) => r,
             Ok(Err(e)) => {
-                tracing::warn!("MoQ command subscriber connect error: {}, retrying...", e);
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                tracing::warn!(
+                    "MoQ command subscriber connect error: {}, retrying in {:?}...",
+                    e,
+                    backoff
+                );
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(max_backoff);
                 continue;
             }
             Err(_) => {
-                tracing::info!("MoQ command subscriber connect timeout, retrying...");
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                tracing::info!(
+                    "MoQ command subscriber connect timeout, retrying in {:?}...",
+                    backoff
+                );
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(max_backoff);
                 continue;
             }
         };
@@ -614,16 +628,27 @@ async fn moq_command_subscriber(
         {
             Ok(Some(bc)) => bc,
             Ok(None) => {
-                tracing::info!("MoQ command origin closed, reconnecting...");
-                tokio::time::sleep(Duration::from_millis(500)).await;
+                tracing::info!(
+                    "MoQ command origin closed, reconnecting in {:?}...",
+                    backoff
+                );
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(max_backoff);
                 continue;
             }
             Err(_) => {
-                tracing::debug!("No command publisher yet (10s), reconnecting...");
-                tokio::time::sleep(Duration::from_millis(500)).await;
+                tracing::debug!(
+                    "No command publisher yet (10s), retrying in {:?}...",
+                    backoff
+                );
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(max_backoff);
                 continue;
             }
         };
+
+        // Successfully found a publisher — reset backoff.
+        backoff = Duration::from_secs(10);
 
         let mut current_broadcast = broadcast;
         let mut reader =
@@ -655,6 +680,7 @@ async fn moq_command_subscriber(
                     match read_result {
                         Ok(Some(data)) => {
                             err_count = 0;
+                            backoff = Duration::from_secs(10); // Reset backoff on successful data
                             timeout.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(30));
                             match write_tx.try_send(data.to_vec()) {
                                 Ok(_) => {
@@ -730,6 +756,7 @@ async fn moq_command_subscriber(
             return Ok(());
         }
 
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(max_backoff);
     }
 }

@@ -5,6 +5,16 @@ import { log } from "./openarm-log.js";
 import { buildConnectOpts } from "./openarm-moq.js";
 
 const TOAST_MAX = 5;
+const USER_COLORS = [
+  "#a855f7", "#f97316", "#22d3ee", "#f43f5e", "#84cc16",
+  "#eab308", "#ec4899", "#14b8a6", "#6366f1", "#fb923c",
+];
+
+function userColor(name) {
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) | 0;
+  return USER_COLORS[Math.abs(h) % USER_COLORS.length];
+}
 
 export function createChatState() {
   return {
@@ -21,7 +31,15 @@ export function createChatState() {
 function showChatMessage(msg, toastsEl) {
   const toast = document.createElement("div");
   toast.className = "toast toast-chat toast-sticky";
-  toast.textContent = `${msg.name}: ${msg.text}`;
+  const time = new Date(msg.ts);
+  const timeSpan = document.createElement("span");
+  timeSpan.style.color = "#999";
+  timeSpan.textContent = time.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) + " ";
+  const nameSpan = document.createElement("span");
+  nameSpan.style.color = userColor(msg.name);
+  nameSpan.style.fontWeight = "bold";
+  nameSpan.textContent = msg.name;
+  toast.append(timeSpan, nameSpan, `: ${msg.text}`);
   toastsEl.prepend(toast);
   while (toastsEl.children.length > TOAST_MAX) toastsEl.lastChild.remove();
 }

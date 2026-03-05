@@ -270,6 +270,9 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  pointer-events: auto;
+  user-select: text;
+  cursor: text;
   animation: toastIn 0.25s ease-out, toastOut 0.4s ease-in forwards;
   animation-delay: 0s, var(--toast-duration, 4s);
 }
@@ -277,7 +280,7 @@ body {
 .toast-error   { border-left-color: #ff4757; color: #ff4757; }
 .toast-data    { border-left-color: #00d4ff; color: #00d4ff; }
 .toast-info    { border-left-color: #888; }
-.toast-chat    { border-left-color: #a855f7; color: #a855f7; }
+.toast-chat    { border-left-color: #a855f7; color: #ccc; white-space: normal; word-wrap: break-word; max-width: min(600px, 90vw); pointer-events: auto; user-select: text; cursor: text; }
 .toast-sticky  { animation: toastIn 0.25s ease-out; }
 
 /* Chat bar (always visible above tab bar) */
