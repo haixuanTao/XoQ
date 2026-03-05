@@ -2,7 +2,7 @@
 
 import * as Moq from "@moq/lite";
 import { log } from "./openarm-log.js";
-import { buildConnectOpts, withTimeout, STALE_MS, RECONNECT_DELAY } from "./openarm-moq.js";
+import { buildConnectOpts, RECONNECT_DELAY } from "./openarm-moq.js";
 
 export function createAudioState() {
   return {
@@ -85,10 +85,10 @@ async function connectAudioOnce(config, audioState) {
   log(`[audio] Subscribed to "mic" track`, 'success', { toast: false });
 
   while (audioState.running) {
-    const group = await withTimeout(track.nextGroup(), STALE_MS);
+    const group = await track.nextGroup();
     if (!group) { log(`[audio] Track ended`); break; }
     while (audioState.running) {
-      const frame = await withTimeout(group.readFrame(), STALE_MS);
+      const frame = await group.readFrame();
       if (!frame) break;
       const bytes = new Uint8Array(frame);
       const header = decodeAudioMoqHeader(bytes);

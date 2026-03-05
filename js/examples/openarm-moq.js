@@ -26,13 +26,6 @@ export function buildConnectOpts(config) {
   return opts;
 }
 
-export function withTimeout(promise, ms) {
-  return Promise.race([
-    promise,
-    new Promise((_, rej) => setTimeout(() => rej(new Error('stale (no data for ' + (ms/1000) + 's)')), ms)),
-  ]);
-}
-export const STALE_MS = 10000;
 export const RECONNECT_DELAY = 300;
 
 // Strip /state or /commands suffix to get base path
@@ -59,10 +52,10 @@ async function subscribeArmOnce(config, appState, label, path, jointState) {
     log(`[${label}] Subscribed to 'can' track`, "success", { toast: false });
 
     while (appState.running) {
-      const group = await withTimeout(canTrack.nextGroup(), STALE_MS);
+      const group = await canTrack.nextGroup();
       if (!group) { log(`[${label}] can track ended`); break; }
       while (appState.running) {
-        const frame = await withTimeout(group.readFrame(), STALE_MS);
+        const frame = await group.readFrame();
         if (!frame) break;
         const bytes = new Uint8Array(frame);
         appState.bytesTotal += bytes.length;
@@ -124,10 +117,10 @@ async function connectCameraOnce(config, appState, cam, path, videoEl, label) {
   log(`[${label}] Subscribed to video track`, 'success', { toast: false });
 
   while (cam.running) {
-    const group = await withTimeout(videoTrack.nextGroup(), STALE_MS);
+    const group = await videoTrack.nextGroup();
     if (!group) { log(`[${label}] video track ended`); break; }
     while (cam.running) {
-      const frame = await withTimeout(group.readFrame(), STALE_MS);
+      const frame = await group.readFrame();
       if (!frame) break;
       const d = new Uint8Array(frame);
       cam.colorPlayer.onData(d);
@@ -199,10 +192,10 @@ async function connectRealSenseOnce(config, appState, cam, path, videoEl, label)
 
   async function readTrack(track, handler, name, hasTimestamp = true) {
     while (cam.running) {
-      const group = await withTimeout(track.nextGroup(), STALE_MS);
+      const group = await track.nextGroup();
       if (!group) { log(`[${label}] ${name} track ended`); break; }
       while (cam.running) {
-        const frame = await withTimeout(group.readFrame(), STALE_MS);
+        const frame = await group.readFrame();
         if (!frame) break;
         const bytes = new Uint8Array(frame);
         handler(hasTimestamp ? stripTimestamp(bytes, appState.latency) : bytes);
