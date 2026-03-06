@@ -118,10 +118,7 @@ export function initSettings(containerEl, config, callbacks = {}) {
         <label>Path</label>
         <input type="text" data-s="chatPath" />
       </div>
-      <div class="field">
-        <label>Username</label>
-        <input type="text" data-s="chatUsername" />
-      </div>
+      <!-- Username now set via HF OAuth or auto-generated -->
     </div>
     <div class="footer">
       <button class="btn-primary" data-s="primaryBtn">${esc(callbacks.primaryButtonLabel || "Save")}</button>
@@ -210,7 +207,7 @@ export function initSettings(containerEl, config, callbacks = {}) {
     config.audio.path = q("audioPath").value;
     config.chat.enabled = q("chatEnabled").checked;
     config.chat.path = q("chatPath").value;
-    config.chat.username = q("chatUsername").value;
+    // username is now set via HF OAuth or auto-generated (not editable in settings)
   }
 
   function autoSave(liveField) {
@@ -423,13 +420,12 @@ export function initSettings(containerEl, config, callbacks = {}) {
     q("audioPath").value = config.audio.path;
     q("chatEnabled").checked = config.chat.enabled !== false;
     q("chatPath").value = config.chat.path;
-    q("chatUsername").value = config.chat.username;
     attachGeneralAutoSave();
   }
 
   // Auto-save for general/audio/chat fields
   function attachGeneralAutoSave() {
-    const fields = [q("relay"), q("certHash"), q("audioPath"), q("chatPath"), q("chatUsername")];
+    const fields = [q("relay"), q("certHash"), q("audioPath"), q("chatPath")];
     fields.forEach(el => {
       el.removeEventListener("input", onGeneralStructural);
       el.addEventListener("input", onGeneralStructural);

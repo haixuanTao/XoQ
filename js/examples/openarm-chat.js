@@ -34,12 +34,18 @@ function showChatMessage(msg, toastsEl) {
   const time = new Date(msg.ts);
   const timeSpan = document.createElement("span");
   timeSpan.style.color = "#999";
-  timeSpan.textContent = time.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) + " ";
+  timeSpan.textContent = time.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) + " ";
   const nameSpan = document.createElement("span");
   nameSpan.style.color = userColor(msg.name);
   nameSpan.style.fontWeight = "bold";
   nameSpan.textContent = msg.name;
-  toast.append(timeSpan, nameSpan, `: ${msg.text}`);
+  if (msg.html) {
+    const body = document.createElement("span");
+    body.innerHTML = `: ${msg.html}`;
+    toast.append(timeSpan, nameSpan, body);
+  } else {
+    toast.append(timeSpan, nameSpan, `: ${msg.text}`);
+  }
   toastsEl.prepend(toast);
   while (toastsEl.children.length > TOAST_MAX) toastsEl.lastChild.remove();
 }
@@ -138,6 +144,11 @@ export async function connectChat(config, chatState, getUsername, toastsEl) {
     chatState.conn.publish(Moq.Path.from(getPublishPath(chatState, getUsername)), chatState.broadcast);
     log(`[chat] Publishing as "${getUsername()}"`, 'data', { toast: false });
     updateViewerCount(chatState);
+
+    // Show intro message after connection noise settles (local only)
+    setTimeout(() => {
+      showChatMessage({ name: "openarm", html: "Hello! This is our <b>XoQ OpenArm</b> demo running <em>in real time</em> with a <b>real robot</b>. You can make it do something by typing: <b><code>@robot pick up the yellow cube and put it in the green box</code></b>", ts: Date.now() }, toastsEl);
+    }, 2000);
 
     handleChatPublish(chatState);
     discoverChatUsers(chatState, getUsername, toastsEl);

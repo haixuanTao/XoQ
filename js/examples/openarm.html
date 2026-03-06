@@ -108,8 +108,8 @@
 
   <div class="log-panel" id="log"></div>
   <div class="chat-bar">
-    <input type="text" id="chatUsername" placeholder="Name" readonly />
-    <input type="text" id="chatInput" placeholder="Press Enter to send" value="hello world" />
+    <input type="text" id="chatUsername" placeholder="Name" />
+    <input type="text" id="chatInput" placeholder="@robot pick up the yellow cube and put it in the green box" value="@robot pick up the yellow cube and put it in the green box" />
   </div>
   <div class="toast-container" id="toasts"></div>
 
@@ -135,9 +135,11 @@
     const statusText = document.getElementById("statusText");
     initLog(logEl, toastsEl, statusText);
 
-    // ─── Chat username (read-only, set from config) ──
+    // ─── Chat username (editable, persisted in localStorage) ──
     const chatUsernameInput = document.getElementById("chatUsername");
-    chatUsernameInput.value = config.chat.username;
+    chatUsernameInput.value = localStorage.getItem("chatUsername") || "anon-" + Math.random().toString(36).slice(2, 6);
+    localStorage.setItem("chatUsername", chatUsernameInput.value);
+    chatUsernameInput.addEventListener("change", () => localStorage.setItem("chatUsername", chatUsernameInput.value));
 
     // ─── Shared mutable state ────────────────────────
     const appState = {
