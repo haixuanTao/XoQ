@@ -12,8 +12,8 @@
       "enabled": true,
       "label": "Baguette Arm",
       "tags": [],
-      "leftPath": "anon/7e58263812ba/xoq-can-can0",
-      "rightPath": "anon/7e58263812ba/xoq-can-can1",
+      "leftPath": "anon/7e58263812ba/xoq-can-can0-test",
+      "rightPath": "anon/7e58263812ba/xoq-can-can1-test",
       "position": {
         "x": 0,
         "y": 0,
