@@ -5,7 +5,7 @@ import DEFAULT_CONFIG from "./default-config.json";
 export const LS_KEY = "openarm.config";
 export const LS_PREFIX = "openarm.";
 // Bump this to force all browsers to reload default config (clears localStorage)
-const CONFIG_REVISION = 2;
+const CONFIG_REVISION = 3;
 
 export function defaultConfig() {
   return structuredClone(DEFAULT_CONFIG);
