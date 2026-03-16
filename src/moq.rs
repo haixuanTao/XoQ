@@ -98,11 +98,14 @@ impl MoqBuilder {
             .producer
             .publish_broadcast("", broadcast.consumer.clone());
 
-        let session = client
-            .with_publish(origin.consumer.clone())
-            .with_consume(origin.producer.clone())
-            .connect(url)
-            .await?;
+        let session = tokio::time::timeout(Duration::from_secs(15), {
+            client
+                .with_publish(origin.consumer.clone())
+                .with_consume(origin.producer.clone())
+                .connect(url)
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("MoQ connect timed out (15s)"))??;
 
         Ok(MoqConnection {
             broadcast: broadcast.producer,
@@ -123,7 +126,12 @@ impl MoqBuilder {
             .producer
             .publish_broadcast("", broadcast.consumer.clone());
 
-        let session = client.with_publish(origin.consumer).connect(url).await?;
+        let session = tokio::time::timeout(
+            Duration::from_secs(15),
+            client.with_publish(origin.consumer).connect(url),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("MoQ connect timed out (15s)"))??;
 
         Ok(MoqPublisher {
             broadcast: broadcast.producer,
@@ -156,7 +164,12 @@ impl MoqBuilder {
             .producer
             .publish_broadcast("", broadcast.consumer.clone());
 
-        let session = client.with_publish(origin.consumer).connect(url).await?;
+        let session = tokio::time::timeout(
+            Duration::from_secs(15),
+            client.with_publish(origin.consumer).connect(url),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("MoQ connect timed out (15s)"))??;
 
         Ok((
             MoqPublisher {
@@ -176,7 +189,12 @@ impl MoqBuilder {
         let client = self.create_client()?;
         let origin = Origin::produce();
 
-        let session = client.with_consume(origin.producer).connect(url).await?;
+        let session = tokio::time::timeout(
+            Duration::from_secs(15),
+            client.with_consume(origin.producer).connect(url),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("MoQ connect timed out (15s)"))??;
 
         Ok(MoqSubscriber {
             origin_consumer: origin.consumer,
