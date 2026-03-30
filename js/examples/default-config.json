@@ -70,14 +70,14 @@
       "tags": [],
       "path": "anon/7e58263812ba/realsense-243222073892",
       "position": {
-        "x": -0.26,
+        "x": -0.24,
         "y": 0.78,
-        "z": 0.25
+        "z": 0.3
       },
       "rotation": {
         "roll": 94.9,
         "pitch": -2.3,
-        "yaw": -47
+        "yaw": -44
       },
       "showColor": true,
       "pointSize": 2
@@ -89,7 +89,7 @@
       "tags": [],
       "path": "anon/a13af1d39199/realsense-233522074606",
       "position": {
-        "x": -0.26,
+        "x": -0.22,
         "y": 0.71,
         "z": 0.3
       },
