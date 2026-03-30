@@ -10,10 +10,14 @@ export function initLog(logEl, toastsEl, statusEl) {
   _statusEl = statusEl;
 }
 
-export function log(msg, type = "info", { toast: showToast = true } = {}) {
+export function log(msg, type = "info", { toast: showToast = true, html } = {}) {
   const entry = document.createElement("div");
   entry.className = `log-entry log-${type}`;
-  entry.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  if (html) {
+    entry.innerHTML = `[${new Date().toLocaleTimeString()}] ${html}`;
+  } else {
+    entry.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  }
   _logEl.appendChild(entry);
   if (_logEl.children.length > 200) _logEl.removeChild(_logEl.firstChild);
   _logEl.scrollTop = _logEl.scrollHeight;

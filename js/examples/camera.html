@@ -243,15 +243,21 @@
         throw new Error("No codec detected");
       }
       const mime = `video/mp4; codecs="${codec}"`;
-      if (!MediaSource.isTypeSupported(mime)) {
+      const MSE = window.MediaSource || window.ManagedMediaSource;
+      if (!MSE || !MSE.isTypeSupported(mime)) {
         log(`Codec not supported: ${mime}`, "error");
         throw new Error(`Codec not supported: ${mime}`);
       }
       log(`Detected codec: ${codec}`, "success");
 
       return new Promise((resolve, reject) => {
-        mediaSource = new MediaSource();
-        video.src = URL.createObjectURL(mediaSource);
+        mediaSource = new MSE();
+        if (window.ManagedMediaSource && mediaSource instanceof ManagedMediaSource) {
+          video.disableRemotePlayback = true;
+          video.srcObject = mediaSource;
+        } else {
+          video.src = URL.createObjectURL(mediaSource);
+        }
 
         mediaSource.addEventListener("sourceopen", () => {
           log("MediaSource opened", "success");

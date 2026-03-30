@@ -11,7 +11,7 @@
 <body>
   <script>
     (function() {
-      var hasMSE = typeof MediaSource !== 'undefined';
+      var hasMSE = typeof MediaSource !== 'undefined' || typeof ManagedMediaSource !== 'undefined';
       var hasWebCodecs = typeof VideoDecoder !== 'undefined';
       if (!hasMSE) {
         document.addEventListener('DOMContentLoaded', function() {

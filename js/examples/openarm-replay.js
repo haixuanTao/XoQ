@@ -814,8 +814,9 @@ export class ReplayController {
       }
     }
 
-    // ── Pre-parse CAN events ──
-    for (const ct of canTracks) {
+    // ── Pre-parse CAN events (tag each with armIdx for per-arm routing) ──
+    for (let ci = 0; ci < canTracks.length; ci++) {
+      const ct = canTracks[ci];
       const frags = this.fragments.filter(f => f.trackId === ct.trackId);
       const timescale = ct.timescale || 1000;
       for (const frag of frags) {
@@ -824,7 +825,7 @@ export class ReplayController {
         for (const sample of frag.samples) {
           const sampleData = this.fileData.subarray(sampleOffset, sampleOffset + sample.size);
           const timeMs = (timeUnits / timescale) * 1000 - this._timeOffsetMs;
-          this.canEvents.push({ timeMs, data: sampleData });
+          this.canEvents.push({ timeMs, data: sampleData, armIdx: ci });
           timeUnits += sample.duration;
           sampleOffset += sample.size;
         }
@@ -1064,7 +1065,10 @@ export class ReplayController {
       }
     }
 
-    // Pre-parse CAN events (from .mp4 fMP4 tracks)
+    // Pre-parse CAN events, tagging each with armIdx for per-arm routing.
+    // armIdx assignment: fMP4 CAN tracks first, then .bin CAN files, then .log files.
+    // Sort .log files by name so left/right order matches arm config order.
+    let canArmIdx = 0;
     for (const { track: ct, fileData: cFileData, fragments: cAllFrags, _fileOffsetMs: cOffsetMs } of allCan) {
       const frags = cAllFrags.filter(f => f.trackId === ct.trackId);
       const timescale = ct.timescale || 1000;
@@ -1074,28 +1078,33 @@ export class ReplayController {
         for (const sample of frag.samples) {
           const sampleData = cFileData.subarray(sampleOffset, sampleOffset + sample.size);
           const timeMs = (timeUnits / timescale) * 1000 - (cOffsetMs || 0);
-          this.canEvents.push({ timeMs, data: sampleData });
+          this.canEvents.push({ timeMs, data: sampleData, armIdx: canArmIdx });
           timeUnits += sample.duration;
           sampleOffset += sample.size;
         }
       }
+      canArmIdx++;
     }
     // CAN events from .bin files
     for (const bp of binParsed) {
       if (bp.isCan) {
         for (const evt of bp.events) {
-          this.canEvents.push({ timeMs: evt.timeMs, data: evt.data });
+          this.canEvents.push({ timeMs: evt.timeMs, data: evt.data, armIdx: canArmIdx });
         }
+        canArmIdx++;
       }
     }
-    // CAN events from .log files (candump format)
+    // CAN events from .log files (candump format) — sort by filename for stable arm ordering
+    logParsed.sort((a, b) => a.file.name.localeCompare(b.file.name));
     for (const lp of logParsed) {
       for (const evt of lp.events) {
-        this.canEvents.push({ timeMs: evt.timeMs, data: evt.data });
+        this.canEvents.push({ timeMs: evt.timeMs, data: evt.data, armIdx: canArmIdx });
       }
+      log(`  ${lp.file.name} → arm ${canArmIdx}`, 'data');
+      canArmIdx++;
     }
     this.canEvents.sort((a, b) => a.timeMs - b.timeMs);
-    if (this.canEvents.length > 0) log(`CAN: ${this.canEvents.length} events`, 'data');
+    if (this.canEvents.length > 0) log(`CAN: ${this.canEvents.length} events across ${canArmIdx} sources`, 'data');
 
     // Pre-parse metadata events (from .mp4 fMP4 tracks)
     for (let mi = 0; mi < allMeta.length; mi++) {
@@ -1276,9 +1285,11 @@ export class ReplayController {
         if (jointIdx < 0) continue;
         const state = parseDamiaoState(frame.data);
         if (!state) continue;
-        // Apply to all arm states — CAN events from recording may cover multiple arms
-        // The CAN track is merged across all CAN sources, so we apply to the first arm pair
-        for (const armState of this.armStates) {
+        // Route to specific arm if armIdx is tagged, otherwise fall back to all arms
+        const armState = (evt.armIdx !== undefined && this.armStates[evt.armIdx])
+          ? this.armStates[evt.armIdx]
+          : null;
+        if (armState) {
           if (jointIdx < armState.length) {
             armState[jointIdx].targetAngle = state.qRad;
             armState[jointIdx].velocity = state.vel;
@@ -1286,6 +1297,17 @@ export class ReplayController {
             armState[jointIdx].tempMos = state.tempMos;
             armState[jointIdx].tempRotor = state.tempRotor;
             armState[jointIdx].updated = true;
+          }
+        } else {
+          for (const as of this.armStates) {
+            if (jointIdx < as.length) {
+              as[jointIdx].targetAngle = state.qRad;
+              as[jointIdx].velocity = state.vel;
+              as[jointIdx].torque = state.tau;
+              as[jointIdx].tempMos = state.tempMos;
+              as[jointIdx].tempRotor = state.tempRotor;
+              as[jointIdx].updated = true;
+            }
           }
         }
       }

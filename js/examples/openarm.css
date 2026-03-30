@@ -209,6 +209,7 @@ body {
   z-index: 100;
 }
 .log-panel.tab-visible { display: block; }
+.log-panel.tab-visible ~ .toast-container { display: none; }
 .log-entry { margin: 0.15rem 0; }
 .log-info { color: #888; }
 .log-success { color: #2ed573; }

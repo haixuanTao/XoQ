@@ -48,33 +48,42 @@ async function subscribeArmOnce(config, appState, label, path, jointState) {
 
   try {
     const broadcast = conn.consume(Moq.Path.from(""));
-    const canTrack = broadcast.subscribe("can", 0);
-    log(`[${label}] Subscribed to 'can' track`, "success", { toast: false });
 
     while (appState.running) {
-      const group = await canTrack.nextGroup();
-      if (!group) { log(`[${label}] can track ended`); break; }
-      while (appState.running) {
-        const frame = await group.readFrame();
-        if (!frame) break;
-        const bytes = new Uint8Array(frame);
-        appState.bytesTotal += bytes.length;
-        appState.recorder?.onData(`can_${label}`, bytes, 'can');
-        const canFrames = parseAllCanFrames(bytes);
-        appState.frameCount += canFrames.length;
-        appState.fpsCounter += canFrames.length;
-        for (const parsed of canFrames) {
-          const jointIdx = canIdToJointIdx(parsed.canId);
-          if (jointIdx < 0) continue;
-          const state = parseDamiaoState(parsed.data);
-          if (!state) continue;
-          jointState[jointIdx].targetAngle = state.qRad;
-          jointState[jointIdx].velocity = state.vel;
-          jointState[jointIdx].torque = state.tau;
-          jointState[jointIdx].tempMos = state.tempMos;
-          jointState[jointIdx].tempRotor = state.tempRotor;
-          jointState[jointIdx].updated = true;
+      const canTrack = broadcast.subscribe("can", 0);
+
+      try {
+        while (appState.running) {
+          const group = await canTrack.nextGroup();
+          if (!group) break;
+          while (appState.running) {
+            const frame = await group.readFrame();
+            if (!frame) break;
+            const bytes = new Uint8Array(frame);
+            appState.bytesTotal += bytes.length;
+            appState.recorder?.onData(`can_${label}`, bytes, 'can');
+            const canFrames = parseAllCanFrames(bytes);
+            appState.frameCount += canFrames.length;
+            appState.fpsCounter += canFrames.length;
+            for (const parsed of canFrames) {
+              const jointIdx = canIdToJointIdx(parsed.canId);
+              if (jointIdx < 0) continue;
+              const state = parseDamiaoState(parsed.data);
+              if (!state) continue;
+              jointState[jointIdx].targetAngle = state.qRad;
+              jointState[jointIdx].velocity = state.vel;
+              jointState[jointIdx].torque = state.tau;
+              jointState[jointIdx].tempMos = state.tempMos;
+              jointState[jointIdx].tempRotor = state.tempRotor;
+              jointState[jointIdx].updated = true;
+            }
+          }
         }
+      } catch (e) {
+        // Track reset (e.g. RESET_STREAM when idle) — wait then re-subscribe on same connection
+        if (!appState.running) break;
+        log(`[${label}] Track reset, re-subscribing in 5s...`, 'data', { toast: false });
+        await new Promise(r => setTimeout(r, 5000));
       }
     }
   } finally {

@@ -28,6 +28,13 @@ export function createChatState() {
   };
 }
 
+function chatLogHtml(msg) {
+  const color = userColor(msg.name);
+  const name = msg.name.replace(/</g, '&lt;');
+  const text = (msg.text || '').replace(/</g, '&lt;');
+  return `<span style="color:${color};font-weight:bold">${name}</span><span style="color:#fff">: ${text}</span>`;
+}
+
 function showChatMessage(msg, toastsEl) {
   const toast = document.createElement("div");
   toast.className = "toast toast-chat toast-sticky";
@@ -58,6 +65,7 @@ export function sendChatMessage(text, chatState, getUsername, toastsEl) {
       log(`[chat] Send error: ${e.message}`, 'error');
     }
   }
+  log(null, 'data', { toast: false, html: chatLogHtml(msg) });
   showChatMessage(msg, toastsEl);
 }
 
@@ -96,6 +104,7 @@ async function subscribeToChatUser(chatState, username, toastsEl) {
     while (chatState.running) {
       const msg = await track.readJson();
       if (!msg) break;
+      log(null, 'data', { toast: false, html: chatLogHtml(msg) });
       showChatMessage(msg, toastsEl);
     }
   } catch (e) {

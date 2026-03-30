@@ -9,16 +9,18 @@ export async function diagnoseCodecSupport() {
   results.isSafari = /Safari/.test(navigator.userAgent) && !/Chrome/.test(navigator.userAgent);
   results.hasWebTransport = typeof WebTransport !== 'undefined';
   results.hasMediaSource = typeof MediaSource !== 'undefined';
+  results.hasManagedMediaSource = typeof ManagedMediaSource !== 'undefined';
   results.hasVideoDecoder = typeof VideoDecoder !== 'undefined';
   results.hasEncodedVideoChunk = typeof EncodedVideoChunk !== 'undefined';
   results.hasOffscreenCanvas = typeof OffscreenCanvas !== 'undefined';
 
   // MSE codec support
-  if (results.hasMediaSource) {
+  const DiagMSE = window.MediaSource || window.ManagedMediaSource;
+  if (DiagMSE) {
     results.mse = {};
     for (const codec of ['av01.0.05M.08', 'av01.0.05M.10', 'avc1.640028', 'avc1.42E01E', 'hev1.1.6.L93.B0']) {
       const mime = `video/mp4; codecs="${codec}"`;
-      results.mse[codec] = MediaSource.isTypeSupported(mime);
+      results.mse[codec] = DiagMSE.isTypeSupported(mime);
     }
   }
 
@@ -505,7 +507,8 @@ export function stripTimestamp(bytes, latencyStats) {
 
 // ─── DepthDecoder (WebCodecs with auto-fallback to MSE) ────────
 const HAS_WEBCODECS = typeof VideoDecoder !== 'undefined';
-const HAS_MSE = typeof MediaSource !== 'undefined';
+const MSE = window.MediaSource || window.ManagedMediaSource;
+const HAS_MSE = !!MSE;
 export { HAS_WEBCODECS };
 
 export class DepthDecoder {
@@ -1033,7 +1036,7 @@ export class MsePlayer {
   initMse(codec, initData) {
     const mime = `video/mp4; codecs="${codec}"`;
     log(`${this.label}: ${mime}`, "data");
-    if (!MediaSource.isTypeSupported(mime)) {
+    if (!MSE.isTypeSupported(mime)) {
       const isAv1 = codec.startsWith('av01');
       const isSafari = /Safari/.test(navigator.userAgent) && !/Chrome/.test(navigator.userAgent);
       if (isAv1 && isSafari) {
@@ -1043,8 +1046,14 @@ export class MsePlayer {
       }
       return;
     }
-    this.ms = new MediaSource();
-    this.video.src = URL.createObjectURL(this.ms);
+    this.ms = new MSE();
+    // ManagedMediaSource (iOS Safari 17+) requires srcObject; regular MediaSource uses blob URL
+    if (window.ManagedMediaSource && this.ms instanceof ManagedMediaSource) {
+      this.video.disableRemotePlayback = true;
+      this.video.srcObject = this.ms;
+    } else {
+      this.video.src = URL.createObjectURL(this.ms);
+    }
     this.ms.addEventListener('sourceopen', () => {
       try {
         this.sb = this.ms.addSourceBuffer(mime);
@@ -1080,6 +1089,7 @@ export class MsePlayer {
     this.queue = []; this.ready = false;
     if (this.ms && this.ms.readyState === 'open') try { this.ms.endOfStream(); } catch {}
     this.video.src = '';
+    this.video.srcObject = null;
   }
 }
 
