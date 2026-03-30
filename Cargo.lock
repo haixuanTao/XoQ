@@ -6292,14 +6292,12 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "video-toolbox-sys"
 version = "0.2.0"
-source = "git+https://github.com/haixuantao/video-toolbox-sys#ae90dbbea2a1e5870be1b2907f5be4287163b3c9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cbdfabccc81303971e22b8cc72c3b0f20369ac71c821fffca0053ec775b8e583"
 dependencies = [
- "core-foundation 0.9.4",
  "core-foundation-sys 0.8.7",
  "core-media-sys",
  "libc",
- "objc2",
- "objc2-foundation",
 ]
 
 [[package]]
@@ -7262,7 +7260,7 @@ dependencies = [
 
 [[package]]
 name = "xoq"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "anyhow",
  "block2",
