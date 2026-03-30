@@ -236,6 +236,35 @@
 
     let initSegmentData = null; // Buffer first segment to detect codec
 
+    // Strip 8-byte timestamp prefix if present (data doesn't start with ftyp box)
+    function stripTimestamp(data) {
+      const d = new Uint8Array(data);
+      if (d.length >= 16 && !(d[4]===0x66 && d[5]===0x74 && d[6]===0x79 && d[7]===0x70)) {
+        // Check if ftyp or moof follows at offset 8
+        if ((d[12]===0x66 && d[13]===0x74 && d[14]===0x79 && d[15]===0x70) ||
+            (d[12]===0x6d && d[13]===0x6f && d[14]===0x6f && d[15]===0x66) ||
+            (d[12]===0x73 && d[13]===0x74 && d[14]===0x79 && d[15]===0x70)) {
+          return d.subarray(8);
+        }
+      }
+      return d;
+    }
+
+    // Find offset of first moof or styp box (to skip repeated ftyp+moov init segments)
+    function findMediaOffset(d) {
+      let i = 0;
+      while (i < d.length - 8) {
+        const sz = (d[i]<<24)|(d[i+1]<<16)|(d[i+2]<<8)|d[i+3];
+        const t0 = d[i+4], t1 = d[i+5], t2 = d[i+6], t3 = d[i+7];
+        // styp (0x73747970) or moof (0x6d6f6f66)
+        if ((t0===0x73 && t1===0x74 && t2===0x79 && t3===0x70) ||
+            (t0===0x6d && t1===0x6f && t2===0x6f && t3===0x66)) return i;
+        if (sz < 8) break;
+        i += sz;
+      }
+      return 0;
+    }
+
     async function initMSE(firstSegment) {
       const codec = detectCodec(firstSegment);
       if (!codec) {
@@ -327,28 +356,30 @@
             groupCount++;
             bytesReceived += frame.byteLength;
 
-            const view = new Uint8Array(frame);
-            const header = Array.from(view.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' ');
+            // Strip 8-byte timestamp prefix if present
+            let segment = stripTimestamp(frame);
 
-            if (groupCount === 1) {
-              log(`First segment: ${frame.byteLength} bytes [${header}...]`, "data");
-              if (view[4] === 0x66 && view[5] === 0x74 && view[6] === 0x79 && view[7] === 0x70) {
-                log("Valid ftyp box detected (init segment)", "success");
-              } else if (view[4] === 0x6d && view[5] === 0x6f && view[6] === 0x6f && view[7] === 0x66) {
-                log("moof box (media segment without init?)", "error");
-              }
-            } else if (groupCount <= 5) {
-              const boxType = String.fromCharCode(view[4], view[5], view[6], view[7]);
-              log(`Segment ${groupCount}: ${frame.byteLength} bytes, box=${boxType}`, "data");
+            const view = segment;
+            const hasFtyp = view.length >= 8 && view[4]===0x66 && view[5]===0x74 && view[6]===0x79 && view[7]===0x70;
+
+            if (groupCount <= 3) {
+              const header = Array.from(view.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' ');
+              log(`Segment ${groupCount}: ${segment.length} bytes [${header}...] ftyp=${hasFtyp}`, "data");
             }
 
-            // Initialize MSE on first segment (auto-detect codec from init data)
-            if (!mseInitialized) {
-              await initMSE(frame);
+            // Initialize MSE on first segment with init data (ftyp+moov)
+            if (!mseInitialized && hasFtyp) {
+              await initMSE(segment);
               mseInitialized = true;
             }
 
-            await appendBuffer(frame);
+            // For subsequent segments with repeated init (ftyp+moov), strip to media portion
+            if (mseInitialized && hasFtyp && groupCount > 1) {
+              const mediaOff = findMediaOffset(segment);
+              if (mediaOff > 0) segment = segment.subarray(mediaOff);
+            }
+
+            await appendBuffer(segment);
             updateStats();
           }
         }

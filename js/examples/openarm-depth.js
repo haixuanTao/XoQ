@@ -1072,16 +1072,32 @@ export class MsePlayer {
               if (this.video.currentTime < start || end - this.video.currentTime > 0.15) {
                 this.video.currentTime = Math.max(start, end - 0.03);
               }
-              if (end - start > 4 && !this.sb.updating) try { this.sb.remove(start, end - 2); } catch {}
             }
           }, 100);
         }
       } catch (e) { log(`${this.label}: init failed: ${e.message}`, "error"); }
     });
   }
-  enqueue(d) { this.queue.push(d); this.flush(); }
+  enqueue(d) {
+    this.queue.push(d);
+    // In live mode, drop stale segments if queue backs up (keep init + latest)
+    if (this.liveMode && this.queue.length > 3) {
+      this.queue.splice(1, this.queue.length - 2);
+    }
+    this.flush();
+  }
   flush() {
-    if (!this.sb || this.sb.updating || !this.queue.length) return;
+    if (!this.sb || this.sb.updating) return;
+    // Prioritize buffer trimming over appending to prevent unbounded growth
+    if (this.liveMode && this.video.buffered.length > 0) {
+      const start = this.video.buffered.start(0);
+      const end = this.video.buffered.end(this.video.buffered.length - 1);
+      if (end - start > 4) {
+        try { this.sb.remove(start, end - 2); } catch {}
+        return; // updateend will call flush() again to append
+      }
+    }
+    if (!this.queue.length) return;
     try { this.sb.appendBuffer(this.queue.shift()); } catch (e) { log(`${this.label}: ${e.message}`, "error"); }
   }
   destroy() {

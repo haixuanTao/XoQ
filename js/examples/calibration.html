@@ -1,0 +1,905 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RealSense Calibration - Table Level Check</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 1rem;
+      background: #1a1a2e;
+      color: #eee;
+    }
+    h1 { color: #00d4ff; margin-bottom: 0.5rem; }
+    .subtitle { color: #888; margin-bottom: 1.5rem; }
+
+    .controls {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      margin-bottom: 1rem;
+      align-items: center;
+    }
+    .controls label {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .controls input[type="text"] {
+      padding: 0.5rem;
+      border: 1px solid #444;
+      border-radius: 4px;
+      background: #2a2a4a;
+      color: #fff;
+      width: 300px;
+    }
+    button {
+      padding: 0.5rem 1rem;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 1rem;
+      transition: background 0.2s;
+    }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    #startBtn { background: #00d4ff; color: #000; }
+    #startBtn:hover:not(:disabled) { background: #00b8e6; }
+    #stopBtn { background: #ff4757; color: #fff; }
+    #stopBtn:hover:not(:disabled) { background: #ff3344; }
+
+    .main-panel {
+      display: flex;
+      gap: 1.5rem;
+      margin-bottom: 1rem;
+      flex-wrap: wrap;
+    }
+
+    .level-container {
+      flex: 0 0 300px;
+    }
+    #levelCanvas {
+      background: #0a0a1a;
+      border-radius: 50%;
+      border: 2px solid #333;
+    }
+
+    .stats-panel {
+      flex: 1;
+      min-width: 200px;
+    }
+    .stat-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 0.5rem 0.75rem;
+      border-bottom: 1px solid #2a2a4a;
+    }
+    .stat-label { color: #888; }
+    .stat-value { font-weight: bold; color: #00d4ff; font-variant-numeric: tabular-nums; }
+    .stat-value.green { color: #2ed573; }
+    .stat-value.yellow { color: #ffa502; }
+    .stat-value.red { color: #ff4757; }
+
+    .status-banner {
+      font-size: 1.4rem;
+      font-weight: bold;
+      text-align: center;
+      padding: 0.75rem;
+      border-radius: 8px;
+      margin-bottom: 1rem;
+    }
+    .status-banner.green { background: #2ed57322; color: #2ed573; }
+    .status-banner.yellow { background: #ffa50222; color: #ffa502; }
+    .status-banner.red { background: #ff475722; color: #ff4757; }
+    .status-banner.gray { background: #44444422; color: #888; }
+
+    .sliders {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 0.75rem;
+      margin-bottom: 1rem;
+    }
+    .slider-group {
+      background: #2a2a4a;
+      padding: 0.75rem;
+      border-radius: 8px;
+    }
+    .slider-group label {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 0.25rem;
+      font-size: 0.85rem;
+    }
+    .slider-group input[type="range"] {
+      width: 100%;
+      accent-color: #00d4ff;
+    }
+
+    .depth-container {
+      margin-bottom: 1rem;
+    }
+    #depthCanvas {
+      width: 100%;
+      max-width: 640px;
+      border-radius: 8px;
+      border: 1px solid #333;
+      background: #000;
+    }
+
+    #log {
+      background: #0a0a1a;
+      border: 1px solid #333;
+      border-radius: 8px;
+      padding: 1rem;
+      height: 160px;
+      overflow-y: auto;
+      font-family: 'Monaco', 'Menlo', monospace;
+      font-size: 0.8rem;
+    }
+    .log-entry { margin: 0.2rem 0; }
+    .log-info { color: #888; }
+    .log-success { color: #2ed573; }
+    .log-error { color: #ff4757; }
+    .log-data { color: #00d4ff; }
+
+    .error-banner {
+      background: #ff475722;
+      border: 1px solid #ff4757;
+      color: #ff4757;
+      padding: 1rem;
+      border-radius: 8px;
+      margin-bottom: 1rem;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <h1>RealSense Calibration</h1>
+  <p class="subtitle">Table Level Check &mdash; Mount camera parallel to table surface</p>
+
+  <div id="errorBanner" class="error-banner"></div>
+
+  <div class="controls">
+    <label>
+      Relay:
+      <input type="text" id="relayUrl" />
+    </label>
+    <label>
+      Path:
+      <input type="text" id="path" />
+    </label>
+  </div>
+  <div class="controls">
+    <button id="startBtn">Connect</button>
+    <button id="stopBtn" disabled>Disconnect</button>
+  </div>
+
+  <div id="statusBanner" class="status-banner gray">Waiting for depth data...</div>
+
+  <div class="video-container" style="background:#000;border-radius:8px;overflow:hidden;margin-bottom:1rem;max-width:640px;aspect-ratio:16/9;">
+    <video id="video" autoplay muted playsinline style="width:100%;height:100%;display:block;"></video>
+  </div>
+
+  <div class="main-panel">
+    <div class="level-container">
+      <canvas id="levelCanvas" width="300" height="300"></canvas>
+    </div>
+    <div class="stats-panel">
+      <div class="stat-row">
+        <span class="stat-label">Roll</span>
+        <span class="stat-value" id="rollVal">&mdash;</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Pitch</span>
+        <span class="stat-value" id="pitchVal">&mdash;</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Total Tilt</span>
+        <span class="stat-value" id="tiltVal">&mdash;</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">&Delta;h X (left-right)</span>
+        <span class="stat-value" id="elevXVal">&mdash;</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">&Delta;h Y (near-far)</span>
+        <span class="stat-value" id="elevYVal">&mdash;</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">&Delta;h max</span>
+        <span class="stat-value" id="elevMaxVal">&mdash;</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Inliers</span>
+        <span class="stat-value" id="inlierVal">&mdash;</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Valid Points</span>
+        <span class="stat-value" id="pointsVal">&mdash;</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Gravity (IMU)</span>
+        <span class="stat-value" id="gravityVal">&mdash;</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Depth Frames</span>
+        <span class="stat-value" id="frameVal">0</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="sliders">
+    <div class="slider-group">
+      <label>Subsample step: <span id="stepDisp">8</span></label>
+      <input type="range" id="stepSlider" min="4" max="16" value="8" step="1">
+    </div>
+    <div class="slider-group">
+      <label>Min depth (mm): <span id="minDepthDisp">200</span></label>
+      <input type="range" id="minDepthSlider" min="100" max="500" value="200" step="10">
+    </div>
+    <div class="slider-group">
+      <label>Max depth (mm): <span id="maxDepthDisp">900</span></label>
+      <input type="range" id="maxDepthSlider" min="500" max="2000" value="900" step="10">
+    </div>
+    <div class="slider-group">
+      <label>Inlier threshold (mm): <span id="threshDisp">10</span></label>
+      <input type="range" id="threshSlider" min="5" max="30" value="10" step="1">
+    </div>
+  </div>
+
+  <div class="depth-container">
+    <canvas id="depthCanvas" width="640" height="360"></canvas>
+  </div>
+
+  <h3>Log</h3>
+  <div id="log"></div>
+  <div id="toasts" style="display:none"></div>
+
+  <script type="module">
+    import * as Moq from "@moq/lite";
+    import { DepthDecoder, MsePlayer, stripTimestamp, HAS_WEBCODECS } from "./openarm-depth.js";
+    import { initLog } from "./openarm-log.js";
+
+    // ─── Config ──────────────────────────────────────────
+    const params = new URLSearchParams(location.search);
+    const relayInput = document.getElementById("relayUrl");
+    const pathInput = document.getElementById("path");
+    relayInput.value = params.get("relay") || "https://cdn.1ms.ai";
+    pathInput.value = params.get("path") || "anon/7e58263812ba/realsense-243222073892";
+
+    const DEFAULT_INTRINSICS = { fx: 920, fy: 920, ppx: 640, ppy: 360, width: 1280, height: 720 };
+
+    // ─── UI refs ─────────────────────────────────────────
+    const logEl = document.getElementById("log");
+    const toastsEl = document.getElementById("toasts");
+    initLog(logEl, toastsEl, null);
+
+    const startBtn = document.getElementById("startBtn");
+    const stopBtn = document.getElementById("stopBtn");
+    const statusBanner = document.getElementById("statusBanner");
+    const errorBanner = document.getElementById("errorBanner");
+    const levelCanvas = document.getElementById("levelCanvas");
+    const depthCanvas = document.getElementById("depthCanvas");
+    const levelCtx = levelCanvas.getContext("2d");
+    const depthCtx = depthCanvas.getContext("2d");
+
+    const rollEl = document.getElementById("rollVal");
+    const pitchEl = document.getElementById("pitchVal");
+    const tiltEl = document.getElementById("tiltVal");
+    const elevXEl = document.getElementById("elevXVal");
+    const elevYEl = document.getElementById("elevYVal");
+    const elevMaxEl = document.getElementById("elevMaxVal");
+    const inlierEl = document.getElementById("inlierVal");
+    const pointsEl = document.getElementById("pointsVal");
+    const gravityEl = document.getElementById("gravityVal");
+    const frameEl = document.getElementById("frameVal");
+
+    const stepSlider = document.getElementById("stepSlider");
+    const minDepthSlider = document.getElementById("minDepthSlider");
+    const maxDepthSlider = document.getElementById("maxDepthSlider");
+    const threshSlider = document.getElementById("threshSlider");
+    const stepDisp = document.getElementById("stepDisp");
+    const minDepthDisp = document.getElementById("minDepthDisp");
+    const maxDepthDisp = document.getElementById("maxDepthDisp");
+    const threshDisp = document.getElementById("threshDisp");
+
+    stepSlider.oninput = () => stepDisp.textContent = stepSlider.value;
+    minDepthSlider.oninput = () => minDepthDisp.textContent = minDepthSlider.value;
+    maxDepthSlider.oninput = () => maxDepthDisp.textContent = maxDepthSlider.value;
+    threshSlider.oninput = () => threshDisp.textContent = threshSlider.value;
+
+    // ─── State ───────────────────────────────────────────
+    let connection = null;
+    let running = false;
+    let decoder = null;
+    let colorPlayer = null;
+    let intrinsics = null;
+    let gravity = null;
+    let frameCount = 0;
+    let analysisTimer = null;
+    let latency = { ms: 0, lastUpdate: 0, sum: 0, samples: 0 };
+    const videoEl = document.getElementById("video");
+    // Track which pixels are inliers for depth overlay
+    let lastInlierSet = null;
+    let lastAnalysisW = 0, lastAnalysisH = 0;
+
+    // ─── Logging ─────────────────────────────────────────
+    function log(msg, type = "info") {
+      const entry = document.createElement("div");
+      entry.className = `log-entry log-${type}`;
+      entry.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      logEl.appendChild(entry);
+      logEl.scrollTop = logEl.scrollHeight;
+      console.log(msg);
+    }
+
+    // ─── WebCodecs check ─────────────────────────────────
+    if (!HAS_WEBCODECS) {
+      errorBanner.textContent = "WebCodecs not supported in this browser. Depth decoding requires WebCodecs (Chrome/Edge recommended).";
+      errorBanner.style.display = "block";
+      startBtn.disabled = true;
+    }
+
+    // ─── Bubble Level Drawing ────────────────────────────
+    function drawBubbleLevel(rollDeg, pitchDeg, totalDeg) {
+      const w = levelCanvas.width, h = levelCanvas.height;
+      const cx = w / 2, cy = h / 2, r = w / 2 - 10;
+      levelCtx.clearRect(0, 0, w, h);
+
+      // Background circle
+      levelCtx.beginPath();
+      levelCtx.arc(cx, cy, r, 0, Math.PI * 2);
+      levelCtx.fillStyle = "#0a0a1a";
+      levelCtx.fill();
+      levelCtx.strokeStyle = "#333";
+      levelCtx.lineWidth = 2;
+      levelCtx.stroke();
+
+      // Concentric rings at 1, 3, 5 degrees
+      const ringDegs = [1, 3, 5];
+      const maxDeg = 6;
+      for (const deg of ringDegs) {
+        const rr = (deg / maxDeg) * r;
+        levelCtx.beginPath();
+        levelCtx.arc(cx, cy, rr, 0, Math.PI * 2);
+        levelCtx.strokeStyle = deg === 1 ? "#2ed57355" : deg === 3 ? "#ffa50255" : "#ff475755";
+        levelCtx.lineWidth = 1;
+        levelCtx.stroke();
+        // Label
+        levelCtx.fillStyle = "#555";
+        levelCtx.font = "10px system-ui";
+        levelCtx.textAlign = "center";
+        levelCtx.fillText(`${deg}\u00B0`, cx, cy - rr + 12);
+      }
+
+      // Crosshair
+      levelCtx.strokeStyle = "#333";
+      levelCtx.lineWidth = 0.5;
+      levelCtx.beginPath();
+      levelCtx.moveTo(cx - r, cy); levelCtx.lineTo(cx + r, cy);
+      levelCtx.moveTo(cx, cy - r); levelCtx.lineTo(cx, cy + r);
+      levelCtx.stroke();
+
+      if (rollDeg == null) return;
+
+      // Dot position: roll maps to X, pitch maps to Y
+      const clampedTotal = Math.min(totalDeg, maxDeg);
+      const scale = (clampedTotal / maxDeg) * r;
+      // Normalize direction from roll/pitch
+      const mag = Math.sqrt(rollDeg * rollDeg + pitchDeg * pitchDeg) || 1;
+      const dotX = cx + (rollDeg / mag) * scale;
+      const dotY = cy + (pitchDeg / mag) * scale;
+
+      // Dot color
+      const color = totalDeg < 1 ? "#2ed573" : totalDeg < 3 ? "#ffa502" : "#ff4757";
+
+      // Trail / glow
+      const grad = levelCtx.createRadialGradient(dotX, dotY, 0, dotX, dotY, 20);
+      grad.addColorStop(0, color + "88");
+      grad.addColorStop(1, color + "00");
+      levelCtx.fillStyle = grad;
+      levelCtx.fillRect(dotX - 20, dotY - 20, 40, 40);
+
+      // Dot
+      levelCtx.beginPath();
+      levelCtx.arc(dotX, dotY, 8, 0, Math.PI * 2);
+      levelCtx.fillStyle = color;
+      levelCtx.fill();
+      levelCtx.strokeStyle = "#fff";
+      levelCtx.lineWidth = 2;
+      levelCtx.stroke();
+
+      // Center target
+      levelCtx.beginPath();
+      levelCtx.arc(cx, cy, 3, 0, Math.PI * 2);
+      levelCtx.fillStyle = "#555";
+      levelCtx.fill();
+    }
+
+    // ─── Draw depth debug canvas ─────────────────────────
+    function drawDepthDebug() {
+      if (!decoder || !decoder.latestY) return;
+      const w = decoder.width, h = decoder.height;
+      if (w === 0 || h === 0) return;
+
+      // Scale to fit canvas
+      const scale = Math.min(depthCanvas.width / w, depthCanvas.height / h);
+      const dw = Math.floor(w * scale), dh = Math.floor(h * scale);
+
+      const imgData = depthCtx.createImageData(dw, dh);
+      const pixels = imgData.data;
+      const Y = decoder.latestY;
+      const is10bit = decoder.is10bit;
+      const step = parseInt(stepSlider.value);
+
+      // Inlier set for overlay
+      const inliers = lastInlierSet;
+      const aW = lastAnalysisW, aH = lastAnalysisH;
+
+      for (let dy = 0; dy < dh; dy++) {
+        const sy = Math.floor(dy / scale);
+        for (let dx = 0; dx < dw; dx++) {
+          const sx = Math.floor(dx / scale);
+          const gray = Y[sy * w + sx];
+          const depth_mm = is10bit ? gray : (gray << 4);
+          // Normalize to 0-255 for display (0-2000mm range)
+          const v = Math.min(255, Math.floor(depth_mm * 255 / 2000));
+          const idx = (dy * dw + dx) * 4;
+
+          // Check if this pixel is an inlier (approximate via step grid)
+          let isInlier = false;
+          if (inliers && aW > 0) {
+            const gu = Math.floor(sx / step);
+            const gv = Math.floor(sy / step);
+            const gi = gv * aW + gu;
+            if (gi < inliers.length) isInlier = inliers[gi];
+          }
+
+          if (isInlier) {
+            pixels[idx] = Math.floor(v * 0.3);
+            pixels[idx + 1] = Math.min(255, v + 60);
+            pixels[idx + 2] = Math.floor(v * 0.3);
+          } else {
+            pixels[idx] = v;
+            pixels[idx + 1] = v;
+            pixels[idx + 2] = v;
+          }
+          pixels[idx + 3] = 255;
+        }
+      }
+      depthCtx.putImageData(imgData, 0, 0);
+    }
+
+    // ─── RANSAC Plane Fitting ────────────────────────────
+    function fitPlane(points, iterations, threshold) {
+      const n = points.length / 3;
+      if (n < 3) return null;
+
+      let bestNx = 0, bestNy = -1, bestNz = 0, bestD = 0, bestCount = 0;
+
+      for (let iter = 0; iter < iterations; iter++) {
+        // Pick 3 random points
+        const i0 = Math.floor(Math.random() * n) * 3;
+        const i1 = Math.floor(Math.random() * n) * 3;
+        const i2 = Math.floor(Math.random() * n) * 3;
+        if (i0 === i1 || i1 === i2 || i0 === i2) continue;
+
+        // Vectors
+        const ax = points[i1] - points[i0], ay = points[i1 + 1] - points[i0 + 1], az = points[i1 + 2] - points[i0 + 2];
+        const bx = points[i2] - points[i0], by = points[i2 + 1] - points[i0 + 1], bz = points[i2 + 2] - points[i0 + 2];
+
+        // Cross product = normal
+        let nx = ay * bz - az * by;
+        let ny = az * bx - ax * bz;
+        let nz = ax * by - ay * bx;
+        const len = Math.sqrt(nx * nx + ny * ny + nz * nz);
+        if (len < 1e-8) continue;
+        nx /= len; ny /= len; nz /= len;
+
+        // Plane: nx*x + ny*y + nz*z = d
+        const d = nx * points[i0] + ny * points[i0 + 1] + nz * points[i0 + 2];
+
+        // Count inliers
+        let count = 0;
+        for (let j = 0; j < n; j++) {
+          const j3 = j * 3;
+          const dist = Math.abs(nx * points[j3] + ny * points[j3 + 1] + nz * points[j3 + 2] - d);
+          if (dist < threshold) count++;
+        }
+
+        if (count > bestCount) {
+          bestCount = count;
+          bestNx = nx; bestNy = ny; bestNz = nz; bestD = d;
+        }
+      }
+
+      if (bestCount < 10) return null;
+
+      // Refit: compute covariance matrix of inliers, find smallest eigenvector
+      // Collect inlier centroid
+      let cx = 0, cy = 0, cz = 0, inlierCount = 0;
+      const inlierFlags = new Uint8Array(n);
+      for (let j = 0; j < n; j++) {
+        const j3 = j * 3;
+        const dist = Math.abs(bestNx * points[j3] + bestNy * points[j3 + 1] + bestNz * points[j3 + 2] - bestD);
+        if (dist < threshold) {
+          cx += points[j3]; cy += points[j3 + 1]; cz += points[j3 + 2];
+          inlierFlags[j] = 1;
+          inlierCount++;
+        }
+      }
+      cx /= inlierCount; cy /= inlierCount; cz /= inlierCount;
+
+      // 3x3 covariance (symmetric)
+      let c00 = 0, c01 = 0, c02 = 0, c11 = 0, c12 = 0, c22 = 0;
+      for (let j = 0; j < n; j++) {
+        if (!inlierFlags[j]) continue;
+        const j3 = j * 3;
+        const dx = points[j3] - cx, dy = points[j3 + 1] - cy, dz = points[j3 + 2] - cz;
+        c00 += dx * dx; c01 += dx * dy; c02 += dx * dz;
+        c11 += dy * dy; c12 += dy * dz; c22 += dz * dz;
+      }
+
+      // Find smallest eigenvector via power iteration on inverse
+      // For a 3x3, use the analytical approach: normal = eigenvector of smallest eigenvalue
+      // Simple approach: one round of power iteration on adjugate (gives largest eigenvector of adjugate = smallest of cov)
+      const adj = adjugate3x3(c00, c01, c02, c01, c11, c12, c02, c12, c22);
+      // Power iterate on adjugate to find its dominant eigenvector
+      let vx = bestNx, vy = bestNy, vz = bestNz;
+      for (let k = 0; k < 20; k++) {
+        const tx = adj[0] * vx + adj[1] * vy + adj[2] * vz;
+        const ty = adj[3] * vx + adj[4] * vy + adj[5] * vz;
+        const tz = adj[6] * vx + adj[7] * vy + adj[8] * vz;
+        const tlen = Math.sqrt(tx * tx + ty * ty + tz * tz);
+        if (tlen < 1e-12) break;
+        vx = tx / tlen; vy = ty / tlen; vz = tz / tlen;
+      }
+
+      return { nx: vx, ny: vy, nz: vz, inlierCount, totalPoints: n, inlierFlags };
+    }
+
+    // Adjugate (classical adjoint) of a 3x3 symmetric matrix
+    function adjugate3x3(a00, a01, a02, a10, a11, a12, a20, a21, a22) {
+      return [
+        a11 * a22 - a12 * a21, -(a01 * a22 - a02 * a21), a01 * a12 - a02 * a11,
+        -(a10 * a22 - a12 * a20), a00 * a22 - a02 * a20, -(a00 * a12 - a02 * a10),
+        a10 * a21 - a11 * a20, -(a00 * a21 - a01 * a20), a00 * a11 - a01 * a10,
+      ];
+    }
+
+    // ─── Analysis (runs at ~2 Hz) ────────────────────────
+    function runAnalysis() {
+      if (!decoder || !decoder.latestY) {
+        setStatus("Waiting for depth data...", "gray");
+        drawBubbleLevel(null);
+        return;
+      }
+
+      const Y = decoder.latestY;
+      const w = decoder.width, h = decoder.height;
+      const is10bit = decoder.is10bit;
+      if (w === 0 || h === 0) return;
+
+      drawDepthDebug();
+
+      const intr = intrinsics || DEFAULT_INTRINSICS;
+      // Scale intrinsics to actual resolution
+      const scaleX = w / intr.width;
+      const scaleY = h / intr.height;
+      const fx = intr.fx * scaleX;
+      const fy = intr.fy * scaleY;
+      const cx = intr.ppx * scaleX;
+      const cy = intr.ppy * scaleY;
+
+      const step = parseInt(stepSlider.value);
+      const minDepth = parseInt(minDepthSlider.value);
+      const maxDepth = parseInt(maxDepthSlider.value);
+      const threshold = parseInt(threshSlider.value);
+
+      // Subsample and deproject
+      const maxPts = Math.ceil(w / step) * Math.ceil(h / step);
+      const points = new Float32Array(maxPts * 3);
+      // Map from point index back to grid position for inlier overlay
+      const gridW = Math.ceil(w / step);
+      const gridH = Math.ceil(h / step);
+      const pointToGrid = new Uint32Array(maxPts);
+      let n = 0;
+
+      for (let v = 0; v < h; v += step) {
+        for (let u = 0; u < w; u += step) {
+          const gray = Y[v * w + u];
+          if (gray < 2) continue;
+          const depth_mm = is10bit ? gray : (gray << 4);
+          if (depth_mm < minDepth || depth_mm > maxDepth) continue;
+
+          const i3 = n * 3;
+          points[i3] = (u - cx) * depth_mm / fx;
+          points[i3 + 1] = (v - cy) * depth_mm / fy;
+          points[i3 + 2] = depth_mm;
+          const gu = Math.floor(u / step);
+          const gv = Math.floor(v / step);
+          pointToGrid[n] = gv * gridW + gu;
+          n++;
+        }
+      }
+
+      pointsEl.textContent = n.toLocaleString();
+
+      if (n < 100) {
+        setStatus("Waiting for depth data...", "gray");
+        rollEl.textContent = pitchEl.textContent = tiltEl.textContent = "\u2014";
+        inlierEl.textContent = "\u2014";
+        drawBubbleLevel(null);
+        lastInlierSet = null;
+        return;
+      }
+
+      // RANSAC
+      const result = fitPlane(points.subarray(0, n * 3), 100, threshold);
+      if (!result) {
+        setStatus("No flat surface detected", "red");
+        rollEl.textContent = pitchEl.textContent = tiltEl.textContent = "\u2014";
+        inlierEl.textContent = "\u2014";
+        drawBubbleLevel(null);
+        lastInlierSet = null;
+        return;
+      }
+
+      let { nx, ny, nz, inlierCount, totalPoints, inlierFlags } = result;
+      const inlierPct = (inlierCount / totalPoints * 100);
+      inlierEl.textContent = `${inlierPct.toFixed(0)}% (${inlierCount})`;
+
+      // Build inlier grid for depth overlay
+      const inlierGrid = new Uint8Array(gridW * gridH);
+      for (let j = 0; j < totalPoints; j++) {
+        if (inlierFlags[j]) inlierGrid[pointToGrid[j]] = 1;
+      }
+      lastInlierSet = inlierGrid;
+      lastAnalysisW = gridW;
+      lastAnalysisH = gridH;
+
+      if (inlierPct < 20) {
+        setStatus("No flat surface detected", "red");
+        drawBubbleLevel(null);
+        return;
+      }
+
+      // Orient normal toward camera (nz should be negative in optical frame = pointing toward camera)
+      if (nz > 0) { nx = -nx; ny = -ny; nz = -nz; }
+
+      // Check if surface is roughly horizontal
+      // In optical frame: camera looks along +Z, Y is down
+      // A horizontal table below camera has normal pointing up = [0, -1, 0]
+      // Reference "up" direction
+      let upX = 0, upY = -1, upZ = 0;
+      if (gravity) {
+        // gravity = [ax, ay, az] in optical frame
+        // At rest on a table: accel ≈ [0, -9.8, 0] (Y-down convention, upward normal force)
+        // "Up" in optical frame = -gravity / |gravity|
+        const [gx, gy, gz] = gravity;
+        const glen = Math.sqrt(gx * gx + gy * gy + gz * gz);
+        if (glen > 0.5) {
+          upX = -gx / glen;
+          upY = -gy / glen;
+          upZ = -gz / glen;
+        }
+      }
+
+      // Check surface is somewhat horizontal (normal should roughly align with up)
+      const dotUp = Math.abs(nx * upX + ny * upY + nz * upZ);
+      if (dotUp < 0.5) {
+        setStatus("Surface is not horizontal (wall?)", "yellow");
+        drawBubbleLevel(null);
+        return;
+      }
+
+      // Compute tilt angles
+      // Ensure normal points in same hemisphere as up vector
+      const dotSigned = nx * upX + ny * upY + nz * upZ;
+      if (dotSigned < 0) { nx = -nx; ny = -ny; nz = -nz; }
+
+      const totalTilt = Math.acos(Math.min(1, dotUp)) * 180 / Math.PI;
+
+      // Decompose the deviation of the plane normal from "up" into roll/pitch.
+      // Compute the "error" vector: component of normal perpendicular to up.
+      // deviation = normal - dot(normal, up) * up
+      const dot2 = nx * upX + ny * upY + nz * upZ;
+      let devX = nx - dot2 * upX;
+      let devY = ny - dot2 * upY;
+      let devZ = nz - dot2 * upZ;
+
+      // Build a local frame: forward = camera Z axis projected onto plane perp to up
+      // In optical frame camera looks along +Z
+      let fwdX = 0, fwdY = 0, fwdZ = 1;
+      // Remove component along up
+      const fDot = fwdX * upX + fwdY * upY + fwdZ * upZ;
+      fwdX -= fDot * upX; fwdY -= fDot * upY; fwdZ -= fDot * upZ;
+      const fLen = Math.sqrt(fwdX * fwdX + fwdY * fwdY + fwdZ * fwdZ);
+      if (fLen > 1e-6) { fwdX /= fLen; fwdY /= fLen; fwdZ /= fLen; }
+
+      // Right = up x forward
+      const rtX = upY * fwdZ - upZ * fwdY;
+      const rtY = upZ * fwdX - upX * fwdZ;
+      const rtZ = upX * fwdY - upY * fwdX;
+
+      // Roll = deviation projected onto right axis (left/right tilt)
+      // Pitch = deviation projected onto forward axis (forward/back tilt)
+      const rollRad = Math.atan2(devX * rtX + devY * rtY + devZ * rtZ,
+                                  dot2);
+      const pitchRad = Math.atan2(devX * fwdX + devY * fwdY + devZ * fwdZ,
+                                   dot2);
+      const rollDeg = rollRad * 180 / Math.PI;
+      const pitchDeg = pitchRad * 180 / Math.PI;
+
+      // Compute elevation differences across the table surface
+      // Project inlier points onto the right and forward axes to get extents,
+      // then compute height difference = extent * tan(tilt_component)
+      let minRt = Infinity, maxRt = -Infinity;
+      let minFwd = Infinity, maxFwd = -Infinity;
+      let minH = Infinity, maxH = -Infinity;
+      for (let j = 0; j < totalPoints; j++) {
+        if (!inlierFlags[j]) continue;
+        const j3 = j * 3;
+        const px = points[j3], py = points[j3 + 1], pz = points[j3 + 2];
+        // Project onto right axis (left-right)
+        const r = px * rtX + py * rtY + pz * rtZ;
+        // Project onto forward axis (near-far)
+        const f = px * fwdX + py * fwdY + pz * fwdZ;
+        // Project onto up axis (height)
+        const h = px * upX + py * upY + pz * upZ;
+        if (r < minRt) minRt = r; if (r > maxRt) maxRt = r;
+        if (f < minFwd) minFwd = f; if (f > maxFwd) maxFwd = f;
+        if (h < minH) minH = h; if (h > maxH) maxH = h;
+      }
+      const extentX = maxRt - minRt;   // mm, left-right span
+      const extentY = maxFwd - minFwd;  // mm, near-far span
+      const dhX = Math.abs(Math.tan(rollRad) * extentX);   // height diff left-right
+      const dhY = Math.abs(Math.tan(pitchRad) * extentY);  // height diff near-far
+      const dhMax = maxH - minH;  // actual max height spread of inlier points
+
+      elevXEl.textContent = `${dhX.toFixed(1)} mm (over ${(extentX / 10).toFixed(0)} cm)`;
+      elevYEl.textContent = `${dhY.toFixed(1)} mm (over ${(extentY / 10).toFixed(0)} cm)`;
+      elevMaxEl.textContent = `${dhMax.toFixed(1)} mm`;
+
+      // Update UI
+      const colorClass = totalTilt < 1 ? "green" : totalTilt < 3 ? "yellow" : "red";
+      rollEl.textContent = `${rollDeg.toFixed(1)}\u00B0`;
+      rollEl.className = `stat-value ${colorClass}`;
+      pitchEl.textContent = `${pitchDeg.toFixed(1)}\u00B0`;
+      pitchEl.className = `stat-value ${colorClass}`;
+      tiltEl.textContent = `${totalTilt.toFixed(1)}\u00B0`;
+      tiltEl.className = `stat-value ${colorClass}`;
+
+      const statusMsg = totalTilt < 1 ? "Level" : totalTilt < 3 ? "Slightly tilted" : "Tilted";
+      setStatus(`${statusMsg} \u2014 ${totalTilt.toFixed(1)}\u00B0`, colorClass);
+
+      drawBubbleLevel(rollDeg, pitchDeg, totalTilt);
+    }
+
+    function setStatus(msg, colorClass) {
+      statusBanner.textContent = msg;
+      statusBanner.className = `status-banner ${colorClass}`;
+    }
+
+    // ─── MoQ Track Reader ────────────────────────────────
+    async function readTrack(track, handler, name, hasTimestamp = true) {
+      while (running) {
+        const group = await track.nextGroup();
+        if (!group) { log(`${name} track ended`); break; }
+        while (running) {
+          const frame = await group.readFrame();
+          if (!frame) break;
+          const bytes = new Uint8Array(frame);
+          handler(hasTimestamp ? stripTimestamp(bytes, latency) : bytes);
+        }
+      }
+    }
+
+    // ─── Connect / Disconnect ────────────────────────────
+    startBtn.addEventListener("click", async () => {
+      const relay = relayInput.value.trim();
+      const path = pathInput.value.trim();
+      if (!relay || !path) { log("Enter relay and path", "error"); return; }
+
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      running = true;
+      frameCount = 0;
+      intrinsics = null;
+      gravity = null;
+      lastInlierSet = null;
+
+      decoder = new DepthDecoder();
+      colorPlayer = new MsePlayer(videoEl, "Color");
+
+      try {
+        const fullUrl = `${relay}/${path}`;
+        log(`Connecting to ${fullUrl}...`);
+        setStatus("Connecting...", "gray");
+
+        connection = await Moq.Connection.connect(new URL(fullUrl));
+        log("Connected!", "success");
+
+        const broadcast = connection.consume(Moq.Path.from(""));
+
+        // Subscribe to video + depth + metadata tracks
+        const videoTrack = broadcast.subscribe("video", 0);
+        const depthTrack = broadcast.subscribe("depth", 0);
+        const metadataTrack = broadcast.subscribe("metadata", 0);
+        log("Subscribed to video + depth + metadata tracks", "success");
+
+        setStatus("Waiting for depth data...", "gray");
+
+        // Start analysis timer (~2 Hz)
+        analysisTimer = setInterval(runAnalysis, 500);
+
+        // Read tracks in parallel
+        await Promise.all([
+          readTrack(videoTrack, d => {
+            colorPlayer.onData(d);
+          }, "video"),
+          readTrack(depthTrack, d => {
+            decoder.onData(d);
+            frameCount++;
+            frameEl.textContent = frameCount;
+          }, "depth"),
+          readTrack(metadataTrack, d => {
+            try {
+              const json = new TextDecoder().decode(d);
+              const meta = JSON.parse(json);
+              if (meta.fx && meta.fy) {
+                if (!intrinsics) {
+                  log(`Intrinsics: ${meta.width}x${meta.height} fx=${meta.fx.toFixed(0)} fy=${meta.fy.toFixed(0)}`, "data");
+                }
+                intrinsics = meta;
+              }
+              if (meta.gravity) {
+                gravity = meta.gravity;
+                const [gx, gy, gz] = gravity;
+                gravityEl.textContent = `[${gx.toFixed(2)}, ${gy.toFixed(2)}, ${gz.toFixed(2)}]`;
+              }
+            } catch (e) { /* ignore parse errors */ }
+          }, "metadata", false),
+        ]);
+
+        log("Streams ended", "info");
+      } catch (e) {
+        log(`Error: ${e.message}`, "error");
+        console.error(e);
+        setStatus("Error", "red");
+      } finally {
+        cleanup();
+      }
+    });
+
+    stopBtn.addEventListener("click", () => {
+      running = false;
+      try { connection?.close(); } catch {}
+      cleanup();
+      setStatus("Disconnected", "gray");
+      log("Disconnected", "success");
+    });
+
+    function cleanup() {
+      if (analysisTimer) { clearInterval(analysisTimer); analysisTimer = null; }
+      if (decoder) { decoder.destroy(); decoder = null; }
+      if (colorPlayer) { colorPlayer.destroy(); colorPlayer = null; }
+      connection = null;
+      startBtn.disabled = !HAS_WEBCODECS;
+      stopBtn.disabled = true;
+    }
+
+    // ─── Init ────────────────────────────────────────────
+    drawBubbleLevel(null);
+    log("Ready. Enter relay URL and path, then click Connect.", "info");
+
+    if (params.has("relay") || params.has("path")) {
+      log("Auto-connecting from query params...", "info");
+      startBtn.click();
+    }
+  </script>
+</body>
+</html>
