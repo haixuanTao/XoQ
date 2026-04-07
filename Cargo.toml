@@ -162,6 +162,11 @@ path = "examples/openarm_disable.rs"
 required-features = ["can-remote"]
 
 [[example]]
+name = "openarm_set_zero"
+path = "examples/openarm_set_zero.rs"
+required-features = ["can-remote"]
+
+[[example]]
 name = "can_benchmark"
 path = "examples/can_benchmark.rs"
 required-features = ["can-remote"]
