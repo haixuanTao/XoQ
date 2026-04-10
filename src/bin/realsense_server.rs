@@ -49,95 +49,132 @@ fn stamp(data: Vec<u8>, ms: u64) -> Vec<u8> {
 /// SHIFT=0 → 1mm/step, max 1023mm (~1m).
 const DEPTH_SHIFT: u32 = 0;
 
-/// Convert depth u16 mm values to P010 buffer (10-bit grayscale in YUV420).
-/// gray10 = min(depth_mm >> DEPTH_SHIFT, 1023). 0 = no measurement.
-/// Invalid pixels are filled with the farthest (largest depth) neighbor to help
-/// compression and avoid foreground bleeding at depth edges.
-fn depth_to_p010(depth_mm: &[u16], p010_buf: &mut Vec<u8>, width: u32, height: u32) {
-    let w = width as usize;
-    let h = height as usize;
-    let y_bytes = w * h * 2; // Y plane: u16 per pixel
-    let uv_bytes = w * (h / 2) * 2; // UV plane: interleaved u16 U/V, half height
-    p010_buf.resize(y_bytes + uv_bytes, 0);
+/// Reusable scratch buffers for depth→P010 conversion.
+///
+/// The conversion needs several w*h intermediate buffers for hole-filling.
+/// Allocating them fresh every frame would churn ~9 MB/frame through the
+/// allocator (~140 MB/s at 15 fps), which compounds with system-wide memory
+/// pressure over long-running processes. Hoisting them here keeps the steady
+/// state allocation-free.
+struct DepthToP010 {
+    p010_buf: Vec<u8>,
+    gray: Vec<u16>,
+    fill_left: Vec<u16>,
+    fill_right: Vec<u16>,
+    fill_top: Vec<u16>,
+    fill_bot: Vec<u16>,
+}
 
-    // Build 10-bit gray values
-    let mut gray = vec![0u16; w * h];
-    for i in 0..(w * h).min(depth_mm.len()) {
-        let d = depth_mm[i] as u32;
-        if d > 0 {
-            gray[i] = ((d >> DEPTH_SHIFT).min(1023)) as u16;
+impl DepthToP010 {
+    fn new() -> Self {
+        Self {
+            p010_buf: Vec::new(),
+            gray: Vec::new(),
+            fill_left: Vec::new(),
+            fill_right: Vec::new(),
+            fill_top: Vec::new(),
+            fill_bot: Vec::new(),
         }
     }
 
-    // Fill invalid pixels with the FARTHEST (largest depth) nearest neighbor.
-    // At depth edges, holes are caused by occlusion — the true value behind
-    // a foreground object is the background (farther away), so we pick max.
-    //
-    // Horizontal pass: sweep left-to-right and right-to-left independently,
-    // then for each hole pixel, pick the larger (farther) of the two candidates.
-    let mut fill_left = vec![0u16; w * h];
-    let mut fill_right = vec![0u16; w * h];
-    for y in 0..h {
-        let row = y * w;
-        let mut last_valid = 0u16;
-        for x in 0..w {
-            if gray[row + x] != 0 {
-                last_valid = gray[row + x];
+    /// Convert depth u16 mm values to P010 buffer (10-bit grayscale in YUV420).
+    /// gray10 = min(depth_mm >> DEPTH_SHIFT, 1023). 0 = no measurement.
+    /// Invalid pixels are filled with the farthest (largest depth) neighbor to help
+    /// compression and avoid foreground bleeding at depth edges.
+    fn convert(&mut self, depth_mm: &[u16], width: u32, height: u32) -> &[u8] {
+        let w = width as usize;
+        let h = height as usize;
+        let n = w * h;
+        let y_bytes = n * 2; // Y plane: u16 per pixel
+        let uv_bytes = w * (h / 2) * 2; // UV plane: interleaved u16 U/V, half height
+        self.p010_buf.resize(y_bytes + uv_bytes, 0);
+
+        // Build 10-bit gray values
+        self.gray.clear();
+        self.gray.resize(n, 0);
+        for i in 0..n.min(depth_mm.len()) {
+            let d = depth_mm[i] as u32;
+            if d > 0 {
+                self.gray[i] = ((d >> DEPTH_SHIFT).min(1023)) as u16;
             }
-            fill_left[row + x] = last_valid;
         }
-        last_valid = 0;
-        for x in (0..w).rev() {
-            if gray[row + x] != 0 {
-                last_valid = gray[row + x];
-            }
-            fill_right[row + x] = last_valid;
-        }
-    }
-    for i in 0..(w * h) {
-        if gray[i] == 0 {
-            gray[i] = fill_left[i].max(fill_right[i]);
-        }
-    }
 
-    // Vertical pass (fills remaining gaps from rows that were entirely empty)
-    // Same logic: pick the farther of top/bottom neighbors.
-    let mut fill_top = vec![0u16; w * h];
-    let mut fill_bot = vec![0u16; w * h];
-    for x in 0..w {
-        let mut last_valid = 0u16;
+        // Fill invalid pixels with the FARTHEST (largest depth) nearest neighbor.
+        // At depth edges, holes are caused by occlusion — the true value behind
+        // a foreground object is the background (farther away), so we pick max.
+        //
+        // Horizontal pass: sweep left-to-right and right-to-left independently,
+        // then for each hole pixel, pick the larger (farther) of the two candidates.
+        self.fill_left.clear();
+        self.fill_left.resize(n, 0);
+        self.fill_right.clear();
+        self.fill_right.resize(n, 0);
         for y in 0..h {
-            if gray[y * w + x] != 0 {
-                last_valid = gray[y * w + x];
+            let row = y * w;
+            let mut last_valid = 0u16;
+            for x in 0..w {
+                if self.gray[row + x] != 0 {
+                    last_valid = self.gray[row + x];
+                }
+                self.fill_left[row + x] = last_valid;
             }
-            fill_top[y * w + x] = last_valid;
-        }
-        last_valid = 0;
-        for y in (0..h).rev() {
-            if gray[y * w + x] != 0 {
-                last_valid = gray[y * w + x];
+            last_valid = 0;
+            for x in (0..w).rev() {
+                if self.gray[row + x] != 0 {
+                    last_valid = self.gray[row + x];
+                }
+                self.fill_right[row + x] = last_valid;
             }
-            fill_bot[y * w + x] = last_valid;
         }
-    }
-    for i in 0..(w * h) {
-        if gray[i] == 0 {
-            gray[i] = fill_top[i].max(fill_bot[i]);
+        for i in 0..n {
+            if self.gray[i] == 0 {
+                self.gray[i] = self.fill_left[i].max(self.fill_right[i]);
+            }
         }
-    }
 
-    // Write Y plane as MSB-aligned P010: val << 6 (10-bit in top bits of u16)
-    for i in 0..(w * h) {
-        let val = (gray[i] << 6).to_le_bytes(); // little-endian u16
-        p010_buf[i * 2] = val[0];
-        p010_buf[i * 2 + 1] = val[1];
-    }
+        // Vertical pass (fills remaining gaps from rows that were entirely empty)
+        // Same logic: pick the farther of top/bottom neighbors.
+        self.fill_top.clear();
+        self.fill_top.resize(n, 0);
+        self.fill_bot.clear();
+        self.fill_bot.resize(n, 0);
+        for x in 0..w {
+            let mut last_valid = 0u16;
+            for y in 0..h {
+                if self.gray[y * w + x] != 0 {
+                    last_valid = self.gray[y * w + x];
+                }
+                self.fill_top[y * w + x] = last_valid;
+            }
+            last_valid = 0;
+            for y in (0..h).rev() {
+                if self.gray[y * w + x] != 0 {
+                    last_valid = self.gray[y * w + x];
+                }
+                self.fill_bot[y * w + x] = last_valid;
+            }
+        }
+        for i in 0..n {
+            if self.gray[i] == 0 {
+                self.gray[i] = self.fill_top[i].max(self.fill_bot[i]);
+            }
+        }
 
-    // UV plane: neutral chroma (512 in 10-bit = 0x8000 in P010 MSB-aligned)
-    for i in 0..(w * (h / 2)) {
-        let offset = y_bytes + i * 2;
-        p010_buf[offset] = 0x00; // 0x8000 LE
-        p010_buf[offset + 1] = 0x80;
+        // Write Y plane as MSB-aligned P010: val << 6 (10-bit in top bits of u16)
+        for i in 0..n {
+            let val = (self.gray[i] << 6).to_le_bytes(); // little-endian u16
+            self.p010_buf[i * 2] = val[0];
+            self.p010_buf[i * 2 + 1] = val[1];
+        }
+
+        // UV plane: neutral chroma (512 in 10-bit = 0x8000 in P010 MSB-aligned)
+        for i in 0..(w * (h / 2)) {
+            let offset = y_bytes + i * 2;
+            self.p010_buf[offset] = 0x00; // 0x8000 LE
+            self.p010_buf[offset + 1] = 0x80;
+        }
+
+        &self.p010_buf
     }
 }
 
@@ -398,7 +435,7 @@ async fn main() -> Result<()> {
         NvencAv1Encoder::new_cqp(args.width, args.height, args.fps, args.depth_qp, true)?;
     tracing::info!("AV1 depth encoder ready (P7 high-quality, CQP)");
 
-    let mut depth_p010 = Vec::new();
+    let mut depth_converter = DepthToP010::new();
     let mut frame_count = 0u64;
 
     // Outer reconnect loop — camera stays open, only MoQ reconnects
@@ -483,13 +520,8 @@ async fn main() -> Result<()> {
             }
 
             // ---- Depth pipeline: u16 mm → P010 → AV1 10-bit → CMAF → "depth" track ----
-            depth_to_p010(
-                &frames.depth_mm,
-                &mut depth_p010,
-                frames.width,
-                frames.height,
-            );
-            let depth_av1 = depth_encoder.encode_p010(&depth_p010, timestamp_us)?;
+            let depth_p010 = depth_converter.convert(&frames.depth_mm, frames.width, frames.height);
+            let depth_av1 = depth_encoder.encode_p010(depth_p010, timestamp_us)?;
 
             let depth_parsed = parse_av1_frame(&depth_av1);
 
