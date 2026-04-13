@@ -477,7 +477,15 @@ async fn main() -> Result<()> {
         let mut depth_init_segment: Option<Vec<u8>> = None;
 
         // Inner capture + publish loop
+        // Force periodic reconnect to detect dead WebSocket/QUIC connections.
+        // web-transport-ws doesn't detect dead TCP connections without keepalive,
+        // so publisher.closed() may never fire after a relay restart.
+        let reconnect_at = std::time::Instant::now() + std::time::Duration::from_secs(600);
         let disconnect_reason = loop {
+            if std::time::Instant::now() >= reconnect_at {
+                break "Periodic reconnect (10min)".to_string();
+            }
+
             // Capture aligned color + depth
             let frames = camera.capture()?;
             let timestamp_us = frames.timestamp_us;
