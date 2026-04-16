@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "xoq"
-version = "0.3.4"
+version = "0.3.6"
 description = "XOQ - Remote peripherals over P2P"
 license = "Apache-2.0"
 requires-python = ">=3.8"
@@ -21,17 +21,17 @@ classifiers = [
 
 [project.optional-dependencies]
 all = [
-    "xoq-can>=0.3.4",
-    "xoq-opencv>=0.3.4",
-    "xoq-serial>=0.3.4",
+    "xoq-can>=0.3.6",
+    "xoq-opencv>=0.3.6",
+    "xoq-serial>=0.3.6",
 ]
 can = [
-    "xoq-can>=0.3.4",
+    "xoq-can>=0.3.6",
 ]
 opencv = [
-    "xoq-opencv>=0.3.4",
+    "xoq-opencv>=0.3.6",
 ]
 serial = [
-    "xoq-serial>=0.3.4",
+    "xoq-serial>=0.3.6",
 ]
 
