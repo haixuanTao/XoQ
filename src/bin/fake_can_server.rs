@@ -30,6 +30,10 @@ const TAU_MAX: f64 = 18.0;
 const ENABLE_MIT: [u8; 8] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFC];
 const DISABLE_MIT: [u8; 8] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFD];
 
+// Damiao parameter protocol (broadcast 0x7FF, cmd byte at data[2])
+const CAN_PARAM_ID: u32 = 0x7FF;
+const CAN_CMD_REFRESH: u8 = 0xCC;
+
 #[derive(Clone, Default)]
 struct MotorState {
     enabled: bool,
@@ -114,11 +118,27 @@ fn decode_wire_frame(buf: &[u8]) -> Option<(u32, Vec<u8>, usize)> {
 
 /// Process a CAN command and return the wire-encoded response (if any).
 fn process_command(motors: &Motors, can_id: u32, data: &[u8]) -> Option<Vec<u8>> {
-    let idx = motor_index(can_id)?;
     if data.len() != 8 {
         return None;
     }
 
+    // Damiao parameter protocol: broadcast ID 0x7FF, data = [motor_id_lo, motor_id_hi, cmd, ...]
+    if can_id == CAN_PARAM_ID {
+        let motor_id = (data[0] as u32) | ((data[1] as u32) << 8);
+        let idx = motor_index(motor_id)?;
+        let resp_id = (0x11 + idx) as u32;
+        return match data[2] {
+            CAN_CMD_REFRESH => {
+                let motors = motors.lock().unwrap();
+                let m = &motors[idx];
+                let resp = encode_damiao_response(resp_id as u8, m.pos, m.vel, m.tau, 45, 50);
+                Some(encode_wire_frame(resp_id, &resp))
+            }
+            _ => None,
+        };
+    }
+
+    let idx = motor_index(can_id)?;
     let mut motors = motors.lock().unwrap();
 
     // Damiao response IDs are always 0x11 + motor_index, regardless of command ID range
