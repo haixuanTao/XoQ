@@ -7260,7 +7260,7 @@ dependencies = [
 
 [[package]]
 name = "xoq"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "block2",
@@ -7308,7 +7308,7 @@ dependencies = [
 
 [[package]]
 name = "xoq-can"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "pyo3",
  "tokio",
@@ -7325,7 +7325,7 @@ dependencies = [
 
 [[package]]
 name = "xoq-opencv"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "numpy",
  "pyo3",
@@ -7343,7 +7343,7 @@ dependencies = [
 
 [[package]]
 name = "xoq-serial"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "pyo3",
  "xoq",
@@ -7351,7 +7351,7 @@ dependencies = [
 
 [[package]]
 name = "xoq-sounddevice"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "numpy",

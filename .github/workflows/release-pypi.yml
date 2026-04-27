@@ -26,6 +26,12 @@ jobs:
             dir: packages/cv2
           - name: xoq-can
             dir: packages/can
+          - name: xoq-chat
+            dir: packages/chat
+          - name: xoq-sounddevice
+            dir: packages/sounddevice
+          - name: xoq-realsense
+            dir: packages/realsense
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -41,7 +47,7 @@ jobs:
           manylinux: auto
           # manylinux images are CentOS-based, use yum
           before-script-linux: |
-            yum install -y libudev-devel pkgconfig || true
+            yum install -y libudev-devel pkgconfig nasm meson ninja-build alsa-lib-devel || true
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
@@ -60,6 +66,12 @@ jobs:
             dir: packages/cv2
           - name: xoq-can
             dir: packages/can
+          - name: xoq-chat
+            dir: packages/chat
+          - name: xoq-sounddevice
+            dir: packages/sounddevice
+          - name: xoq-realsense
+            dir: packages/realsense
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -75,7 +87,7 @@ jobs:
           manylinux: musllinux_1_2
           # musllinux images are Alpine-based, use apk
           before-script-linux: |
-            apk add --no-cache eudev-dev pkgconfig || true
+            apk add --no-cache eudev-dev pkgconfig nasm meson ninja alsa-lib-dev || true
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
@@ -93,12 +105,26 @@ jobs:
             dir: packages/cv2
           - name: xoq-can
             dir: packages/can
+          - name: xoq-chat
+            dir: packages/chat
+          - name: xoq-sounddevice
+            dir: packages/sounddevice
+          - name: xoq-realsense
+            dir: packages/realsense
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: 3.x
           architecture: x64
+      # dav1d (used by xoq-realsense) needs nasm + meson + ninja to build from source
+      - name: Install dav1d build tools (Windows)
+        if: matrix.package.name == 'xoq-realsense'
+        shell: pwsh
+        run: |
+          choco install -y nasm
+          pip install meson ninja
+          echo "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
@@ -129,11 +155,22 @@ jobs:
             dir: packages/cv2
           - name: xoq-can
             dir: packages/can
+          - name: xoq-chat
+            dir: packages/chat
+          - name: xoq-sounddevice
+            dir: packages/sounddevice
+          - name: xoq-realsense
+            dir: packages/realsense
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: 3.x
+      # dav1d (used by xoq-realsense) needs nasm + meson + ninja to build from source
+      - name: Install dav1d build tools (macOS)
+        if: matrix.package.name == 'xoq-realsense'
+        run: |
+          brew install nasm meson ninja
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
@@ -158,6 +195,12 @@ jobs:
             dir: packages/cv2
           - name: xoq-can
             dir: packages/can
+          - name: xoq-chat
+            dir: packages/chat
+          - name: xoq-sounddevice
+            dir: packages/sounddevice
+          - name: xoq-realsense
+            dir: packages/realsense
     steps:
       - uses: actions/checkout@v4
       - name: Build sdist
