@@ -16,6 +16,7 @@ jobs:
   linux:
     runs-on: ubuntu-22.04
     strategy:
+      fail-fast: false
       matrix:
         # Note: aarch64 removed due to aws-lc-sys cross-compilation issues
         # ARM Linux users can build from sdist
@@ -57,6 +58,7 @@ jobs:
   musllinux:
     runs-on: ubuntu-22.04
     strategy:
+      fail-fast: false
       matrix:
         # Note: aarch64 removed due to aws-lc-sys cross-compilation issues
         package:
@@ -97,7 +99,11 @@ jobs:
   windows:
     runs-on: windows-latest
     strategy:
+      fail-fast: false
       matrix:
+        # xoq-realsense excluded on Windows: no hardware AV1 decoder available
+        # (nvenc is Linux+CUDA, videotoolbox is macOS), and dav1d software decode
+        # cannot build here without pkg-config / dav1d libs.
         package:
           - name: xoq-serial
             dir: packages/serial
@@ -109,22 +115,12 @@ jobs:
             dir: packages/chat
           - name: xoq-sounddevice
             dir: packages/sounddevice
-          - name: xoq-realsense
-            dir: packages/realsense
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: 3.x
           architecture: x64
-      # dav1d (used by xoq-realsense) needs nasm + meson + ninja to build from source
-      - name: Install dav1d build tools (Windows)
-        if: matrix.package.name == 'xoq-realsense'
-        shell: pwsh
-        run: |
-          choco install -y nasm
-          pip install meson ninja
-          echo "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
@@ -141,6 +137,7 @@ jobs:
   macos:
     runs-on: ${{ matrix.platform.runner }}
     strategy:
+      fail-fast: false
       matrix:
         platform:
           # macos-14 supports both x86_64 (cross-compile) and aarch64 (native)
@@ -187,6 +184,7 @@ jobs:
   sdist:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         package:
           - name: xoq-serial
